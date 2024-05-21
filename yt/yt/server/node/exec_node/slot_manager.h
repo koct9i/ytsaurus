@@ -306,6 +306,8 @@ private:
 
     struct TSlotManagerInfo
     {
+        ESlotManagerState State;
+
         int SlotCount;
         int FreeSlotCount;
         int UsedIdleSlotCount;

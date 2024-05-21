@@ -611,6 +611,7 @@ TSlotManager::TSlotManagerInfo TSlotManager::DoGetStateSnapshot() const
     }
 
     return {
+        .State = State_.load(),
         .SlotCount = SlotCount_,
         .FreeSlotCount = static_cast<int>(FreeSlots_.size()),
         .UsedIdleSlotCount = UsedIdleSlotCount_,
@@ -967,6 +968,7 @@ void TSlotManager::BuildOrchid(NYson::IYsonConsumer* consumer) const
 
     BuildYsonFluently(consumer)
         .BeginMap()
+            .Item("state").Value(FormatEnum(slotManagerInfo.State))
             .Item("slot_count").Value(slotManagerInfo.SlotCount)
             .Item("free_slot_count").Value(slotManagerInfo.FreeSlotCount)
             .Item("used_idle_slot_count").Value(slotManagerInfo.UsedIdleSlotCount)
