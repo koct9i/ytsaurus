@@ -24,8 +24,9 @@ import requests
 
 
 class JobProxyHider(object):
-    def __init__(self, env_setup):
+    def __init__(self, env_setup, replacement=None):
         self.bin_path = env_setup.bin_path
+        self.replacement = replacement
 
     def _job_proxy_path(self):
         return os.path.join(self.bin_path, "ytserver-job-proxy")
@@ -34,6 +35,10 @@ class JobProxyHider(object):
         job_proxy_path_hidden = self._job_proxy_path() + ".hidden"
         print_debug("Hiding {} to {}".format(self._job_proxy_path(), job_proxy_path_hidden))
         shutil.move(self._job_proxy_path(), job_proxy_path_hidden)
+        if self.replacement is not None:
+            with open(self._job_proxy_path(), "x") as f:
+                f.write(self.replacement)
+                os.fchmod(f.fileno(), 0o755)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         job_proxy_path_hidden = self._job_proxy_path() + ".hidden"
@@ -357,6 +362,8 @@ class TestUnavailableJobProxy(JobProxyTestBase):
         },
     }
 
+    JOB_PROXY_REPLACEMENT = None
+
     @authors("max42")
     def test_job_abort_on_unavailable_job_proxy(self):
         # JobProxyUnavailable alert is racy by its nature, so we still must ensure
@@ -370,10 +377,22 @@ class TestUnavailableJobProxy(JobProxyTestBase):
 
         wait(lambda: op.get_job_count("completed") > 0)
 
-        with JobProxyHider(self):
+        with JobProxyHider(self, replacement=self.JOB_PROXY_REPLACEMENT):
             wait(lambda: op.get_job_count("aborted") > 2)
 
         op.track()
+
+
+class TestCriUnavailableJobProxy(TestUnavailableJobProxy):
+    JOB_ENVIRONMENT_TYPE = "cri"
+
+
+class TestCriBrokenJobProxy(TestUnavailableJobProxy):
+    JOB_ENVIRONMENT_TYPE = "cri"
+
+    # NB: Executing this "script" by execve() fails with ENOEXEC
+    # but shell executes it as script and fails with exit code 69.
+    JOB_PROXY_REPLACEMENT = "exit 69"
 
 
 class TestJobProxyProfiling(YTEnvSetup):
