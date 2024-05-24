@@ -154,10 +154,9 @@ public:
             JobProxyProcesses_[slotIndex] = jobProxyProcess;
             return jobProxyProcess.Result;
         } catch (const std::exception& ex) {
-            auto error = TError("Failed to spawn job proxy") << ex;
-            Disable(error);
-
-            THROW_ERROR error;
+            auto error = TError("Failed to spawn job proxy")
+                << ex;
+            return MakeFuture(error);
         }
     }
 
