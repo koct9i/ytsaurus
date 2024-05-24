@@ -165,6 +165,16 @@ export clangd_idx_config
 clangd.idx-config: FORCE ## Generate .clangd config to use clangd.idx in clangd.
 	echo "$$clangd_idx_config" >.clangd
 
+pick-hotfix-23.2:
+	git checkout hotfix/23.2
+	git reset --hard upstream/stable/23.2
+	git cherry-pick -x --keep-redundant-commits $(shell git branch --list 'pr/stable/23.2/*') --not upstream/stable/23.2
+
+pick-hotfix-main:
+	git checkout hotfix/main
+	git reset --hard upstream/main
+	git cherry-pick -x --keep-redundant-commits $(shell git branch --list 'pr/main/*') --not upstream/main
+
 ##@ Targets:
 
 %/: %/ya.make FORCE
