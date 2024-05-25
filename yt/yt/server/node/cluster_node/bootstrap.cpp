@@ -253,6 +253,12 @@ public:
         ControlActionQueue_ = New<TActionQueue>("Control");
         JobActionQueue_ = New<TActionQueue>("Job");
 
+        ControlActionQueue_->GetInvoker()->RegisterWaitTimeObserver([] (TDuration waitTime) {
+            if (waitTime > TDuration::Seconds(1)) {
+                YT_LOG_WARNING("Control execution wait time: %v", waitTime);
+            }
+        });
+
         BIND(&TBootstrap::DoInitialize, this)
             .AsyncVia(GetControlInvoker())
             .Run()

@@ -9,6 +9,8 @@
 
 #include <yt/yt/core/utilex/random.h>
 
+#include <yt/yt/core/logging/log.h>
+
 #include <type_traits>
 
 namespace NYT::NConcurrency {
@@ -90,11 +92,15 @@ void TRetryingInvocationTimePolicy::SetOptions(
 
 TInstant TRetryingInvocationTimePolicy::NextDeadline()
 {
+    TInstant res;
     if (IsInBackoffMode()) {
-        return TInstant::Now() + Backoff_.GetBackoff();
+        res = TInstant::Now() + Backoff_.GetBackoff();
+    } else {
+        res = TDefaultInvocationTimePolicy::NextDeadline();
     }
-
-    return TDefaultInvocationTimePolicy::NextDeadline();
+    NYT::NLogging::TLogger Logger("test");
+    YT_LOG_DEBUG("TRetryingInvocationTimePolicy::NextDeadline %v %v", res - TInstant::Now(), Backoff_.GetInvocationIndex());
+    return res;
 }
 
 bool TRetryingInvocationTimePolicy::IsOutOfBandProhibited()
