@@ -103,7 +103,7 @@ static_assert(
     "Max timestamp count cannot be larger than UINT16_MAX");
 
 // Only for static tables.
-constexpr i64 MaxRowWeightLimit = 128_MB;
+constexpr i64 MaxRowWeightLimit = 1024_MB;
 constexpr i64 MaxKeyWeightLimit = 256_KB;
 
 // NB(psushin): increasing this parameter requires rewriting all chunks,
