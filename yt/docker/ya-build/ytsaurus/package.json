@@ -7,7 +7,7 @@
     },
     "params": {
         "format": "docker",
-        "docker_target": "ytsaurus",
+        "docker_target": "ytsaurus-gpu",
         "docker_build_arg": {
             "PYTHON_BUILD_BASE": "build-ytsaurus-python-binaries"
         },

@@ -222,3 +222,22 @@ FROM scratch AS ytsaurus-server-override
 COPY --from=ytsaurus-server-override-bloated / /
 
 ##########################################################################################
+
+FROM ytsaurus AS ytsaurus-gpu
+
+RUN curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+  && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+RUN curl https://developer.download.nvidia.com/compute/cuda/repos/$(. /etc/os-release;echo $ID$VERSION_ID | sed -e 's/\.//g')/x86_64/cuda-keyring_1.0-1_all.deb -o cuda-keyring_1.0-1_all.deb
+RUN dpkg -i cuda-keyring_1.0-1_all.deb
+
+RUN echo "nohup tini -- containerd &" >/run.sh
+RUN echo "/usr/bin/ytserver-node --config /config/ytserver-exec-node.yson" >>/run.sh
+RUN chmod +x /run.sh
+
+RUN apt-get update
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-container-toolkit
+
+RUN export PATH=/usr/local/cuda-12.2/bin${PATH:+:${PATH}}
