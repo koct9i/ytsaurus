@@ -33,6 +33,7 @@ define newline
 endef
 
 rebuild-release-branch: checkout-release-branch ## Rebuild release branch by resetting it to the corresponding stable branch and cherry-picking fragments from mirror-ytsaurus/patches/stable/version/*.
+	git remote update origin
 	git reset --hard ${BRANCH_STABLE_BASE}
 	$(foreach fragment,${BRANCH_FRAGMENTS},git cherry-pick -x --keep-redundant-commits ${fragment} --not HEAD $(newline))
 
