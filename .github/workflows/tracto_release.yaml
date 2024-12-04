@@ -11,7 +11,7 @@ env:
 
 jobs:
   release-image:
-    runs-on: tractoai-runners
+    runs-on: tractoai-runners-no-underlay
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
