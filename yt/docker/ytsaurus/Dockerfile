@@ -94,6 +94,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install 
   containerd \
   openjdk-11-jdk
 
+COPY --from=cr.ai.nebius.cloud/crnf2coti090683j5ssi/junk/khlebnikov/containerd-sif-snapshotter /containerd-sif-snapshotter /usr/local/bin
+
 RUN ln -s /usr/lib/jvm/java-11-openjdk-amd64 /opt/jdk11
 
 # Default python to be used by python3 jobs, for compatibility with jupyter tutorial.
