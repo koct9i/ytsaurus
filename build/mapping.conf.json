@@ -4,6 +4,7 @@
         "registry_endpoint": "https://devtools-registry.s3.yandex.net"
     },
     "resources": {
+        "9687621433": "https://github.com/koct9i/junk/releases/download/yatool-test-junk-2025-09-03/test_tool-aarch64.tgz",
         "6277415836": "{registry_endpoint}/6277415836",
         "2214720943": "{registry_endpoint}/2214720943",
         "2214542408": "{registry_endpoint}/2214542408",
