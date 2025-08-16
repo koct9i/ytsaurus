@@ -537,6 +537,17 @@ class TestYtBinary(object):
         assert not json.loads(response)["value"]
 
     @authors("ilyaibraev")
+    def test_execute_binary_stdin(self, yt_cli: YtCli):
+        file_path = "//home/wrapper_test/binary_file"
+        data = b"\x00\xff\x7f"
+        process = yt_cli.run_in_background([
+            "yt", "execute", "write_file", "{path=\\\"" + file_path + "\\\";input_format=binary}"
+        ])
+        stdout, stderr = process.communicate(input=data)
+        assert process.returncode == 0
+        assert yt_cli.check_output(["yt", "read-file", file_path]) == data
+
+    @authors("ilyaibraev")
     def test_brotli_write(self, yt_cli: YtCli):
         table_path = "//home/wrapper_test/test_table"
         yt_cli.check_output(["yt", "write", table_path, "--format", "dsv", "--config", "{proxy={content_encoding=br}}"], stdin="x=1\nx=2\nx=3\nx=4\n")
