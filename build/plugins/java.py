@@ -104,7 +104,7 @@ def onjava_module(unit, *args):
         if valid:
             data['EXTERNAL_DEPENDENCIES'] = [valid]
 
-    # IMPORTANT before switching vcs_info.py to python3 the value was always evaluated to $YMAKE_PYTHON but no
+    # IMPORTANT before switching vcs_info.py to python3 the value was always evaluated to $YMAKE_PYTHON3 but no
     # code in java dart parser extracts its value only checks this key for existance.
     data['EMBED_VCS'] = [['yes']]
     # FORCE_VCS_INFO_UPDATE is responsible for setting special value of VCS_INFO_DISABLE_CACHE__NO_UID__
