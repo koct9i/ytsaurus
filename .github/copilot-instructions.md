@@ -11,18 +11,22 @@ Development branch: `main`
 YTsaurus release branches: `stable/<major>.<minor>`
 CHYT release branches: `chyt/<major>.<minor>`
 
-**Format for PR branches:** `members/<user-name>/<short-description>`
+**MANDATORY Format for PR branches:** `members/<user-name>/<short-description>`
+
+**You MUST ALWAYS use this format for all PR branches. No exceptions.**
 
 **Rules:**
 - Lowercase only
 - Hyphens for word separation
 - Description max 30 characters
 
-This format is **required** (enforced by branch protection rule) in upstream repo and recommended in forks.
+This format is **required** (enforced by branch protection rule) in upstream repo and **MUST** be used in forks.
 
 **Examples:**
 ```
 members/khlebnikov/copilot-instructions
+members/john-doe/fix-memory-leak
+members/alice/update-docs
 ```
 
 ## Additional Resources
