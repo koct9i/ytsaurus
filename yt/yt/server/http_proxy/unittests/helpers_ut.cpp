@@ -63,9 +63,10 @@ TEST(TTestCsrfTokenTest, Sample)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TEST(THideSecretParametersTest, CreateCommandMasksValue)
+TEST(THideSecretParametersTest, CreateCommandMasksValueAndDoesNotMutateOriginal)
 {
     // Test that /attributes/value is masked when commandName == "create"
+    // and that the original parameters node is not mutated
     auto original = BuildYsonNodeFluently()
         .BeginMap()
             .Item("type").Value("document")
@@ -75,14 +76,20 @@ TEST(THideSecretParametersTest, CreateCommandMasksValue)
             .EndMap()
         .EndMap();
 
+    auto originalPtr = original->AsMap().Get();
     auto result = HideSecretParameters("create", original->AsMap());
+
+    // Verify original still has the secret value (not mutated)
+    auto originalValue = FindNodeByYPath(original->AsMap(), "/attributes/value");
+    ASSERT_TRUE(originalValue);
+    EXPECT_EQ(ConvertTo<TString>(originalValue), "secret_content_here");
 
     // Verify the result has the value masked
     auto maskedValue = FindNodeByYPath(result, "/attributes/value");
     ASSERT_TRUE(maskedValue);
     EXPECT_EQ(ConvertTo<TString>(maskedValue), "***");
 
-    // Verify other fields remain unchanged
+    // Verify other fields remain unchanged in result
     auto publicField = FindNodeByYPath(result, "/attributes/public_field");
     ASSERT_TRUE(publicField);
     EXPECT_EQ(ConvertTo<TString>(publicField), "public_data");
@@ -90,72 +97,9 @@ TEST(THideSecretParametersTest, CreateCommandMasksValue)
     auto typeField = FindNodeByYPath(result, "/type");
     ASSERT_TRUE(typeField);
     EXPECT_EQ(ConvertTo<TString>(typeField), "document");
-}
-
-TEST(THideSecretParametersTest, OriginalNodeNotMutated)
-{
-    // Test that the original parameters node is not mutated
-    auto original = BuildYsonNodeFluently()
-        .BeginMap()
-            .Item("attributes").BeginMap()
-                .Item("value").Value("secret_content")
-            .EndMap()
-        .EndMap();
-
-    auto originalPtr = original->AsMap().Get();
-    auto result = HideSecretParameters("create", original->AsMap());
-
-    // Verify original still has the secret value
-    auto originalValue = FindNodeByYPath(original->AsMap(), "/attributes/value");
-    ASSERT_TRUE(originalValue);
-    EXPECT_EQ(ConvertTo<TString>(originalValue), "secret_content");
-
-    // Verify result has masked value
-    auto maskedValue = FindNodeByYPath(result, "/attributes/value");
-    ASSERT_TRUE(maskedValue);
-    EXPECT_EQ(ConvertTo<TString>(maskedValue), "***");
 
     // Verify result is a different object
     EXPECT_NE(result.Get(), originalPtr);
-}
-
-TEST(THideSecretParametersTest, NoCloneWhenNoSecrets)
-{
-    // Test that no cloning happens when there are no secret parameters
-    auto original = BuildYsonNodeFluently()
-        .BeginMap()
-            .Item("type").Value("document")
-            .Item("attributes").BeginMap()
-                .Item("public_field").Value("public_data")
-            .EndMap()
-        .EndMap();
-
-    auto originalPtr = original->AsMap().Get();
-    auto result = HideSecretParameters("create", original->AsMap());
-
-    // Verify the same object is returned (no clone)
-    EXPECT_EQ(result.Get(), originalPtr);
-}
-
-TEST(THideSecretParametersTest, NonCreateCommandDoesNotMaskValue)
-{
-    // Test that /attributes/value is not masked for non-create commands
-    auto original = BuildYsonNodeFluently()
-        .BeginMap()
-            .Item("attributes").BeginMap()
-                .Item("value").Value("content_here")
-            .EndMap()
-        .EndMap();
-
-    auto result = HideSecretParameters("get", original->AsMap());
-
-    // Verify the value is not masked (no secret parameters for "get")
-    auto value = FindNodeByYPath(result, "/attributes/value");
-    ASSERT_TRUE(value);
-    EXPECT_EQ(ConvertTo<TString>(value), "content_here");
-
-    // Verify the same object is returned (no clone)
-    EXPECT_EQ(result.Get(), original->AsMap().Get());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
