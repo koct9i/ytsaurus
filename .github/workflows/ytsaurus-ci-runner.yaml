@@ -22,8 +22,8 @@ on:
 jobs:
   create-task-for-ytsaurus-ci:
     name: Create new task for YTsaurus CI
+    if: github.repository == 'ytsaurus/ytsaurus' && always()
     runs-on: ubuntu-latest
-    if: always()
     steps:
       - name: Checkout ytsaurus
         uses: actions/checkout@v4

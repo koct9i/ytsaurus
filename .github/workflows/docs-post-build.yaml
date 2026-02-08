@@ -8,6 +8,7 @@ on:
 
 jobs:
   post-build:
+    if: github.repository == 'ytsaurus/ytsaurus'
     permissions: write-all
     runs-on: ubuntu-latest
     steps:

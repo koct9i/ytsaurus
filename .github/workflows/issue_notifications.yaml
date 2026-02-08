@@ -7,6 +7,7 @@ on:
 jobs:
   telegram:
     name: Telegram
+    if: github.repository == 'ytsaurus/ytsaurus'
     runs-on: ubuntu-latest
     steps:
       - name: Send telegram message

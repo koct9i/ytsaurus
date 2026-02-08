@@ -11,6 +11,7 @@ on:
 jobs:
   pr-notifications:
     name: Send PR notifications
+    if: github.repository == 'ytsaurus/ytsaurus'
     runs-on: ubuntu-latest
     steps:
       - name: Send telegram message

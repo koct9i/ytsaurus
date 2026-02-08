@@ -23,6 +23,7 @@ env:
 jobs:
   start-vm:
     name: Start VM
+    if: github.repository == 'ytsaurus/ytsaurus'
     runs-on: trampoline
     outputs:
       label: ${{ steps.start-yc-runner.outputs.label }}
