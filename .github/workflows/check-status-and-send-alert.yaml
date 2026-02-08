@@ -17,8 +17,8 @@ on:
 jobs:
   send-alert:
     name: Check status and send alert
+    if: github.repository == 'ytsaurus/ytsaurus' && always()
     runs-on: ubuntu-latest
-    if: always()
     steps:
       - name: Checkout ytsaurus
         uses: actions/checkout@v4

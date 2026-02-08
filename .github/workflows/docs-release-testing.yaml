@@ -5,6 +5,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'ytsaurus/ytsaurus'
     runs-on: ubuntu-latest
     permissions: write-all
     env:
