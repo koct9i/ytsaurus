@@ -4112,7 +4112,7 @@ Parameters:
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `query_id` | Yes |                           | ID of the query to abort. |
-| `stage` | No |                           | Query Tracker stage to use (e.g., `production`, `testing`). |
+| `stage` | No | `production` | Query Tracker stage to use (e.g., `production`, `testing`). |
 
 Input data:
 
@@ -4202,10 +4202,10 @@ Parameters:
 | `filter` | No |                           | Additional filter string. |
 | `limit` | No | `100` | Maximum number of queries to return. |
 | `attributes` | No |                           | List of attributes to fetch for each query. |
-| `search_by_token_prefix` | No |                           | Enable search by token prefix. |
-| `use_full_text_search` | No |                           | Enable full-text search. |
-| `tutorial_filter` | No |                           | Filter tutorial queries. |
-| `sort_order` | No |                           | Sort order for the results. |
+| `search_by_token_prefix` | No | `false` | Enable search by token prefix. |
+| `use_full_text_search` | No | `false` | Enable full-text search. |
+| `tutorial_filter` | No | `false` | Filter tutorial queries. |
+| `sort_order` | No | `cursor` | Sort order for the results. |
 
 Input data:
 
