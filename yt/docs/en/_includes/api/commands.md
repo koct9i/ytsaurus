@@ -117,7 +117,7 @@ Semantics:
 
 Detailed description.
 
-- `ping_tx` pings the transaction on the server (including all the parent transactions if `ping_ancestors`is specified). This way you can extend the TTL for the transaction.
+- `ping_tx` pings the transaction on the server (including all the parent transactions if `ping_ancestor_transactions` is specified). This way you can extend the TTL for the transaction.
 - If the transaction started at the time `s` with the timeout (TTL) of `t`, then the transaction will complete at `s+t` by default.
 - If you ping the transaction at the time `r` (`s < r < s + t`), it will be extended until `r + t`.
 
@@ -237,13 +237,15 @@ Input data:
 Output data:
 
 - Type: `structured`.
-- Value: Transaction ID.
+- Value: Map with `transaction_id` key containing the new transaction ID.
 
 Example:
 
 ```bash
 PARAMETERS { "transaction_id" = "0-54b-1-36223d20" }
-OUTPUT "0-54c-1-bb49086d"
+OUTPUT {
+    "transaction_id" = "0-54c-1-bb49086d";
+}
 ```
 
 ### ping_transaction
@@ -1113,7 +1115,7 @@ Command properties: **Mutating**, **Light**.
 
 Semantics:
 
-- Pings the distributed session transaction on the server (including all parent transactions if `ping_ancestors` is specified), thereby extending the transaction's TTL.
+- Pings the distributed session transaction on the server (including all parent transactions if `ping_ancestor_transactions` is specified), thereby extending the transaction's TTL.
 
 Parameters:
 
@@ -1995,7 +1997,7 @@ Input data:
 
 Output data:
 
-- Type: `null`.
+- Type: `null` (API v3), `structured` (API v4).
 
 Example:
 
@@ -2151,7 +2153,7 @@ Command properties: **Mutating**, **Light**.
 
 Semantics:
 
-- Pings the distributed session transaction on the server (including all parent transactions if `ping_ancestors` is specified), thereby extending the transaction's TTL.
+- Pings the distributed session transaction on the server (including all parent transactions if `ping_ancestor_transactions` is specified), thereby extending the transaction's TTL.
 
 Parameters:
 
@@ -2233,31 +2235,6 @@ INPUT { "id" = 2; "value" = 2.000; };
 
 OUTPUT "sample_signed_result"
 ```
-
-### alter_table
-
-Command properties: **Mutating**, **Light**.
-
-Semantics:
-
-- Modify table metadata and settings.
-
-Parameters:
-
-| **Parameter** | **Required** | **Default value** | **Description** |
-| ------------ | ------------- | ------------------------- | ----------------------- |
-| `path` | Yes |                           | Path to the table. |
-| `schema` | No |                           | New table schema. |
-| `dynamic` | No |                           | Whether the table should be dynamic. |
-| `upstream_replica_id` | No |                           | Upstream replica ID for table replication. |
-
-Input data:
-
-- Type: `null`.
-
-Output data:
-
-- Type: `structured`.
 
 ### enable_table_replica
 
@@ -2652,7 +2629,7 @@ Parameters:
 
 | **Parameter** | **Required** | **Default value** | **Description** |
 | -------------- | ------------- | ------------------------- | ------------------------------------------------------------ |
-| `operation_type` | Yes |                           | Operation type (can be one of these: `map`, `reduce`, `map_reduce`, `remote-copy`, `erase`, `sort`, `merge`, `vanilla`). |
+| `operation_type` | Yes |                           | Operation type (can be one of these: `map`, `reduce`, `map_reduce`, `remote_copy`, `erase`, `sort`, `merge`, `vanilla`). |
 | `spec` | Yes |                           | Operation specification. For more information, see [Setting up operations](../../user-guide/data-processing/operations/operations-options.md). |
 
 Input data:
@@ -2926,7 +2903,7 @@ PARAMETERS {
 OUTPUT "37878b-ba919c15-cdc97f3a-8a983ece"
 ```
 
-### remote-copy
+### remote_copy
 
 Command properties: **Mutating**, **Light**.
 
@@ -3053,10 +3030,9 @@ Output data:
 | `incomplete` | `bool` | Whether the list of operations is complete. That is, whether all the operations in the range `from_time` — `to_time` are listed. |
 | `type_counts` | `map<string, int>` | Map indicating the number of operations of various types that match all specified filters (except the filter by type). |
 | `state_counts` | `map<string, int>` | Map indicating the number of operations with various states that match all specified filters (except the filter by state). |
-| `type_counts` | `map<string, int>` | Map indicating the number of operations of various types that match all specified filters (except the filter by type). |
 | `pool_counts` | `map<string, int>` | Map indicating the number of operations in various pools that match all specified filters (except the filter by pool). |
 | `pool_tree_counts` | `map<string, int>` | Map indicating the number of operations in various pool trees that match all specified filters (except the filter by pool tree). |
-| `failed_job_count` | `int` | Number of unsuccessful jobs with the `failed` state. |
+| `failed_jobs_count` | `int` | Number of unsuccessful jobs with the `failed` state. |
 
 Example:
 
@@ -3066,7 +3042,7 @@ OUTPUT {
       "operations" = [
           {
               "id" = "7001208d-fef089b3-3fe03e8-453d99a1";
-              "type" = "remote-copy";
+              "type" = "remote_copy";
               "state" = "initializing";
               "authenticated_user" = "user-name";
               "brief_progress" = {};
@@ -3103,7 +3079,7 @@ OUTPUT {
           "sort" = 1126;
           "reduce" = 886;
           "map_reduce" = 1609;
-          "remote-copy" = 24;
+          "remote_copy" = 24;
       };
       "failed_jobs_count" = 109;
 }
@@ -3860,6 +3836,7 @@ Parameters:
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `operation_id (operation_alias)` | Yes |                           | Operation ID. |
 | `job_id` | Yes |                           | Job ID. |
+| `type` | No |                            | Type of stderr to retrieve: `user_job_stderr` or `gpu_check_stderr`. |
 | `offset` | No |                            | Offset from the beginning in bytes. |
 | `limit` | No |                            | Maximum size in bytes. |
 
@@ -3876,10 +3853,10 @@ Example:
 
 ```bash
 PARAMETERS { "operation_id" = "33ab3f-bf1df917-b35fe9ed-c70a4bf4"; "job_id" = "1225d-1f2fb8c4-f1075d39-5fb7cdff"; "offset" = 500; "limit" = 100 }
-OUTPUT {
-OUTPUT   "total_size" = 1000;
-OUTPUT   "end_offset" = 600;
-OUTPUT }
+# Response parameters:
+# total_size = 1000
+# end_offset = 600
+# Binary output: (stderr content)
 ```
 
 
@@ -4091,6 +4068,7 @@ Parameters:
 | `query` | Yes |                           | Query text to execute. |
 | `settings` | No |                           | Engine-specific query settings. |
 | `files` | No |                           | List of files to attach to the query. |
+| `stage` | No |                           | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `draft` | No | `false` | If `true`, the query is created as a draft and not executed immediately. |
 | `annotations` | No |                           | User-defined annotations for the query. |
 | `access_control_object` | No |                           | Access control object name. |
@@ -4104,13 +4082,15 @@ Input data:
 Output data:
 
 - Type: `structured`.
-- Value: Query ID.
+- Value: Map with `query_id` key containing the query ID.
 
 Example:
 
 ```bash
 PARAMETERS { "engine" = "yql"; "query" = "SELECT * FROM `//tmp/table`" }
-OUTPUT "1a2b3c4d-5e6f7g8h-9i0j1k2l-3m4n5o6p"
+OUTPUT {
+    "query_id" = "1a2b3c4d-5e6f7g8h-9i0j1k2l-3m4n5o6p";
+}
 ```
 
 ### abort_query
@@ -4132,6 +4112,7 @@ Parameters:
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `query_id` | Yes |                           | ID of the query to abort. |
+| `stage` | No | `production` | Query Tracker stage to use (e.g., `production`, `testing`). |
 
 Input data:
 
@@ -4167,6 +4148,7 @@ Parameters:
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `query_id` | Yes |                           | Query ID. |
+| `stage` | No |                           | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `attributes` | No |                           | List of attributes to fetch. |
 
 Input data:
@@ -4209,6 +4191,7 @@ Parameters:
 
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ------------------------------------------------------------ |
+| `stage` | No | `production` | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `from_time` | No |                           | Start time for query filtering. |
 | `to_time` | No |                           | End time for query filtering. |
 | `cursor_time` | No |                           | Cursor time for pagination. |
@@ -4219,6 +4202,10 @@ Parameters:
 | `filter` | No |                           | Additional filter string. |
 | `limit` | No | `100` | Maximum number of queries to return. |
 | `attributes` | No |                           | List of attributes to fetch for each query. |
+| `search_by_token_prefix` | No | `false` | Enable search by token prefix. |
+| `use_full_text_search` | No | `false` | Enable full-text search. |
+| `tutorial_filter` | No | `false` | Filter tutorial queries. |
+| `sort_order` | No | `cursor` | Sort order for the results. |
 
 Input data:
 
@@ -4260,6 +4247,7 @@ Parameters:
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `query_id` | Yes |                           | Query ID. |
 | `result_index` | No | `0` | Index of the result (queries can produce multiple results). |
+| `stage` | No |                           | Query Tracker stage to use (e.g., `production`, `testing`). |
 
 Input data:
 
@@ -4300,6 +4288,7 @@ Parameters:
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `query_id` | Yes |                           | Query ID. |
 | `result_index` | No | `0` | Index of the result to read. |
+| `stage` | No |                           | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `columns` | No |                           | List of columns to read. |
 | `lower_row_index` | No | `0` | Lower row index for range reading. |
 | `upper_row_index` | No |                           | Upper row index for range reading. |
@@ -4338,6 +4327,7 @@ Parameters:
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ----------------------- |
 | `query_id` | Yes |                           | Query ID. |
+| `stage` | No | `production` | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `annotations` | No |                           | New annotations for the query. |
 | `access_control_object` | No |                           | New access control object name. |
 | `access_control_objects` | No |                           | New list of access control object names. |
@@ -4375,7 +4365,9 @@ Parameters:
 
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ----------------------- |
+| `stage` | No | `production` | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `attributes` | No |                           | List of attributes to fetch. |
+| `settings` | No |                           | Query Tracker settings. |
 
 Input data:
 
@@ -4391,8 +4383,12 @@ Example:
 ```bash
 PARAMETERS { }
 OUTPUT {
-    "supported_engines" = ["yql"; "chyt"; "spyt"];
+    "query_tracker_stage" = "production";
     "cluster_name" = "primary";
+    "supported_features" = { ... };
+    "access_control_objects" = [ ... ];
+    "clusters" = [ ... ];
+    "engines_info" = { ... };
 }
 ```
 
@@ -4414,6 +4410,7 @@ Parameters:
 
 | **Parameter** | **Required** | **Default value** | **Description** |
 | ------------ | ------------- | ------------------------- | ----------------------- |
+| `stage` | No | `production` | Query Tracker stage to use (e.g., `production`, `testing`). |
 | `query` | Yes |                           | Query text to analyze. |
 | `engine` | Yes |                           | Query engine. |
 | `settings` | No |                           | Engine-specific settings. |
@@ -5154,7 +5151,7 @@ Output data:
 
 ### issue_token
 
-Command properties: **Mutating**, **Light`.
+Command properties: **Mutating**, **Light**.
 
 Semantics:
 
@@ -5314,7 +5311,7 @@ This command is only available from API version 4 onward.
 
 {% endnote %}
 
-Command properties: **Non-mutating**, **Light**.
+Command properties: **Mutating**, **Light**.
 
 Semantics:
 
@@ -5344,7 +5341,7 @@ This command is only available from API version 4 onward.
 
 {% endnote %}
 
-Command properties: **Non-mutating**, **Light**.
+Command properties: **Mutating**, **Light**.
 
 Semantics:
 
@@ -6212,7 +6209,7 @@ Output data:
 
 ### remote_copy
 
-Command properties: **Mutating**, **Light`.
+Command properties: **Mutating**, **Light**.
 
 Semantics:
 
