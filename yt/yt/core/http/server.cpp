@@ -641,7 +641,13 @@ void TRequestPathMatcher::Add(const std::string& pattern, const IHttpHandlerPtr&
         Subtrees_[pattern] = handler;
 
         auto withoutSlash = pattern.substr(0, pattern.size() - 1);
-        Subtrees_[withoutSlash] = handler;
+        if (!withoutSlash.empty()) {
+            Subtrees_[withoutSlash] = handler;
+        } else {
+            // For the root "/" pattern, also register as exact match to ensure
+            // that requests to "/" are handled even before subtree traversal.
+            Exact_[pattern] = handler;
+        }
     } else {
         Exact_[pattern] = handler;
     }
