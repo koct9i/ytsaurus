@@ -179,7 +179,7 @@ bool TContext::TryParseCommandName()
                                 .Item("output_type").Value(descriptor.OutputType)
                                 .Item("is_volatile").Value(descriptor.Volatile)
                                 .Item("is_heavy").Value(descriptor.Heavy)
-                                .Item("parameters").Do([&] (auto fluent) {
+                                .Item("input_parameters_schema").Do([&] (auto fluent) {
                                     driver->WriteCommandParameterSchema(
                                         descriptor.CommandName,
                                         fluent.GetConsumer());

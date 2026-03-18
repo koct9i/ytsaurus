@@ -428,15 +428,15 @@ class TestHttpProxy(HttpProxyTestBase):
             assert len(commands) > 0
             for command in commands:
                 assert "name" in command
-                assert "parameters" not in command
+                assert "input_parameters_schema" not in command
 
             commands_with_params = requests.get(url + "?parameters=1").json()
             assert isinstance(commands_with_params, list)
             assert len(commands_with_params) == len(commands)
             for command in commands_with_params:
                 assert "name" in command
-                assert "parameters" in command
-                params = command["parameters"]
+                assert "input_parameters_schema" in command
+                params = command["input_parameters_schema"]
                 assert params.get("type_name") == "struct"
                 assert "members" in params
 
