@@ -44,7 +44,7 @@ To function, `Exec Nodes` require access to the disk. First, this is necessary t
 
 ## YQL Agent
 
-YQL agent instances orchestrate the execution of YQL queries, converting them into a chain of map/reduce operations.
+YQL Agent instances orchestrate the execution of [YQL](../../yql/index.md) queries on {{product-name}}. Each instance receives a YQL query, compiles it using the YQL optimizer, and converts it into a chain of {{product-name}} map/reduce operations that are submitted to the cluster's scheduler. YQL Agent handles query planning, monitors execution progress, and collects results. Multiple YQL Agent instances can run simultaneously to provide parallelism and fault tolerance.
 
 ## Proxy
 
@@ -107,4 +107,12 @@ The Cypress Proxy is a caching proxy for Cypress metadata operations. It reduces
 ### Strawberry Controller
 
 The Strawberry Controller manages the lifecycle of long-running Vanilla operations on the cluster. It monitors Cypress for speclet nodes that describe how an operation should be started (image, resources, configuration), and automatically starts, stops, and restarts those operations as needed. The Strawberry Controller is required for [CHYT](../../user-guide/data-processing/chyt/about-chyt.md) (ClickHouse over {{product-name}}) and is also used by SPYT (Spark over {{product-name}}) and JupYT (Jupyter over {{product-name}}).
+
+### CHYT
+
+CHYT (ClickHouse over {{product-name}}) is a technology that runs a cluster of [ClickHouse](https://clickhouse.com/) servers directly on {{product-name}} compute nodes via a Vanilla operation. Such an operation is called a *clique*. CHYT enables fast analytical SQL queries directly over {{product-name}} tables without copying data to a separate ClickHouse installation. Cliques are managed through the [Strawberry Controller](#strawberry-controller). For more information, see the [CHYT documentation](../../user-guide/data-processing/chyt/about-chyt.md).
+
+### SPYT
+
+SPYT (Spark over {{product-name}}) is a technology that runs an [Apache Spark](https://spark.apache.org/) cluster on {{product-name}} compute nodes via a Vanilla operation. SPYT allows users to run Spark jobs that read from and write to {{product-name}} tables, leveraging the full power of the Spark ecosystem including DataFrames, Spark SQL, Spark Streaming, and MLlib. Spark clusters are managed through the [Strawberry Controller](#strawberry-controller). For more information, see the [SPYT documentation](../../user-guide/data-processing/spyt/overview.md).
 
