@@ -5,7 +5,7 @@ Adding new master cells always requires complete cluster downtime. In simplified
 ## Preparation
 
 1. You need to prepare a new static config and add information about the new cells to it.
-2. You can prepare @cluster_connection with the new cells in advance (to learn more about @cluster_connection, see item 15).
+2. You can prepare @cluster_connection with the new cells in advance (to learn more about @cluster_connection, see item 16).
 
 {% note warning "Important" %}
 
@@ -56,7 +56,7 @@ yt set //sys/@config/multicell_manager/testing/allow_master_cell_with_empty_role
 yt set //sys/@config/multicell_manager/descriptors/{cell_tag}/roles []
 ```
 
-If this is not done, the roles `chunk_host` and `cypress_node_host` will be automatically assigned to the new master cells (for more details about the existing roles, see item 13). Subsequent changes to the roles may result in data loss.
+If this is not done, the roles `chunk_host` and `cypress_node_host` will be automatically assigned to the new master cells (for more details about the existing roles, see item 14). Subsequent changes to the roles may result in data loss.
 
 Also note that when the first secondary cell is added, the primary cell's default roles change from `[cypress_node_host, transaction_coordinator, chunk_host]` to `[cypress_node_host, transaction_coordinator]`. Therefore, when performing this type of expansion, the primary cell's roles must also be specified explicitly.
 
@@ -102,7 +102,17 @@ Make sure that all master servers, including other secondary cells if any, are i
 
 You can search for the "Leader active"/"Follower active" message in the logs.
 
-### 13. Assign roles to the new cells
+### 13. Build another read-only snapshot, restart the master servers, and exit read-only mode
+```bash
+yt-admin build-master-snapshots —read-only —wait-for-snapshot-completion
+```
+
+After the new cells are registered and global objects are replicated, this state must be captured in a snapshot. Once the snapshot is built, restart the master servers (repeat steps 7–9) and exit read-only mode again:
+```bash
+yt-admin master-exit-read-only
+```
+
+### 14. Assign roles to the new cells
 
 You need secondary master cells to shard the load, and there are different methods to do that. Here you need to choose what kind of work the new cell will be doing.
 
@@ -123,7 +133,7 @@ Remember that proxy servers are not up at this point in time, and any access to 
 
 You can assign the roles later, but do not forget to do that; if you do, the new cells will not be doing anything useful.
 
-### 14. Deploy nodes (to the version with the new config)
+### 15. Deploy nodes (to the version with the new config)
 
 {% note warning "Important" %}
 
@@ -131,7 +141,7 @@ This step is a point of no return. In theory, you can still roll back the additi
 
 {% endnote %}
 
-### 15. Write new cells to cluster connection
+### 16. Write new cells to cluster connection
 Cluster connection resides in Cypress at `//sys/@cluster_connection/secondary_masters`.
 You need to write cells in the following format:
 ```bash
@@ -151,17 +161,17 @@ The new cells must be ADDED. If the cluster already contains secondary master ce
 
 {% endnote %}
 
-### 16. Enable chunk refresh and chunk requisition update
-If you did not disable them at step 2, skip this step.
+### 17. Enable chunk refresh and chunk requisition update
+If you did not disable them at step 2, skip this step.
 ```bash
 yt set //sys/@config/chunk_manager/enable_chunk_refresh %true
 yt set //sys/@config/chunk_manager/enable_chunk_requisition_update %true
 ```
-### 17. Wait until all nodes are registered and the chunk refresh process completes successfully
+### 18. Wait until all nodes are registered and the chunk refresh process completes successfully
 Depending on the number of nodes and chunks on the cluster, this step may take a significant amount of time.
 
-### 18. Deploy other components
+### 19. Deploy other components
 Deploy proxies, schedulers, controller agents, and other components (if any are remaining).
 Components must be deployed to the version with the updated config.
 
-### 19. Wait for the cluster to return to its normal operation mode
+### 20. Wait for the cluster to return to its normal operation mode
