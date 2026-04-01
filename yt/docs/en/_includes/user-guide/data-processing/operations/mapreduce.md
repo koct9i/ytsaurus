@@ -112,7 +112,7 @@ The MapReduce operation supports the following additional options (default value
 * `compressed_data_size_per_map_job` — limit on compressed data size per map job.
 * `map_locality_timeout` (5 sec) — time during which the scheduler waits for resources to free up on specific cluster nodes to ensure data locality for map jobs.
 * `reduce_locality_timeout` (1 min) — time during which the scheduler waits for resources to free up on specific cluster nodes to ensure data locality for reduce jobs.
-* `max_partition_factor` — maximum partition factor for hierarchical partitioning. When set, limits the branching factor in the partition tree.
+* `max_partition_factor` — maximum partition factor for hierarchical partitioning. Limits the branching factor in the partition tree.
 * `input_query` — a SQL-like expression used for pre-filtering input data before it reaches the mapper. Only columns referenced in the query are read from the input tables. More details in the [Operation options](../../../../user-guide/data-processing/operations/operations-options.md).
 * `input_schema` — schema for the `input_query` expression. Must be specified only when `input_query` is provided.
 
