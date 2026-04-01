@@ -107,6 +107,14 @@ The MapReduce operation supports the following additional options (default value
 * `reducer/enable_input_table_index` / `reduce_combiner/enable_input_table_index` (false) — whether to send the input table index to the `reduce` / `reduce_combine` phase (the `enable_input_table_index` option is specified within the `reducer` / `reduce_combiner` section).
 * `mapper/output_streams` / `reduce_combiner/output_streams` — description of intermediate output streams from the `map` or `reduce_combine` phase, more details [below](#output_streams) (the `output_streams` option is specified within the `mapper` / `reduce_combiner` section).
 * `disable_sorted_input_in_reducer` (false) — disables the sorting of inputs of reduce jobs. Other guarantees are maintained. In particular, all rows with the same keys from `reduce_by` columns will be sent to a single reduce job.
+* `enable_table_index_if_has_trivial_mapper` (false) — enables table indices and schematization in case of a trivial mapper (when the `mapper` option is not specified).
+* `data_weight_per_reduce_job` — target amount of data (in bytes) at the input of each reduce job. Can also be specified as `data_size_per_reduce_job`.
+* `compressed_data_size_per_map_job` — limit on compressed data size per map job.
+* `map_locality_timeout` (5 sec) — time during which the scheduler waits for resources to free up on specific cluster nodes to ensure data locality for map jobs.
+* `reduce_locality_timeout` (1 min) — time during which the scheduler waits for resources to free up on specific cluster nodes to ensure data locality for reduce jobs.
+* `max_partition_factor` — maximum partition factor for hierarchical partitioning. When set, limits the branching factor in the partition tree.
+* `input_query` — a SQL-like expression used for pre-filtering input data before it reaches the mapper. Only columns referenced in the query are read from the input tables. More details in the [Operation options](../../../../user-guide/data-processing/operations/operations-options.md).
+* `input_schema` — schema for the `input_query` expression. Must be specified only when `input_query` is provided.
 
 By default (and for historical reasons), MapReduce operations support `table_index` only in a mapper. If you need to have `table_index` in a reducer, you can enable the `enable_input_table_index` option within the `reducer` (or `reduce_combiner`) section. In the future, this option may be enabled by default. To enable sorting by `table_index` in a reducer, you need to add a column with the name `$table_index` to `sort_by`.
 
