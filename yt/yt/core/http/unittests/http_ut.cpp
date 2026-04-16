@@ -1401,6 +1401,46 @@ TEST_P(THttpServerTest, ConnectionsDropRoutine)
     YT_UNUSED_FUTURE(pool->Connect(address));
 }
 
+TEST_P(THttpServerTest, RetryOnStalePooledConnection)
+{
+    if (GetParam()) {
+        // This test is not TLS-specific.
+        return;
+    }
+
+    Server->AddHandler("/ok", New<TOKHttpHandler>());
+    Server->Start();
+
+    auto clientConfig = New<NHttp::TClientConfig>();
+    clientConfig->MaxIdleConnections = 1;
+    auto client = NHttp::CreateClient(clientConfig, Poller);
+
+    // Make initial request to populate the connection pool.
+    auto rsp = WaitFor(client->Get(TestUrl + "/ok")).ValueOrThrow();
+    ASSERT_EQ(EStatusCode::OK, rsp->GetStatusCode());
+    ReadAll(rsp);
+
+    // Stop the server — this closes the server side of all connections,
+    // making pooled connections stale.
+    Server->Stop();
+
+    // Re-create and start a new server on the same port so the retry
+    // can establish a fresh connection.
+    ServerConfig = New<NHttp::TServerConfig>();
+    ServerConfig->Port = TestPort;
+    Server = NHttp::CreateServer(ServerConfig, Poller);
+    Server->AddHandler("/ok", New<TOKHttpHandler>());
+    Server->Start();
+
+    // The pooled connection is now stale: the server sent FIN, but
+    // the poller may not have processed it yet, so IsIdle() still
+    // returns true.  DoRequest should detect the
+    // "Connection was closed before the first byte of HTTP message"
+    // error and transparently retry with a fresh connection.
+    auto rsp2 = WaitFor(client->Get(TestUrl + "/ok")).ValueOrThrow();
+    ASSERT_EQ(EStatusCode::OK, rsp2->GetStatusCode());
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 INSTANTIATE_TEST_SUITE_P(WithoutTls, THttpServerTest, ::testing::Values(false));
