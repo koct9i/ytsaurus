@@ -414,6 +414,55 @@ TEST_F(TYsonParserTest, TrailingSlashes)
     Run(quote + escapedSlash + quote);
 }
 
+TEST_F(TYsonParserTest, SingleLineComments)
+{
+    // Comment before value
+    {
+        InSequence dummy;
+        EXPECT_CALL(Mock, OnInt64Scalar(42));
+        Run("// comment\n42");
+    }
+
+    // Comment after value (trailing)
+    {
+        InSequence dummy;
+        EXPECT_CALL(Mock, OnInt64Scalar(1));
+        Run("1 // trailing comment");
+    }
+
+    // Comments in a map
+    {
+        InSequence dummy;
+        EXPECT_CALL(Mock, OnBeginMap());
+        EXPECT_CALL(Mock, OnKeyedItem("cpu"));
+        EXPECT_CALL(Mock, OnInt64Scalar(8));
+        EXPECT_CALL(Mock, OnKeyedItem("memory"));
+        EXPECT_CALL(Mock, OnStringScalar("16GB"));
+        EXPECT_CALL(Mock, OnEndMap());
+        Run(
+            "// global config\n"
+            "{\n"
+            "    cpu = 8; // tuned after profiling\n"
+            "    memory = \"16GB\";\n"
+            "}"
+        );
+    }
+
+    // Comment-only input (no value)
+    {
+        InSequence dummy;
+        EXPECT_CALL(Mock, OnListItem()).Times(0);
+        Run("// just a comment", EYsonType::ListFragment);
+    }
+
+    // Multiple consecutive comments
+    {
+        InSequence dummy;
+        EXPECT_CALL(Mock, OnStringScalar("hello"));
+        Run("// line 1\n// line 2\n// line 3\nhello");
+    }
+}
+
 TEST_F(TYsonParserTest, ListFragment)
 {
     InSequence dummy;

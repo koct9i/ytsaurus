@@ -426,6 +426,52 @@ TEST(TYsonPullParserTest, TrailingSlashes)
     EXPECT_TRUE(item2.IsEndOfStream());
 }
 
+TEST(TYsonPullParserTest, SingleLineComments)
+{
+    // Comment before value
+    EXPECT_EQ(GetYsonPullSignature("// comment\n42"), "42");
+
+    // Comment after value (trailing)
+    EXPECT_EQ(GetYsonPullSignature("1 // trailing"), "1");
+
+    // Comments in a map
+    EXPECT_EQ(
+        GetYsonPullSignature(
+            "// config\n"
+            "{\n"
+            "    cpu = 8; // cores\n"
+            "    mem = 16;\n"
+            "}"
+        ),
+        "{ 'cpu' 8 'mem' 16 }"
+    );
+
+    // Comments in a list
+    EXPECT_EQ(
+        GetYsonPullSignature(
+            "[\n"
+            "    // first element\n"
+            "    1;\n"
+            "    // second element\n"
+            "    2;\n"
+            "]"
+        ),
+        "[ 1 2 ]"
+    );
+
+    // Multiple consecutive comments
+    EXPECT_EQ(GetYsonPullSignature("// a\n// b\n// c\nhello"), "'hello'");
+
+    // Empty comment
+    EXPECT_EQ(GetYsonPullSignature("//\n99"), "99");
+
+    // Comment-only input
+    EXPECT_EQ(GetYsonPullSignature("// just a comment", EYsonType::ListFragment), "");
+
+    // Comment does not affect string literals
+    EXPECT_EQ(GetYsonPullSignature("\"hello // world\""), "'hello // world'");
+}
+
 TEST(TYsonPullParserTest, Entity)
 {
     EXPECT_EQ(GetYsonPullSignature(" # "), "#");
