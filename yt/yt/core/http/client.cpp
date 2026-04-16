@@ -309,8 +309,7 @@ private:
         const THeadersPtr& headers,
         int redirectCount = 0)
     {
-        // Retry at most once to handle stale pooled connections.
-        for (int attempt = 0; attempt < 2; ++attempt) {
+        while (true) {
             try {
                 auto requestData = StartAndWriteHeaders(method, url, headers);
 
@@ -336,10 +335,12 @@ private:
 
                 return requestData.Response;
             } catch (const std::exception& ex) {
-                // Retry once if a pooled connection was closed by the server
+                // Always retry if a pooled connection was closed by the server
                 // between the pool validation check and the actual request.
                 // This is safe because no response bytes were received.
-                if (attempt == 0 && Config_->MaxIdleConnections > 0 &&
+                // Multiple pooled connections may be stale, so we must
+                // keep retrying until we get a fresh one.
+                if (Config_->MaxIdleConnections > 0 &&
                     TError(ex).FindMatching([] (const TError& error) {
                         return error.GetMessage() == StaleConnectionErrorMessage;
                     }))
@@ -351,7 +352,6 @@ private:
                 throw;
             }
         }
-        YT_ABORT();
     }
 };
 
