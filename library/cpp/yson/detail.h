@@ -672,7 +672,7 @@ namespace NYson {
             char SkipSpaceAndGetChar() {
                 if (!TBaseStream::IsEmpty()) {
                     char ch = *TBaseStream::Begin();
-                    if (!IsSpaceFast(ch)) {
+                    if (!IsSpaceFast(ch) && ch != '/') {
                         return ch;
                     }
                 }
@@ -693,12 +693,40 @@ namespace NYson {
                         TBaseStream::template Refresh<AllowFinish>();
                         continue;
                     }
-                    if (!IsSpaceFast(*TBaseStream::Begin())) {
-                        break;
+                    char ch = *TBaseStream::Begin();
+                    if (IsSpaceFast(ch)) {
+                        TBaseStream::Advance(1);
+                        continue;
+                    }
+                    if (ch == '/' &&
+                        TBaseStream::Begin() + 1 < TBaseStream::End() &&
+                        *(TBaseStream::Begin() + 1) == '/')
+                    {
+                        TBaseStream::Advance(2);
+                        SkipToEndOfLine<AllowFinish>();
+                        continue;
+                    }
+                    break;
+                }
+                return TBaseStream::template GetChar<AllowFinish>();
+            }
+
+            template <bool AllowFinish>
+            void SkipToEndOfLine() {
+                while (true) {
+                    if (TBaseStream::IsEmpty()) {
+                        if (TBaseStream::IsFinished()) {
+                            return;
+                        }
+                        TBaseStream::template Refresh<AllowFinish>();
+                        continue;
+                    }
+                    if (*TBaseStream::Begin() == '\n') {
+                        TBaseStream::Advance(1);
+                        return;
                     }
                     TBaseStream::Advance(1);
                 }
-                return TBaseStream::template GetChar<AllowFinish>();
             }
         };
 
