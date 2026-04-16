@@ -22,6 +22,10 @@ using namespace NNet;
 
 ////////////////////////////////////////////////////////////////////////////////
 
+constinit const auto Logger = HttpLogger;
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TClient
     : public IClient
 {
@@ -302,29 +306,47 @@ private:
         const THeadersPtr& headers,
         int redirectCount = 0)
     {
-        auto requestData = StartAndWriteHeaders(method, url, headers);
+        for (int attempt = 0; ; ++attempt) {
+            try {
+                auto requestData = StartAndWriteHeaders(method, url, headers);
 
-        if (body) {
-            WaitFor(requestData.Request->WriteBody(*body))
-                .ThrowOnError();
-        } else {
-            WaitFor(requestData.Request->Close())
-                .ThrowOnError();
-        }
+                if (body) {
+                    WaitFor(requestData.Request->WriteBody(*body))
+                        .ThrowOnError();
+                } else {
+                    WaitFor(requestData.Request->Close())
+                        .ThrowOnError();
+                }
 
-        if (Config_->IgnoreContinueResponses) {
-            while (requestData.Response->GetStatusCode() == EStatusCode::Continue) {
-                requestData.Response->Reset();
+                if (Config_->IgnoreContinueResponses) {
+                    while (requestData.Response->GetStatusCode() == EStatusCode::Continue) {
+                        requestData.Response->Reset();
+                    }
+                }
+
+                // Waits for response headers internally.
+                auto redirectUrl = requestData.Response->TryGetRedirectUrl();
+                if (redirectUrl && redirectCount < Config_->MaxRedirectCount) {
+                    return DoRequest(method, *redirectUrl, body, headers, redirectCount + 1);
+                }
+
+                return requestData.Response;
+            } catch (const std::exception& ex) {
+                // Retry once if a pooled connection was closed by the server
+                // between the pool validation check and the actual request.
+                // This is safe because no response bytes were received.
+                if (attempt == 0 && Config_->MaxIdleConnections > 0 &&
+                    TError(ex).FindMatching([] (const TError& error) {
+                        return error.GetMessage() == "Connection was closed before the first byte of HTTP message";
+                    }))
+                {
+                    YT_LOG_DEBUG(ex, "Retrying request due to stale pooled connection (Url: %v)",
+                        SanitizeUrl(url));
+                    continue;
+                }
+                throw;
             }
         }
-
-        // Waits for response headers internally.
-        auto redirectUrl = requestData.Response->TryGetRedirectUrl();
-        if (redirectUrl && redirectCount < Config_->MaxRedirectCount) {
-            return DoRequest(method, *redirectUrl, body, headers, redirectCount + 1);
-        }
-
-        return requestData.Response;
     }
 };
 
