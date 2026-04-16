@@ -299,6 +299,9 @@ private:
         }));
     }
 
+    static constexpr TStringBuf StaleConnectionErrorMessage =
+        "Connection was closed before the first byte of HTTP message";
+
     IResponsePtr DoRequest(
         EMethod method,
         const std::string& url,
@@ -306,7 +309,8 @@ private:
         const THeadersPtr& headers,
         int redirectCount = 0)
     {
-        for (int attempt = 0; ; ++attempt) {
+        // Retry at most once to handle stale pooled connections.
+        for (int attempt = 0; attempt < 2; ++attempt) {
             try {
                 auto requestData = StartAndWriteHeaders(method, url, headers);
 
@@ -337,7 +341,7 @@ private:
                 // This is safe because no response bytes were received.
                 if (attempt == 0 && Config_->MaxIdleConnections > 0 &&
                     TError(ex).FindMatching([] (const TError& error) {
-                        return error.GetMessage() == "Connection was closed before the first byte of HTTP message";
+                        return error.GetMessage() == StaleConnectionErrorMessage;
                     }))
                 {
                     YT_LOG_DEBUG(ex, "Retrying request due to stale pooled connection (Url: %v)",
@@ -347,6 +351,7 @@ private:
                 throw;
             }
         }
+        YT_ABORT();
     }
 };
 
