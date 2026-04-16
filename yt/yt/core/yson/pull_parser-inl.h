@@ -310,14 +310,14 @@ bool TYsonPullParser::IsMarker(char marker)
 {
     MaybeSkipSemicolon();
 
-    auto c = Lexer_.template SkipSpaceAndGetChar<false>();
+    auto c = Lexer_.SkipSpaceAndGetChar<false>();
     if (c == marker) {
         return true;
     }
     while (c == ';') {
         Lexer_.Advance(1);
         SyntaxChecker_.OnSeparator();
-        c = Lexer_.template SkipSpaceAndGetChar<false>();
+        c = Lexer_.SkipSpaceAndGetChar<false>();
     }
     return c == marker;
 }
@@ -648,7 +648,7 @@ typename TVisitor::TResult TYsonPullParser::NextImpl(TVisitor* visitor)
                 // Possible start of // comment.
                 // SkipSpaceAndGetChar handles // comments; if the char
                 // after skipping is still '/', it was a lone slash (invalid).
-                if (Lexer_.template SkipSpaceAndGetChar<true>() == '/') {
+                if (Lexer_.SkipSpaceAndGetChar<true>() == '/') {
                     THROW_ERROR_EXCEPTION("Unexpected %Qv while parsing node", '/');
                 }
                 continue;

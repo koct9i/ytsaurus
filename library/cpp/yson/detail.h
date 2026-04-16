@@ -702,6 +702,10 @@ namespace NYson {
                         TBaseStream::Begin() + 1 < TBaseStream::End() &&
                         *(TBaseStream::Begin() + 1) == '/')
                     {
+                        // Note: if '/' is the very last byte of the current buffer
+                        // in a streaming parser, the second '/' may reside in the
+                        // next chunk and this check will not recognise the comment.
+                        // For in-memory parsing this never happens.
                         TBaseStream::Advance(2);
                         SkipToEndOfLine<AllowFinish>();
                         continue;
