@@ -152,6 +152,8 @@ user_attribute_cache:
 
 The config key is `user_attribute_cache` and is of type `TUserAttributeCacheConfig`, which extends `TAsyncExpiringCacheConfig`.
 
+### CHYT integration
+
 CHYT uses a dedicated service account (`YT_CHYT_CACHE_USER`) to populate attribute caches. The `TableAttributeCache` in CHYT is configured to use this account (`config->TableAttributeCache->UserName = CacheUserName`) to ensure consistent caching behavior.
 
 ---
