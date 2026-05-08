@@ -410,6 +410,8 @@ items:
            href: user-guide/proxy/grpc.md
          - name: Task proxy
            href: user-guide/proxy/task.md
+         - name: User impersonation
+           href: user-guide/proxy/impersonation.md
        - name: Problems
          when: audience == "public"
          items:
