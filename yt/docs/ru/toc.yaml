@@ -430,7 +430,7 @@ items:
             href: user-guide/proxy/grpc.md
           - name: Task-прокси
             href: user-guide/proxy/task.md
-          - name: Импersonация пользователей
+          - name: Имперсонация пользователей
             href: user-guide/proxy/impersonation.md
       - name: Импорт и экспорт данных
         when: audience == "public"
