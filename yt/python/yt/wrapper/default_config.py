@@ -120,6 +120,7 @@ class DefaultConfigType(TypedDict, total=False):
     cache_token: bool
     token: Optional[str]
     token_path: Optional[str]
+    token_command: Optional[str]
     allow_receive_token_by_current_ssh_session: bool
     oauth_client_id: str
     oauth_client_secret: str
@@ -580,6 +581,9 @@ default_config = {
     "token": None,
     # $HOME/.yt/token by default
     "token_path": None,
+    # Shell command whose stdout is used as the token.
+    # Takes precedence over allow_receive_token_by_current_ssh_session but is checked after token_path.
+    "token_command": None,
     # This option enables receiving token automatically
     # using current session ssh secret.
     "allow_receive_token_by_current_ssh_session": True,
@@ -1164,6 +1168,7 @@ SHORTCUTS = {
 
     "YT_TOKEN": "token",
     "YT_TOKEN_PATH": "token_path",
+    "YT_TOKEN_COMMAND": "token_command",
     "YT_USE_TOKEN": "enable_token",
     "YT_CHECK_TOKEN": "check_token",
     "YT_ACCEPT_ENCODING": "proxy/accept_encoding",

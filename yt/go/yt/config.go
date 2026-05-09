@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,13 @@ type Config struct {
 	//
 	// If Token is not set, value of YT_TOKEN environment variable is used instead.
 	Token string
+
+	// TokenCommand is a shell command whose stdout is used as the token.
+	//
+	// If TokenCommand is not set, value of YT_TOKEN_COMMAND environment variable is used instead.
+	//
+	// TokenCommand takes precedence over ReadTokenFromFile when Token and YT_TOKEN are not set.
+	TokenCommand string
 
 	// ReadTokenFromFile
 	//
@@ -314,6 +322,21 @@ func (c *Config) GetToken() string {
 
 	if token := os.Getenv("YT_TOKEN"); token != "" {
 		return token
+	}
+
+	tokenCommand := c.TokenCommand
+	if tokenCommand == "" {
+		tokenCommand = os.Getenv("YT_TOKEN_COMMAND")
+	}
+	if tokenCommand != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "sh", "-c", tokenCommand).Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "yt: failed to get token from token_command: %v\n", err)
+		} else if token := strings.TrimRight(string(out), "\n"); token != "" {
+			return token
+		}
 	}
 
 	if c.ReadTokenFromFile {
