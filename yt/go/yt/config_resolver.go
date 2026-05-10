@@ -57,8 +57,7 @@ func NormalizeConfig(c *Config, backend ConfigBackend) (*Config, error) {
 		resolved.Token = firstNonEmpty(os.Getenv("YT_TOKEN"), tokenFromFile)
 	}
 	if resolved.TokenPath == "" {
-		tokenPathFromEnv := firstNonEmpty(os.Getenv("YT_TOKEN_FILE"), os.Getenv("YT_TOKEN_PATH"))
-		resolved.TokenPath = firstNonEmpty(tokenPathFromEnv, tokenPathFromFile)
+		resolved.TokenPath = firstNonEmpty(lookupTokenFileFromEnv(), tokenPathFromFile)
 	}
 	if !resolved.ReadTokenFromFile && resolved.Token == "" && resolved.TokenPath != "" {
 		resolved.ReadTokenFromFile = true
@@ -220,9 +219,13 @@ func isReadable(path string) bool {
 }
 
 func extractProfileConfig(parsed map[string]any) (map[string]any, error) {
-	configVersion, ok := readInt(parsed["config_version"])
-	if !ok {
+	configVersionValue, exists := parsed["config_version"]
+	if !exists {
 		return parsed, nil
+	}
+	configVersion, ok := readInt(configVersionValue)
+	if !ok {
+		return nil, fmt.Errorf("unknown config version %v", configVersionValue)
 	}
 
 	if configVersion != 2 {
@@ -283,8 +286,14 @@ func readInt(value any) (int64, bool) {
 	case uint64:
 		return int64(v), true
 	case float64:
+		if !isWholeFloat64(v) {
+			return 0, false
+		}
 		return int64(v), true
 	case float32:
+		if !isWholeFloat64(float64(v)) {
+			return 0, false
+		}
 		return int64(v), true
 	default:
 		return 0, false

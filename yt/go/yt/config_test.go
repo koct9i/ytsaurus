@@ -296,3 +296,14 @@ func TestNormalizeConfigInvalidBool(t *testing.T) {
 	_, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
 	require.Error(t, err)
 }
+
+func TestNormalizeConfigInvalidFloatVersion(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".yt")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(`{"config_version"=2.9;}`), 0o644))
+	t.Setenv("HOME", home)
+
+	_, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
+	require.Error(t, err)
+}

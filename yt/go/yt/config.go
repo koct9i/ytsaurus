@@ -3,6 +3,7 @@ package yt
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -283,11 +284,7 @@ func (c *Config) GetClusterURL() (ClusterURL, error) {
 }
 
 func (c *Config) getTokenFileFromEnv() (string, error) {
-	tokenFile := os.Getenv("YT_TOKEN_FILE")
-	if tokenFile == "" {
-		tokenFile = os.Getenv("YT_TOKEN_PATH")
-	}
-
+	tokenFile := lookupTokenFileFromEnv()
 	if tokenFile != "" {
 		if strings.HasPrefix(tokenFile, "~/") {
 			u, err := user.Current()
@@ -299,6 +296,18 @@ func (c *Config) getTokenFileFromEnv() (string, error) {
 		return tokenFile, nil
 	}
 	return "", nil
+}
+
+func lookupTokenFileFromEnv() string {
+	tokenFile := os.Getenv("YT_TOKEN_FILE")
+	if tokenFile == "" {
+		tokenFile = os.Getenv("YT_TOKEN_PATH")
+	}
+	return tokenFile
+}
+
+func isWholeFloat64(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value == math.Trunc(value)
 }
 
 func (c *Config) getPathToTokenFile() (string, error) {
