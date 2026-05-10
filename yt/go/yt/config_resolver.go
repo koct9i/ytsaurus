@@ -137,7 +137,7 @@ func readEnvBool(key string) (value bool, ok bool, err error) {
 
 	intValue, err := strconv.Atoi(raw)
 	if err != nil {
-		return false, true, fmt.Errorf("failed to parse %s as int bool: %w", key, err)
+		return false, true, fmt.Errorf("failed to parse %s as boolean (expected 0 or 1): %w", key, err)
 	}
 	return intValue != 0, true, nil
 }
@@ -174,13 +174,17 @@ func loadYTConfigFromFile() (map[string]any, error) {
 			return nil, fmt.Errorf("failed to parse YT config from %s: %w", configPath, err)
 		}
 	default:
-		return nil, fmt.Errorf("incorrect config_format %q", configFormat)
+		return nil, fmt.Errorf("unsupported config format %q (expected yson or json)", configFormat)
 	}
 
 	return extractProfileConfig(parsed)
 }
 
 func resolveYTConfigPath() (string, bool) {
+	// Keep the same lookup order as python sdk:
+	// 1) YT_CONFIG_PATH (if points to existing file),
+	// 2) ~/.yt/config,
+	// 3) /etc/ytclient.conf.
 	currentPath := os.Getenv("YT_CONFIG_PATH")
 	if currentPath != "" && isFile(currentPath) {
 		return currentPath, true
