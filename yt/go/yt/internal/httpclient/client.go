@@ -837,8 +837,14 @@ func NewHTTPClient(c *yt.Config) (yt.Client, error) {
 	if c.CredentialsProviderFn == nil && c.TVMFn == nil {
 		if c.Credentials != nil {
 			client.credentials = c.Credentials
-		} else if token := c.GetToken(); token != "" {
-			client.credentials = &yt.TokenCredentials{Token: token}
+		} else {
+			token, err := c.GetTokenOrRunCommand(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			if token != "" {
+				client.credentials = &yt.TokenCredentials{Token: token}
+			}
 		}
 	}
 

@@ -1,11 +1,14 @@
 package yt
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -74,6 +77,30 @@ type Config struct {
 	//
 	// If Token is not set, value of YT_TOKEN environment variable is used instead.
 	Token string
+
+	// TokenCommand is a command to run to obtain an authentication token.
+	//
+	// The command is executed locally. Its first line of stdout is used as the token.
+	// The command must exit with code 0. Non-zero exit, timeout, or empty stdout are errors.
+	// stdin is closed. The child process does not inherit YT_TOKEN from the environment.
+	//
+	// TokenCommand takes precedence over ReadTokenFromFile / token file lookup.
+	//
+	// If TokenCommand is not set, value of YT_TOKEN_COMMAND environment variable is used instead.
+	// YT_TOKEN_COMMAND is split on whitespace to form the argv (no shell is involved).
+	//
+	// Example config usage:
+	//
+	//	&yt.Config{
+	//	    Proxy:        "hahn",
+	//	    TokenCommand: []string{"op", "read", "op://infra/ytsaurus-hahn/token"},
+	//	}
+	TokenCommand []string
+
+	// TokenCommandTimeout is the timeout for running TokenCommand.
+	//
+	// A zero value means the default timeout of 10 seconds.
+	TokenCommandTimeout time.Duration
 
 	// ReadTokenFromFile
 	//
@@ -331,6 +358,106 @@ func (c *Config) GetToken() string {
 	}
 
 	return ""
+}
+
+// DefaultTokenCommandTimeout is the default timeout for running TokenCommand.
+const DefaultTokenCommandTimeout = 10 * time.Second
+
+// GetTokenCommandTimeout returns the effective timeout for TokenCommand execution.
+func (c *Config) GetTokenCommandTimeout() time.Duration {
+	if c.TokenCommandTimeout == 0 {
+		return DefaultTokenCommandTimeout
+	}
+	return c.TokenCommandTimeout
+}
+
+// runTokenCommand executes a command and returns the first line of its stdout as a token.
+// stdin is closed. YT_TOKEN is removed from the child environment.
+func runTokenCommand(ctx context.Context, argv []string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec
+
+	// Close stdin and remove YT_TOKEN from child environment.
+	cmd.Stdin = nil
+	cmd.Env = filterTokenEnv(os.Environ())
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimRight(stderr.String(), "\n")
+		if stderrStr != "" {
+			return "", fmt.Errorf("token_command %q failed: %w\nstderr:\n  %s",
+				argv[0], err, strings.ReplaceAll(stderrStr, "\n", "\n  "))
+		}
+		return "", fmt.Errorf("token_command %q failed: %w", argv[0], err)
+	}
+
+	scanner := bufio.NewScanner(&stdout)
+	if !scanner.Scan() {
+		return "", fmt.Errorf("token_command %q produced empty output", argv[0])
+	}
+	token := scanner.Text()
+	if token == "" {
+		return "", fmt.Errorf("token_command %q produced empty token", argv[0])
+	}
+	return token, nil
+}
+
+// filterTokenEnv returns a copy of env with YT_TOKEN removed.
+func filterTokenEnv(env []string) []string {
+	filtered := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "YT_TOKEN=") {
+			filtered = append(filtered, kv)
+		}
+	}
+	return filtered
+}
+
+// GetTokenOrRunCommand resolves the token using the full lookup order:
+//  1. Config.Token / YT_TOKEN
+//  2. Config.TokenCommand / YT_TOKEN_COMMAND  (error on failure, no fallback)
+//  3. Config.ReadTokenFromFile / token file
+//
+// It returns ("", nil) when no token source is configured.
+func (c *Config) GetTokenOrRunCommand(ctx context.Context) (string, error) {
+	// 1. Explicit token or environment variable.
+	if c.Token != "" {
+		return c.Token, nil
+	}
+	if token := os.Getenv("YT_TOKEN"); token != "" {
+		return token, nil
+	}
+
+	// 2. Token command.
+	argv := c.TokenCommand
+	if len(argv) == 0 {
+		if cmdStr := os.Getenv("YT_TOKEN_COMMAND"); cmdStr != "" {
+			argv = strings.Fields(cmdStr)
+		}
+	}
+	if len(argv) > 0 {
+		return runTokenCommand(ctx, argv, c.GetTokenCommandTimeout())
+	}
+
+	// 3. Token file.
+	if c.ReadTokenFromFile {
+		tokenFile, err := c.getPathToTokenFile()
+		if err != nil {
+			return "", err
+		}
+		token, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", nil
+		}
+		return strings.Trim(string(token), "\n"), nil
+	}
+
+	return "", nil
 }
 
 func (c *Config) GetLogger() log.Structured {
