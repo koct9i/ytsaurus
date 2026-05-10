@@ -683,11 +683,16 @@ def _get_token_command(client):
     config = get_config(client)
     auth_class = config["auth_class"]
     token_command = config["token_command"]
+    is_auth_class_configured = (
+        auth_class is not None
+        and bool(auth_class.get("module_name"))
+        and bool(auth_class.get("class_name"))
+    )
 
     if not token_command:
         return None
 
-    if auth_class is not None and auth_class["module_name"] and auth_class["class_name"]:
+    if is_auth_class_configured:
         raise YtConfigError(
             "Only one of `auth_class` and `token_command` should be specified in the config"
         )
@@ -768,6 +773,8 @@ def _get_token_from_command(token_command, client):
     if stdout.endswith("\r\n"):
         token = stdout[:-2]
     elif stdout.endswith("\n"):
+        token = stdout[:-1]
+    elif stdout.endswith("\r"):
         token = stdout[:-1]
     else:
         token = stdout
