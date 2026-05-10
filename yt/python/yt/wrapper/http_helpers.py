@@ -21,6 +21,7 @@ import re
 import shlex
 import subprocess
 import sys
+import textwrap
 import time
 import types
 import typing
@@ -679,8 +680,9 @@ def _get_token_from_config(client):
 
 
 def _get_token_command(client):
-    auth_class = get_config(client)["auth_class"]
-    token_command = get_config(client)["token_command"]
+    config = get_config(client)
+    auth_class = config["auth_class"]
+    token_command = config["token_command"]
 
     if not token_command:
         return None
@@ -707,7 +709,7 @@ def _get_token_command(client):
 def _format_token_command_error(message, stderr=None):
     stderr = (stderr or "").strip()
     if stderr:
-        return "{}\nstderr:\n  {}".format(message, stderr.replace("\n", "\n  "))
+        return "{}\nstderr:\n{}".format(message, textwrap.indent(stderr, "  "))
     return message
 
 
@@ -763,10 +765,14 @@ def _get_token_from_command(token_command, client):
         )
 
     stdout = completed_process.stdout or ""
-    token, separator, tail = stdout.partition("\n")
-    token = token.rstrip("\r")
+    if stdout.endswith("\r\n"):
+        token = stdout[:-2]
+    elif stdout.endswith("\n"):
+        token = stdout[:-1]
+    else:
+        token = stdout
 
-    if separator and tail:
+    if "\n" in token or "\r" in token:
         raise YtTokenError(
             "Failed to obtain YTsaurus token using token_command: "
             "stdout should contain a single line"
