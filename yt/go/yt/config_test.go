@@ -3,6 +3,7 @@ package yt
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -191,4 +192,107 @@ func TestClusterURL(t *testing.T) {
 			require.Equal(t, test.expectedURL, url)
 		})
 	}
+}
+
+func TestNormalizeConfigFromFileAndEnv(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".yt")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+
+	configPath := filepath.Join(configDir, "config")
+	content := []byte(`{
+		"proxy"={
+			"url"="file-proxy";
+			"http_proxy_role"="file-http-role";
+			"rpc_proxy_role"="file-rpc-role";
+			"network_name"="file-network";
+			"proxy_discovery_url"="file-hosts";
+			"enable_proxy_discovery"=%false;
+			"prefer_https"=%true;
+			"tvm_only"=%true;
+		};
+		"token"="file-token";
+	}`)
+	require.NoError(t, os.WriteFile(configPath, content, 0o644))
+
+	t.Setenv("HOME", home)
+	t.Setenv("YT_PROXY", "env-proxy")
+	t.Setenv("YT_HTTP_PROXY_ROLE", "env-http-role")
+	t.Setenv("YT_HOSTS", "env-hosts")
+	t.Setenv("YT_USE_HOSTS", "1")
+	t.Setenv("YT_TOKEN", "env-token")
+
+	resolved, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
+	require.NoError(t, err)
+
+	require.Equal(t, "env-proxy", resolved.Proxy)
+	require.Equal(t, "env-http-role", resolved.ProxyRole)
+	require.Equal(t, "file-network", resolved.NetworkName)
+	require.Equal(t, "env-hosts", resolved.HostsPath)
+	require.Equal(t, "env-token", resolved.Token)
+	require.False(t, resolved.DisableProxyDiscovery)
+	require.True(t, resolved.UseTLS)
+	require.True(t, resolved.UseTVMOnlyEndpoint)
+}
+
+func TestNormalizeConfigV2Profile(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".yt")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+
+	configPath := filepath.Join(configDir, "config")
+	content := []byte(`{
+		"config_version"=2;
+		"default_profile"="profile1";
+		"profiles"={
+			"profile1"={"proxy"={"url"="p1";};"token"="t1";};
+			"profile2"={"proxy"={"url"="p2";};"token"="t2";};
+		};
+	}`)
+	require.NoError(t, os.WriteFile(configPath, content, 0o644))
+
+	t.Setenv("HOME", home)
+	t.Setenv("YT_CONFIG_PROFILE", "profile2")
+
+	resolved, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
+	require.NoError(t, err)
+	require.Equal(t, "p2", resolved.Proxy)
+	require.Equal(t, "t2", resolved.Token)
+}
+
+func TestNormalizeConfigExplicitOverrides(t *testing.T) {
+	t.Setenv("YT_PROXY", "env-proxy")
+	t.Setenv("YT_HTTP_PROXY_ROLE", "env-http-role")
+	t.Setenv("YT_TOKEN", "env-token")
+
+	conf := &Config{
+		Proxy:     "explicit-proxy",
+		ProxyRole: "explicit-role",
+		Token:     "explicit-token",
+	}
+
+	resolved, err := NormalizeConfig(conf, ConfigBackendHTTP)
+	require.NoError(t, err)
+	require.Equal(t, "explicit-proxy", resolved.Proxy)
+	require.Equal(t, "explicit-role", resolved.ProxyRole)
+	require.Equal(t, "explicit-token", resolved.Token)
+}
+
+func TestNormalizeConfigTokenPath(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("token-from-file\n"), 0o644))
+	t.Setenv("YT_TOKEN_PATH", tokenFile)
+
+	resolved, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
+	require.NoError(t, err)
+	require.True(t, resolved.ReadTokenFromFile)
+	require.Equal(t, tokenFile, resolved.TokenPath)
+	require.Equal(t, "token-from-file", resolved.GetToken())
+}
+
+func TestNormalizeConfigInvalidBool(t *testing.T) {
+	t.Setenv("YT_USE_HOSTS", "invalid")
+
+	_, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
+	require.Error(t, err)
 }
