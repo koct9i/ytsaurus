@@ -171,8 +171,20 @@ By default, the logging level is INFO, and log messages are written to stderr.
 
 You can retrieve the token from the following places (listed in priority order).
 
-1. From the `config["token"]`option that gets to the global configuration from the `YT_TOKEN` environment variable.
-2. From the file specified in `config["token_path"]`; the default value of this option is `~/.yt/token`. This option can also be overridden using the `YT_TOKEN_PATH` environment variable (the environment variable only applies to the global client configuration; for details, see the [ section](#configuration)).
+1. From the `config["token"]` option that gets to the global configuration from
+   the `YT_TOKEN` environment variable.
+2. From the `config["token_command"]` option that executes a local command and
+   takes the first stdout line as the token. This option can also be overridden
+   using the `YT_TOKEN_COMMAND` environment variable (the environment variable
+   only applies to the global client configuration; for details, see the
+   [section](#configuration)). The command is executed without a shell, and its
+   execution timeout is configured via `config["token_command_timeout"]` in
+   milliseconds (10 seconds by default).
+3. From the file specified in `config["token_path"]`; the default value of this
+   option is `~/.yt/token`. This option can also be overridden using the
+   `YT_TOKEN_PATH` environment variable (the environment variable only applies
+   to the global client configuration; for details, see the
+   [section](#configuration)).
 
 #### Setting up configuration retries { #configuration_retries }
 

@@ -1,8 +1,8 @@
-from .config import get_config, get_option, set_option, get_backend_type
+from .config import get_config, get_option, has_option, set_option, get_backend_type
 from .common import require, get_value, total_seconds, generate_uuid, generate_traceparent, forbidden_inside_job, hide_auth_headers
 from .constants import OAUTH_URL, FEEDBACK_URL
 from .retries import Retrier, default_chaos_monkey
-from .errors import (YtError, YtTokenError, YtProxyUnavailable, YtIncorrectResponse, YtHttpResponseError,
+from .errors import (YtError, YtConfigError, YtTokenError, YtProxyUnavailable, YtIncorrectResponse, YtHttpResponseError,
                      YtRequestQueueSizeLimitExceeded, YtRpcUnavailable, YtConcurrentOperationsLimitExceeded,
                      YtRequestTimedOut, YtRetriableError, YtTransportError, YtNoSuchTransaction, YtProxyBanned,
                      create_http_response_error)
@@ -18,6 +18,8 @@ from yt.common import _pretty_format_for_logging, get_fqdn as _get_fqdn
 import io
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 import types
@@ -676,6 +678,109 @@ def _get_token_from_config(client):
         return token
 
 
+def _get_token_command(client):
+    auth_class = get_config(client)["auth_class"]
+    token_command = get_config(client)["token_command"]
+
+    if not token_command:
+        return None
+
+    if auth_class and auth_class["module_name"] and auth_class["class_name"]:
+        raise YtConfigError(
+            "Only one of `auth_class` and `token_command` should be specified in the config"
+        )
+
+    if isinstance(token_command, str):
+        token_command = shlex.split(token_command)
+    elif isinstance(token_command, tuple):
+        token_command = list(token_command)
+
+    if not isinstance(token_command, list) or not token_command:
+        raise YtConfigError("`token_command` should be a non-empty string or list of strings")
+
+    if not all(isinstance(argument, str) for argument in token_command):
+        raise YtConfigError("`token_command` should contain only strings")
+
+    return token_command
+
+
+def _format_token_command_error(message, stderr=None):
+    stderr = (stderr or "").strip()
+    if stderr:
+        return "{}\nstderr:\n  {}".format(message, stderr.replace("\n", "\n  "))
+    return message
+
+
+def _get_token_from_command(token_command, client):
+    timeout = get_config(client)["token_command_timeout"]
+    try:
+        timeout = float(timeout) / 1000.0
+    except (TypeError, ValueError):
+        raise YtConfigError("`token_command_timeout` should be a positive number")
+
+    if timeout <= 0:
+        raise YtConfigError("`token_command_timeout` should be positive")
+
+    environment = os.environ.copy()
+    environment.pop("YT_TOKEN", None)
+
+    if get_config(client)["proxy"]["url"]:
+        environment["YT_PROXY"] = get_config(client)["proxy"]["url"]
+    if get_config(client)["config_profile"]:
+        environment["YT_CONFIG_PROFILE"] = get_config(client)["config_profile"]
+
+    try:
+        completed_process = subprocess.run(
+            token_command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            env=environment,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise YtTokenError(
+            _format_token_command_error(
+                "Failed to obtain YTsaurus token using token_command: "
+                "command timed out after {} ms".format(int(timeout * 1000)),
+                error.stderr,
+            )
+        )
+    except OSError as error:
+        raise YtTokenError(
+            "Failed to obtain YTsaurus token using token_command: {}".format(error)
+        )
+
+    if completed_process.returncode != 0:
+        raise YtTokenError(
+            _format_token_command_error(
+                "Failed to obtain YTsaurus token using token_command: "
+                "command exited with status {}".format(completed_process.returncode),
+                completed_process.stderr,
+            )
+        )
+
+    stdout = completed_process.stdout or ""
+    token, separator, tail = stdout.partition("\n")
+    token = token.rstrip("\r")
+
+    if separator and tail:
+        raise YtTokenError(
+            "Failed to obtain YTsaurus token using token_command: "
+            "stdout should contain a single line"
+        )
+
+    if not token:
+        raise YtTokenError(
+            "Failed to obtain YTsaurus token using token_command: command returned empty stdout"
+        )
+
+    logger.debug("Token got from token_command executable %s", token_command[0])
+    return token
+
+
 def _check_token_file_permissions(token_path):
     file_mode = os.stat(token_path).st_mode
     if (file_mode & stat.S_IRGRP) or (file_mode & stat.S_IROTH):
@@ -708,22 +813,41 @@ def get_token(token=None, client=None):
     if not get_config(client)["enable_token"]:
         return None
 
+    token_source = None
+
     # NB: config has higher priority than cache.
     if not token:
         token = _get_token_from_config(client)
+        if token:
+            token_source = "config"
+
+    token_command = None
+    if not token:
+        token_command = _get_token_command(client)
 
     if not token and get_option("_token_cached", client=client):
-        logger.debug("Token got from cache")
-        return get_option("_token", client=client)
+        cached_token_source = get_option("_token_source", client=client) \
+            if has_option("_token_source", client=client) else None
+        if token_command is None or cached_token_source == "token_command":
+            logger.debug("Token got from cache")
+            return get_option("_token", client=client)
+
+    if not token and token_command is not None:
+        token = _get_token_from_command(token_command, client)
+        token_source = "token_command"
 
     if not token:
         token = _get_token_from_file(client)
+        if token:
+            token_source = "file"
     if not token:
         receive_token_by_ssh_session = \
             get_config(client)["allow_receive_token_by_current_ssh_session"] and \
             RECEIVE_TOKEN_FROM_SSH_SESSION
         if receive_token_by_ssh_session:
             token = _get_token_by_ssh_session(client)
+            if token:
+                token_source = "ssh"
             # Update token in default location.
             if get_config(client=client)["token_path"] is None and token is not None:
                 try:
@@ -746,6 +870,7 @@ def get_token(token=None, client=None):
     if token is not None and get_config(client=client)["cache_token"]:
         set_option("_token", token, client=client)
         set_option("_token_cached", True, client=client)
+        set_option("_token_source", token_source, client=client)
 
     return token
 
