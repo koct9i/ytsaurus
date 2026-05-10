@@ -80,7 +80,8 @@ def test_token_command():
             stdout="command-token",
             stderr="",
         )
-        assert http.get_token(client=yt.YtClient(config={"token_command": ["token-helper", "get"]})) == "command-token"
+        token_only_client = yt.YtClient(config={"token_command": ["token-helper", "get"]})
+        assert http.get_token(client=token_only_client) == "command-token"
 
 
 @authors("koct9i")
@@ -137,8 +138,9 @@ def test_token_command_errors():
             stdout="",
             stderr="boom",
         )
+        failing_client = yt.YtClient(config={"token_command": ["token-helper", "get"]})
         with pytest.raises(yt.YtTokenError, match="status 1"):
-            http.get_token(client=yt.YtClient(config={"token_command": ["token-helper", "get"]}))
+            http.get_token(client=failing_client)
 
     with mock.patch.object(http.subprocess, "run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess(
@@ -147,8 +149,9 @@ def test_token_command_errors():
             stdout="\n",
             stderr="",
         )
+        empty_output_client = yt.YtClient(config={"token_command": ["token-helper", "get"]})
         with pytest.raises(yt.YtTokenError, match="empty stdout"):
-            http.get_token(client=yt.YtClient(config={"token_command": ["token-helper", "get"]}))
+            http.get_token(client=empty_output_client)
 
     with mock.patch.object(http.subprocess, "run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess(
@@ -157,8 +160,9 @@ def test_token_command_errors():
             stdout="token\nextra\n",
             stderr="",
         )
+        multiline_output_client = yt.YtClient(config={"token_command": ["token-helper", "get"]})
         with pytest.raises(yt.YtTokenError, match="single line"):
-            http.get_token(client=yt.YtClient(config={"token_command": ["token-helper", "get"]}))
+            http.get_token(client=multiline_output_client)
 
 
 @authors("koct9i")

@@ -687,7 +687,7 @@ def _get_token_command(client):
     if not token_command:
         return None
 
-    if auth_class and auth_class["module_name"] and auth_class["class_name"]:
+    if auth_class is not None and auth_class["module_name"] and auth_class["class_name"]:
         raise YtConfigError(
             "Only one of `auth_class` and `token_command` should be specified in the config"
         )
@@ -764,7 +764,7 @@ def _get_token_from_command(token_command, client):
             )
         )
 
-    stdout = completed_process.stdout or ""
+    stdout = completed_process.stdout
     if stdout.endswith("\r\n"):
         token = stdout[:-2]
     elif stdout.endswith("\n"):
