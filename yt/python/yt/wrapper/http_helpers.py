@@ -826,8 +826,9 @@ def get_token(token=None, client=None):
         token_command = _get_token_command(client)
 
     if not token and get_option("_token_cached", client=client):
-        cached_token_source = get_option("_token_source", client=client) \
-            if has_option("_token_source", client=client) else None
+        cached_token_source = None
+        if has_option("_token_source", client=client):
+            cached_token_source = get_option("_token_source", client=client)
         if token_command is None or cached_token_source == "token_command":
             logger.debug("Token got from cache")
             return get_option("_token", client=client)

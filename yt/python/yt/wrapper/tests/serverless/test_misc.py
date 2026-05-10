@@ -96,12 +96,14 @@ def test_token_command_precedence():
 
         assert run_mock.call_args.args[0] == ["token-helper", "get", "--cluster", "hahn"]
 
+        config_token_client = yt.YtClient(config={
+            "token": "config-token",
+            "token_command": ["token-helper", "get"],
+            "token_path": token_file.name,
+        })
+
         with mock.patch.object(http.subprocess, "run") as run_mock:
-            assert http.get_token(client=yt.YtClient(config={
-                "token": "config-token",
-                "token_command": ["token-helper", "get"],
-                "token_path": token_file.name,
-            })) == "config-token"
+            assert http.get_token(client=config_token_client) == "config-token"
             run_mock.assert_not_called()
     finally:
         os.unlink(token_file.name)
