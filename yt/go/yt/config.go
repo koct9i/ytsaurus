@@ -409,7 +409,7 @@ func runTokenCommand(ctx context.Context, argv []string, timeout time.Duration) 
 
 // filterTokenEnv returns a copy of env with YT_TOKEN removed.
 func filterTokenEnv(env []string) []string {
-	filtered := env[:0:0]
+	filtered := make([]string, 0, len(env))
 	for _, kv := range env {
 		if !strings.HasPrefix(kv, "YT_TOKEN=") {
 			filtered = append(filtered, kv)

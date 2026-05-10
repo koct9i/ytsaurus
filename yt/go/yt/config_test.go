@@ -283,12 +283,24 @@ func TestGetTokenOrRunCommand(t *testing.T) {
 	})
 
 	t.Run("no_fallback_after_command_failure", func(t *testing.T) {
-		// Even if ReadTokenFromFile is set, failure of token_command must not fall back.
+		// Create a token file with a valid token.
+		tmpFile, err := os.CreateTemp(t.TempDir(), "yt-token-*")
+		require.NoError(t, err)
+		_, err = tmpFile.WriteString("file-token\n")
+		require.NoError(t, err)
+		require.NoError(t, tmpFile.Close())
+
+		// Even though ReadTokenFromFile is set and a valid token file exists,
+		// a failing token_command must not fall back to the file.
 		c := Config{
-			TokenCommand:    []string{"sh", "-c", "exit 1"},
+			TokenCommand:      []string{"sh", "-c", "exit 1"},
 			ReadTokenFromFile: true,
 		}
-		_, err := c.GetTokenOrRunCommand(ctx)
+		// Override the path resolution by setting the env var so it points to our tmpFile.
+		t.Setenv("YT_TOKEN_FILE", tmpFile.Name())
+
+		_, err = c.GetTokenOrRunCommand(ctx)
 		require.Error(t, err)
+		require.Contains(t, err.Error(), "token_command")
 	})
 }
