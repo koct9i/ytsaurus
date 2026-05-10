@@ -73,6 +73,15 @@ def test_token_command():
     assert run_mock.call_args.kwargs["timeout"] == pytest.approx(3.21)
     assert run_mock.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
+    with mock.patch.object(http.subprocess, "run") as run_mock:
+        run_mock.return_value = subprocess.CompletedProcess(
+            ["token-helper", "get"],
+            0,
+            stdout="command-token",
+            stderr="",
+        )
+        assert http.get_token(client=yt.YtClient(config={"token_command": ["token-helper", "get"]})) == "command-token"
+
 
 @authors("koct9i")
 def test_token_command_precedence():
