@@ -594,6 +594,8 @@ private:
     std::map<TCellTag, TMasterEntry> RegisteredMasterMap_;
     TCellTagList RegisteredMasterCellTags_;
     THashSet<TCellTag> InitialReplicationPendingCellTags_;
+    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, InitialReplicationSyncInProgressCellTagsLock_);
+    THashSet<TCellTag> InitialReplicationSyncInProgressCellTags_;
     EPrimaryRegisterState RegisterState_ = EPrimaryRegisterState::None;
 
     THashMap<TCellTag, THashSet<TTransactionId>> LocalMasterIssuedLeaseIds_;
@@ -784,6 +786,10 @@ private:
         RegisteredMasterMap_.clear();
         RegisteredMasterCellTags_.clear();
         InitialReplicationPendingCellTags_.clear();
+        {
+            auto guard = Guard(InitialReplicationSyncInProgressCellTagsLock_);
+            InitialReplicationSyncInProgressCellTags_.clear();
+        }
         InitialReplicationSyncExecutor_.Reset();
         RegisterState_ = EPrimaryRegisterState::None;
         CellTagToMasterMailbox_.clear();
@@ -921,6 +927,10 @@ private:
             YT_UNUSED_FUTURE(InitialReplicationSyncExecutor_->Stop());
             InitialReplicationSyncExecutor_.Reset();
         }
+        {
+            auto guard = Guard(InitialReplicationSyncInProgressCellTagsLock_);
+            InitialReplicationSyncInProgressCellTags_.clear();
+        }
 
         auto error = TError(NRpc::EErrorCode::Unavailable, "Hydra peer has stopped");
         UpstreamSyncBatcher_->Cancel(error);
@@ -994,7 +1004,7 @@ private:
         ReplicateKeysToSecondaryMaster_.Fire(cellTag);
         ReplicateValuesToSecondaryMaster_.Fire(cellTag);
 
-        InsertOrCrash(InitialReplicationPendingCellTags_, cellTag);
+        InitialReplicationPendingCellTags_.insert(cellTag);
 
         {
             NProto::TRspRegisterSecondaryMasterAtPrimary response;
@@ -1103,6 +1113,11 @@ private:
     void OnInitialReplicationSyncFinished(TCellTag cellTag, const TError& error)
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
+
+        {
+            auto guard = Guard(InitialReplicationSyncInProgressCellTagsLock_);
+            InitialReplicationSyncInProgressCellTags_.erase(cellTag);
+        }
 
         if (!error.IsOK()) {
             YT_LOG_DEBUG(error, "Error synchronizing with newly registered secondary master before marking initial replication complete (CellTag: %v)",
@@ -1318,6 +1333,14 @@ private:
 
         const auto& hiveManager = Bootstrap_->GetHiveManager();
         for (auto cellTag : InitialReplicationPendingCellTags_) {
+            {
+                auto guard = Guard(InitialReplicationSyncInProgressCellTagsLock_);
+                if (InitialReplicationSyncInProgressCellTags_.contains(cellTag)) {
+                    continue;
+                }
+                InitialReplicationSyncInProgressCellTags_.insert(cellTag);
+            }
+
             auto cellId = GetCellId(cellTag);
             hiveManager->SyncWith(cellId, /*enableBatching*/ true)
                 .Subscribe(BIND(&TMulticellManager::OnInitialReplicationSyncFinished, MakeStrong(this), cellTag)
