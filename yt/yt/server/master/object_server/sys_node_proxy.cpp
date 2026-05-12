@@ -59,6 +59,7 @@ private:
         descriptors->push_back(EInternedAttributeKey::ChunkRefreshEnabled);
         descriptors->push_back(EInternedAttributeKey::ChunkRequisitionUpdateEnabled);
         descriptors->push_back(EInternedAttributeKey::RegisteredMasterCellTags);
+        descriptors->push_back(EInternedAttributeKey::InitialReplicationComplete);
         descriptors->push_back(EInternedAttributeKey::DynamicallyPropagatedMastersCellTags);
         descriptors->push_back(EInternedAttributeKey::MasterAlerts);
         descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::Config)
@@ -187,6 +188,11 @@ private:
             case EInternedAttributeKey::RegisteredMasterCellTags:
                 BuildYsonFluently(consumer)
                     .Value(multicellManager->GetRegisteredMasterCellTags());
+                return true;
+
+            case EInternedAttributeKey::InitialReplicationComplete:
+                BuildYsonFluently(consumer)
+                    .Value(multicellManager->IsInitialReplicationComplete());
                 return true;
 
             case EInternedAttributeKey::DynamicallyPropagatedMastersCellTags:

@@ -163,6 +163,7 @@ struct IMulticellManager
      *  For secondary masters, the primary master is always the first element.
      */
     virtual const NObjectClient::TCellTagList& GetRegisteredMasterCellTags() const = 0;
+    virtual bool IsInitialReplicationComplete() const = 0;
 
     //! Picks a random (but deterministically chosen) secondary master cell to
     //! host an external chunk-owning node.

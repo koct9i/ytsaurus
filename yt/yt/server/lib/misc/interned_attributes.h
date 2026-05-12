@@ -276,6 +276,7 @@
     XX(ImportedObjectIds, imported_object_ids) \
     XX(InMemoryMode, in_memory_mode) \
     XX(InconsistentlyPlacedChunksCount, inconsistently_placed_chunk_count) \
+    XX(InitialReplicationComplete, initial_replication_complete) \
     XX(Index, index) \
     XX(IndexTableId, index_table_id) \
     XX(IndexTablePath, index_table_path) \
