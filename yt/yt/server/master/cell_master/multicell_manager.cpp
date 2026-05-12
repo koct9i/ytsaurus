@@ -105,6 +105,7 @@ public:
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraOnSecondaryMasterRegisteredAtPrimary, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraRegisterSecondaryMasterAtSecondary, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraStartSecondaryMasterRegistration, Unretained(this)));
+        TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraSetInitialReplicationCompleted, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraSyncHiveClocksAtMasters, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraResetDynamicallyPropagatedMasterCells, Unretained(this)));
 
@@ -411,6 +412,13 @@ public:
         return RegisteredMasterCellTags_;
     }
 
+    bool IsInitialReplicationComplete() const override
+    {
+        VerifyPersistentStateRead();
+
+        return InitialReplicationPendingCellTags_.empty();
+    }
+
     TCellTag PickSecondaryChunkHostCell(double bias) override
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
@@ -584,6 +592,7 @@ private:
     // NB: Must ensure stable order.
     std::map<TCellTag, TMasterEntry> RegisteredMasterMap_;
     TCellTagList RegisteredMasterCellTags_;
+    THashSet<TCellTag> InitialReplicationPendingCellTags_;
     EPrimaryRegisterState RegisterState_ = EPrimaryRegisterState::None;
 
     THashMap<TCellTag, THashSet<TTransactionId>> LocalMasterIssuedLeaseIds_;
@@ -772,6 +781,7 @@ private:
 
         RegisteredMasterMap_.clear();
         RegisteredMasterCellTags_.clear();
+        InitialReplicationPendingCellTags_.clear();
         RegisterState_ = EPrimaryRegisterState::None;
         CellTagToMasterMailbox_.clear();
         DynamicallyPropagatedMasterCellTags_.clear();
@@ -788,6 +798,9 @@ private:
         using NYT::Load;
 
         Load(context, RegisteredMasterMap_);
+        if (context.GetVersion() >= EMasterReign::PersistInitialReplicationPendingCellTags) {
+            Load(context, InitialReplicationPendingCellTags_);
+        }
         Load(context, RegisterState_);
         if (context.GetVersion() < EMasterReign::FixDynamicallyPropagatedMastersCellTags) {
             Load<bool>(context);
@@ -803,6 +816,7 @@ private:
         using NYT::Save;
 
         Save(context, RegisteredMasterMap_);
+        Save(context, InitialReplicationPendingCellTags_);
         Save(context, RegisterState_);
         Save(context, LocalMasterIssuedLeaseIds_);
         Save(context, DynamicallyPropagatedMasterCellTags_);
@@ -964,12 +978,42 @@ private:
         ReplicateKeysToSecondaryMaster_.Fire(cellTag);
         ReplicateValuesToSecondaryMaster_.Fire(cellTag);
 
+        InsertOrCrash(InitialReplicationPendingCellTags_, cellTag);
+        if (const auto& hydraManager = Bootstrap_->GetHydraFacade()->GetHydraManager(); hydraManager->IsActiveLeader()) {
+            const auto& hiveManager = Bootstrap_->GetHiveManager();
+            auto cellId = GetCellId(cellTag);
+            hiveManager->SyncWith(cellId, /*enableBatching*/ false)
+                .Subscribe(BIND(&TMulticellManager::OnInitialReplicationSyncFinished, MakeStrong(this), cellTag)
+                    .Via(NRpc::TDispatcher::Get()->GetHeavyInvoker()));
+        }
+
         {
             NProto::TRspRegisterSecondaryMasterAtPrimary response;
             PostToMaster(response, cellTag, true);
         }
 
         SecondaryMasterRegisteredAtPrimary_.Fire(cellTag);
+    }
+
+    void HydraSetInitialReplicationCompleted(NProto::TReqSetInitialReplicationCompleted* request) noexcept
+    {
+        YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
+        YT_VERIFY(IsPrimaryMaster());
+
+        auto cellTag = FromProto<TCellTag>(request->cell_tag());
+        if (!MasterEntryExists(cellTag)) {
+            YT_LOG_ALERT("Attempted to mark initial replication complete for an unknown secondary master (CellTag: %v)",
+                cellTag);
+            return;
+        }
+
+        if (!InitialReplicationPendingCellTags_.erase(cellTag)) {
+            return;
+        }
+
+        YT_LOG_INFO("Initial replication completed for secondary master (CellTag: %v, IsInitialReplicationComplete: %v)",
+            cellTag,
+            InitialReplicationPendingCellTags_.empty());
     }
 
     void HydraReplicateDynamicallyPropagatedMasterCellTags(NProto::TReqReplicateDynamicallyPropagatedMasterCellTags* request) noexcept
@@ -1045,6 +1089,22 @@ private:
 
         RegisterMasterMailbox(cellTag);
         RegisterMasterEntry(cellTag);
+    }
+
+    void OnInitialReplicationSyncFinished(TCellTag cellTag, const TError& error)
+    {
+        YT_ASSERT_THREAD_AFFINITY_ANY();
+
+        if (!error.IsOK()) {
+            YT_LOG_WARNING(error, "Error synchronizing with newly registered secondary master before marking initial replication complete (CellTag: %v)",
+                cellTag);
+            return;
+        }
+
+        NProto::TReqSetInitialReplicationCompleted request;
+        request.set_cell_tag(ToProto(cellTag));
+        YT_UNUSED_FUTURE(CreateMutation(Bootstrap_->GetHydraFacade()->GetHydraManager(), request)
+            ->CommitAndLog(Logger()));
     }
 
     void HydraStartSecondaryMasterRegistration(NProto::TReqStartSecondaryMasterRegistration* /*request*/) noexcept

@@ -22,6 +22,11 @@ message TReqRegisterSecondaryMasterAtSecondary
 message TReqStartSecondaryMasterRegistration
 { }
 
+message TReqSetInitialReplicationCompleted
+{
+    required uint32 cell_tag = 1;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 message TReqReplicateDynamicallyPropagatedMasterCellTags
