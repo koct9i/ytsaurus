@@ -60,7 +60,7 @@ print(client.list("/"))
 Разрешение конфигурации в Python SDK построено на следующей цепочке (по порядку):
 
 1. `default_config` (`yt.wrapper.default_config`) — встроенная схема конфигурации и значение по умолчанию.
-2. `get_default_config()` — создает новый изменяемый объект конфига, инициализированный встроенными значениями по умолчанию.
+2. `get_default_config()` — создает новый изменяемый объект конфига, инициализированный встроенными значениями по умолчанию и принудительными env-переменными (`YT_HTTP_PROXY_ROLE`, `YT_RPC_PROXY_ROLE`, `YT_BASE_LAYER`).
 3. `update_config_from_env(config, config_profile=None)` — применяет env/file-источники к переданному конфигу в таком порядке:
    1. `YT_CONFIG_PATCHES` (list_fragment; патчи применяются от последнего к первому).
    2. Общий для Python SDK и CLI конфигурационный файл:
@@ -76,16 +76,18 @@ print(client.list("/"))
 
 1. `get_default_config()`.
 2. `update_config_from_env(...)`.
-3. Cypress-конфиг клиента (`//sys/client_config/default`) как ленивый `RemotePatchable`-слой (если не отключен через `YT_APPLY_REMOTE_PATCH_AT_START=none`).
-4. Рантайм-переопределения через `yt.config[...] = ...` и `yt.update_config({...})` (побеждает последнее); в CLI `--config` добавляет переопределение только для текущей команды.
+3. Рантайм-переопределения через `yt.config[...] = ...` и `yt.update_config({...})` (побеждает последнее); в CLI `--config` добавляет переопределение только для текущей команды.
+4. Cypress-конфиг клиента (`//sys/client_config/default`) подключается как ленивый `RemotePatchable`-слой при инициализации глобального клиента. Данные подтягиваются и мержатся при первом обращении к remote-patchable полям; поведение отключается через `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
 Что применяется для **явно созданного `YtClient(proxy, token, config)`**:
 
 1. `get_default_config()`.
-2. Принудительные env-переменные: `YT_BASE_LAYER`, `YT_HTTP_PROXY_ROLE`, `YT_RPC_PROXY_ROLE`.
-3. Конструкторный `config` (мержится в текущий конфиг).
-4. Конструкторные `proxy` и `token` (перекрывают соответствующие поля).
-5. Cypress-конфиг клиента (`//sys/client_config/default`) как ленивый `RemotePatchable`-слой (если не отключен через `YT_APPLY_REMOTE_PATCH_AT_START=none`).
+2. Конструкторный `config` (мержится в текущий конфиг).
+3. Конструкторные `proxy` и `token` (перекрывают соответствующие поля).
+4. Cypress-конфиг клиента (`//sys/client_config/default`):
+   - `apply_remote_patch_at_start=true`: подтягивается и мержится при инициализации клиента.
+   - `apply_remote_patch_at_start=false`: подключается как ленивый `RemotePatchable`-слой и подтягивается при первом обращении к remote-patchable полям.
+   - `YT_APPLY_REMOTE_PATCH_AT_START=none`: отключен.
 
 Чтобы собрать явный `YtClient` из тех же env/file-источников, что и при глобальной инициализации, передайте:
 `yt.YtClient(config=yt.default_config.get_config_from_env(...))`.

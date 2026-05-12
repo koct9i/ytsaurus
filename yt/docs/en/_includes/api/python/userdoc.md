@@ -74,16 +74,18 @@ Configuration sources for the **global client** (`yt.get(...)`, `yt.list(...)`, 
 
 1. `get_default_config()`.
 2. `update_config_from_env(...)` — `YT_*` environment variables and configuration file.
-3. Cypress remote client configuration (`//sys/client_config/default`), unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
-4. Runtime in-place overrides via `yt.config[...] = ...` and `yt.update_config({...})` (last write wins); in CLI `--config` adds a command-local override.
-5. Cypress remote client configuration (`//sys/client_config/default`), unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
+3. Runtime in-place overrides via `yt.config[...] = ...` and `yt.update_config({...})` (last write wins); in CLI `--config` adds a command-local override.
+4. Cypress remote client configuration (`//sys/client_config/default`) is attached as a lazy `RemotePatchable` layer at global-client initialization. It is fetched and merged on first access to remote-patchable fields; this behavior is disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
 Configuration sources for an **explicitly created `YtClient(proxy, token, config)`**:
 
 1. `get_default_config()`.
 2. Constructor `config` (merged into current configuration).
 3. Constructor `proxy` and `token` (override corresponding fields).
-5. Cypress remote client configuration (`//sys/client_config/default`), unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
+4. Cypress remote client configuration (`//sys/client_config/default`):
+   - `apply_remote_patch_at_start=true`: fetched and merged during client initialization.
+   - `apply_remote_patch_at_start=false`: attached as a lazy `RemotePatchable` layer and fetched on first access to remote-patchable fields.
+   - `YT_APPLY_REMOTE_PATCH_AT_START=none`: disabled.
 
 To construct `YtClient` using environment/file sources use `get_config_from_env` or `update_config_from_env` explicitly:
 `yt.YtClient(config=yt.default_config.get_config_from_env(...))`.
