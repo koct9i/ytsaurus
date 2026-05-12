@@ -54,40 +54,39 @@ You can find an example in this [section](../../../api/python/examples.md#gevent
 
 ### Configuring { #configuration }
 
-Configuration resolution in Python SDK is based on this chain (in order):
+YTsaurus-client configuration is constructed by merging layers from several sources.
+When each configuration layer is applied, all dict nodes are merged rather than overwritten.
 
-1. `default_config` (`yt.wrapper.default_config`) — built-in config schema and default values.
-2. `get_default_config()` — creates a fresh mutable config object initialized from built-in defaults.
-3. `update_config_from_env(config, config_profile=None)` — applies environment/file sources to the provided config in this order:
+* `default_config` (`yt.wrapper.default_config`) — built-in configuration schema and default values.
+* `get_default_config()` — creates a fresh mutable config object initialized from built-in defaults and forced environment vars (`YT_HTTP_PROXY_ROLE`, `YT_RPC_PROXY_ROLE`, `YT_BASE_LAYER`).
+* `update_config_from_env(config, config_profile=None)` — applies environment/file sources to the provided config in this order:
    1. `YT_CONFIG_PATCHES` (list_fragment; patches are applied from last to first).
-   2. Shared Python SDK/CLI config file:
+   2. Shared Python SDK/CLI configuration file:
       - Path selection: `YT_CONFIG_PATH` if it points to an existing file, otherwise `~/.yt/config`, otherwise `/etc/ytclient.conf`.
       - If none of these files is readable, this source is skipped.
-      - Format selection: `YT_CONFIG_FORMAT` (`yson` or `json`).
+      - Format selection: `YT_CONFIG_FORMAT` (`yson` or `json`), by default `yson`.
       - For `config_version=2`, profile selection uses (in order): explicit `config_profile` argument, `YT_CONFIG_PROFILE`, then `default_profile` from the file.
    3. `YT_*` environment variables from default-config shortcuts (`YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`, `YT_LOG_LEVEL`, and others).
-4. `get_config_from_env(config_profile=None)` — shorthand for `update_config_from_env(get_default_config(), config_profile=...)`.
-5. Cypress remote client config (`//sys/client_config/default`) — a lazy `RemotePatchable` layer applied on top of local config during client initialization (unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`).
+* `get_config_from_env(config_profile=None)` — shorthand for `update_config_from_env(get_default_config(), config_profile=...)`.
+* Cypress remote client configuration (`//sys/client_config/default`) — applied on top of local configuration during client initialization (unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`).
 
-What is applied for the **global client** (`yt.get(...)`, `yt.list(...)`, etc.):
+Configuration sources for the **global client** (`yt.get(...)`, `yt.list(...)`, etc.):
 
 1. `get_default_config()`.
-2. `update_config_from_env(...)`.
-3. Cypress remote client config (`//sys/client_config/default`) as lazy `RemotePatchable` layer (unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`).
+2. `update_config_from_env(...)` — `YT_*` environment variables and configuration file.
+3. Cypress remote client configuration (`//sys/client_config/default`), unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 4. Runtime in-place overrides via `yt.config[...] = ...` and `yt.update_config({...})` (last write wins); in CLI `--config` adds a command-local override.
+5. Cypress remote client configuration (`//sys/client_config/default`), unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
-What is applied for an **explicitly created `YtClient(proxy, token, config)`**:
+Configuration sources for an **explicitly created `YtClient(proxy, token, config)`**:
 
 1. `get_default_config()`.
-2. Forced env vars: `YT_BASE_LAYER`, `YT_HTTP_PROXY_ROLE`, `YT_RPC_PROXY_ROLE`.
-3. Constructor `config` (merged into current config).
-4. Constructor `proxy` and `token` (override corresponding fields).
-5. Cypress remote client config (`//sys/client_config/default`) as lazy `RemotePatchable` layer (unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`).
+2. Constructor `config` (merged into current configuration).
+3. Constructor `proxy` and `token` (override corresponding fields).
+5. Cypress remote client configuration (`//sys/client_config/default`), unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
-To construct explicit `YtClient` from the same env/file sources as global initialization, pass:
+To construct `YtClient` using environment/file sources use `get_config_from_env` or `update_config_from_env` explicitly:
 `yt.YtClient(config=yt.default_config.get_config_from_env(...))`.
-
-When the config is applied, all dict nodes are merged rather than overwritten.
 
 Setting up a global configuration to work with a cluster in your home directory.
 
