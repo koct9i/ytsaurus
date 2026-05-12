@@ -22,7 +22,7 @@ message TReqRegisterSecondaryMasterAtSecondary
 message TReqStartSecondaryMasterRegistration
 { }
 
-message TReqSetInitialReplicationCompleted
+message TReqSetInitialReplicationComplete
 {
     required uint32 cell_tag = 1;
 }

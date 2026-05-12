@@ -106,7 +106,7 @@ public:
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraOnSecondaryMasterRegisteredAtPrimary, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraRegisterSecondaryMasterAtSecondary, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraStartSecondaryMasterRegistration, Unretained(this)));
-        TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraSetInitialReplicationCompleted, Unretained(this)));
+        TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraSetInitialReplicationComplete, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraSyncHiveClocksAtMasters, Unretained(this)));
         TMasterAutomatonPart::RegisterMethod(BIND_NO_PROPAGATE(&TMulticellManager::HydraResetDynamicallyPropagatedMasterCells, Unretained(this)));
 
@@ -1004,7 +1004,7 @@ private:
         SecondaryMasterRegisteredAtPrimary_.Fire(cellTag);
     }
 
-    void HydraSetInitialReplicationCompleted(NProto::TReqSetInitialReplicationCompleted* request) noexcept
+    void HydraSetInitialReplicationComplete(NProto::TReqSetInitialReplicationComplete* request) noexcept
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(IsPrimaryMaster());
@@ -1110,7 +1110,7 @@ private:
             return;
         }
 
-        NProto::TReqSetInitialReplicationCompleted request;
+        NProto::TReqSetInitialReplicationComplete request;
         request.set_cell_tag(ToProto(cellTag));
         YT_UNUSED_FUTURE(CreateMutation(Bootstrap_->GetHydraFacade()->GetHydraManager(), request)
             ->CommitAndLog(Logger()));

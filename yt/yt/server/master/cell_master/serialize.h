@@ -198,7 +198,7 @@ DEFINE_ENUM(EMasterReign,
     ((DisableModificationTimeUpdateInChunkMerger)                   (3303))  // h0pless
     ((DontValidateTransactionPermissionsOnPartitipants)             (3304))  // kvk1920
     ((IntroduceLogicalMountRevision_26_2)                           (3305))  // alexelexa
-    ((PersistInitialReplicationPendingCellTags)                     (3306))  // copilot
+    ((PersistInitialReplicationPendingCellTags)                     (3306))  // community bot
 );
 
 static_assert(TEnumTraits<EMasterReign>::IsMonotonic, "Master reign enum is not monotonic");
