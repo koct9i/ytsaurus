@@ -162,7 +162,7 @@ When chunk multi-cell is used, a table has two representations:
 - The **native** object lives on the primary cell (or portal cell). It is a normal Cypress node attached to the namespace tree. Locks and Cypress-level operations are performed against the native object.
 - The **external** object lives on the secondary cell that owns this table's chunks. It has no Cypress attachment but owns the chunk-list tree. Chunk metadata, replication, and erasure operations are performed against the external object.
 
-When a table is created, the primary cell creates the native object and, via Hive, orders the appropriate secondary cell to create the corresponding external object. The `external_cell_tag` attribute records which secondary cell hosts the chunk lists.
+When a table is created, the cell hosting the native object creates it and, via Hive, orders the appropriate secondary cell to create the corresponding external object. The `external_cell_tag` attribute records which secondary cell hosts the chunk lists.
 
 ### Cell roles { #cell-roles }
 
