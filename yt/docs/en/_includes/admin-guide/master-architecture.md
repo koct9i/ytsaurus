@@ -342,6 +342,31 @@ Coordinator selection becomes **sticky** in the following situations:
 
 Stickiness ensures parent and child transactions, as well as dependent transactions, are always managed by the same coordinator. This simplifies lock inheritance and commit ordering but can create hotspots if many long-lived transactions are pinned to one cell. When in doubt, avoid creating many child transactions under a common parent unless they must share coordinator state.
 
+#### Coordinator hotspot risks and mitigation { #coordinator-hotspots }
+
+Every active transaction generates periodic **keep-alive pings** to its coordinator cell. Each ping is a mutation on the coordinator's automaton thread, which can only execute one mutation at a time. When many transactions share the same coordinator, their pings arrive concurrently and are serialized on that cell's automaton thread, increasing mutation latency for all other operations on that cell.
+
+The three situations that produce hotspots are:
+
+| Pattern | Root cause | Effect |
+|---------|-----------|--------|
+| Many short-lived transactions all created as children of a single long-lived root transaction | Stickiness forces all children to the same coordinator as the root | All pings go to one cell regardless of how many coordinator cells are available |
+| One coordinator cell given the `transaction_coordinator` role while others lack it | All new transactions are randomly assigned only to the single eligible cell | 100% of coordinator traffic lands on one cell |
+| A client workload that creates very large transaction trees (deep nesting or wide fan-out) | Each level inherits the coordinator of its parent | The coordinator cell accumulates O(tree size) concurrent keep-alive pings |
+
+**Observable symptoms of coordinator overload:**
+
+- Automaton-thread latency on the coordinator cell rises even for unrelated operations (because mutations queue behind the flood of ping mutations).
+- Commit latency for transactions on that cell increases.
+- The primary cell (if it is the only `transaction_coordinator`) shows broader cluster-wide latency degradation.
+
+**Mitigations:**
+
+1. **Distribute coordinator roles**: assign `transaction_coordinator` to several secondary cells so that the random selection spreads load across them.
+2. **Avoid unnecessary parent–child relationships**: if two groups of transactions do not share locks, start them as independent root transactions so they can land on different coordinator cells.
+3. **Keep transaction trees shallow**: use `commit` / `start new root transaction` patterns instead of deep nesting when the sub-tasks are truly independent.
+4. **Adjust ping period**: transactions with long timeouts can use a larger `ping_period` to reduce the ping mutation rate per transaction (the default ping period is `min(ping_period, timeout/2)`).
+
 ## Mutation ordering and commit pipeline { #mutation-pipeline }
 
 All durable state changes in a Hydra cell follow a strict pipeline:
