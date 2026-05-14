@@ -494,6 +494,8 @@ items:
      items:
        - name: Cluster components
          href: admin-guide/components.md
+       - name: Master server architecture
+         href: admin-guide/master-architecture.md
        - name: Install
          items:
            - name: YTsaurus
