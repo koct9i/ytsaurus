@@ -246,6 +246,97 @@ Transactions in {{product-name}} use a simplified two-phase commit that exploits
 
 Because Hive preserves per-channel ordering, transaction start and commit messages from the same coordinator always arrive in the correct order on every participating cell.
 
+## Load balancing across secondary cells { #load-balancing }
+
+### Chunk placement { #chunk-placement }
+
+When a table is created (or when a table's chunk-list needs to be allocated to a secondary cell), the primary cell calls `PickSecondaryChunkHostCell`. The algorithm is:
+
+1. Collect all registered secondary cells that have the `chunk_host` role.
+2. Fetch the current chunk count for each candidate cell from the in-memory multicell statistics cache.
+3. Compute the average chunk count across all candidates.
+4. Split candidates into two groups: "low" (below average) and "high" (at or above average).
+5. Assign a weight to each group and sample uniformly:
+   - Low candidates get weight `256 + bias × 256` each.
+   - High candidates get weight `256` each.
+   - A random token in `[0, total_weight)` selects the winning cell.
+
+The `bias` parameter (typically `1.0`) doubles the effective probability of low candidates compared to high ones. This gives **biased stochastic load balancing**: underloaded cells are strongly preferred but all cells can still receive new objects, avoiding starvation of any cell.
+
+The statistics used for the decision are collected by a periodic gossip round (see [Account usage gossip](#gossip)), so they can lag by a few seconds. In practice this means placement decisions during a burst of table creation events may not be perfectly balanced, but they converge quickly.
+
+{% note info %}
+
+The chunk count statistic reflects the *number of chunks* assigned to each cell, not the disk space or CPU usage. For heterogeneous cells (different hardware) this may produce suboptimal placement. Consider using dedicated chunk-host cells with uniform hardware if precise balance is required.
+
+{% endnote %}
+
+Chunk placement is irreversible for existing tables. The `external_cell_tag` attribute of a table records which secondary cell holds the chunk lists and **cannot be changed** without rewriting the data.
+
+### Transaction coordinator selection { #coordinator-selection }
+
+When a client starts a master transaction without specifying a coordinator cell, the transaction manager selects one randomly from all cells with the `transaction_coordinator` role. Because the selection is made client-side using a uniform random choice, transaction load is distributed evenly across coordinator cells over time.
+
+Coordinator selection becomes **sticky** in the following situations:
+
+| Situation | Rule |
+|-----------|------|
+| Transaction has a parent transaction | Coordinator is forced to the same cell as the parent. |
+| Transaction specifies `CoordinatorMasterCellTag` | The named cell is used. |
+| Transaction lists prerequisite transactions | All prerequisites must be from the same cell; that cell is used as coordinator. |
+
+Stickiness ensures parent and child transactions, as well as dependent transactions, are always managed by the same coordinator. This simplifies lock inheritance and commit ordering but can create hotspots if many long-lived transactions are pinned to one cell. When in doubt, avoid creating many child transactions under a common parent unless they must share coordinator state.
+
+## Mutation ordering and commit pipeline { #mutation-pipeline }
+
+All durable state changes in a Hydra cell follow a strict pipeline:
+
+```
+Client/internal code
+      │
+      ▼
+ MutationDraftQueue          (lock-free MPSC queue, accessible from any thread)
+      │
+      ▼ SerializeMutations() — runs on control thread, period: mutation_serialization_period (5 ms default)
+      │
+      ▼ LogMutations()       — assigns sequence numbers, serializes to record format, appends to Changelog
+      │
+      ├──► Changelog::Append()  [leader local disk, async write]
+      │
+      ├──► FlushMutations()  — sends records to followers via AcceptMutations RPC
+      │         (each follower writes to its own Changelog)
+      │
+      ▼ OnMutationsLogged() / OnMutationsAcceptedByFollower()
+      │
+      ▼ MaybePromoteCommittedSequenceNumber()
+      │      — scans per-peer LastLoggedSequenceNumber
+      │      — promotes CommittedState when quorum (floor(N/2)+1) peers have logged
+      │
+      ▼ OnCommittedSequenceNumberUpdated()
+      │
+      ▼ ScheduleApplyMutations()  [posted to automaton thread]
+      │
+      ▼ ApplyMutations()          [automaton thread, serial]
+      │
+      ▼ Promise resolved → RPC handler returns to caller
+```
+
+Key properties of this pipeline:
+
+- **Strict FIFO per cell.** Mutations within a single cell are always applied in their sequence-number order. No mutation can be applied until all preceding mutations have been applied.
+- **Batching.** The control thread accumulates mutations from the draft queue and logs them as a batch. Batch size is bounded by `max_commit_batch_record_count` (default 10 000 records). The serialization and flush executors run every `mutation_serialization_period` / `mutation_flush_period` (both default to 5 ms). Enable `minimize_commit_latency` to trigger flush immediately after serialization instead of waiting for the next period tick.
+- **No reordering across cells.** A mutation on cell A and a mutation on cell B are independent; there is no global sequence number. Cross-cell ordering is managed by Hive channel sequence numbers (see [Hive](#hive)).
+- **Follower replication is pipelined.** The leader tracks per-follower state (`NextExpectedSequenceNumber`, in-flight counts). When a follower is healthy ("fast mode"), the leader sends the next batch immediately without waiting for the previous acknowledgment, up to the in-flight limits. When a follower falls behind or returns an error, it is demoted to "slow mode": only one request is sent at a time until it catches up.
+
+### Follower modes
+
+| Mode | Behavior | Trigger |
+|------|----------|---------|
+| **Fast** | Leader pre-advances `NextExpectedSequenceNumber` and sends the next batch immediately. | Default when follower is healthy. |
+| **Slow** | Leader waits for acknowledgment before sending the next batch. | Follower RPC error, or follower returns `mutations_accepted=false`. |
+
+In slow mode, follower replication latency is at least one round-trip per batch, which can significantly slow quorum commit when `N=3` (only 2 peers needed but one is lagging).
+
 ## Performance considerations { #performance }
 
 ### Automaton thread bottleneck
@@ -253,6 +344,52 @@ Because Hive preserves per-channel ordering, transaction start and commit messag
 All persistent mutations on a single cell are applied serially on the automaton thread. The automaton thread is the primary throughput bottleneck. Monitor the metric `yt_resource_tracker_total_cpu{service="yt-master", thread="Automaton"}` — sustained load above 90% indicates the cell is under pressure.
 
 Heavy single mutations (e.g. full heartbeats from nodes with hundreds of thousands of chunks) have been split into smaller batches to avoid blocking the automaton thread for too long.
+
+### Mutation backlog and commit latency { #mutation-backlog }
+
+Mutation latency for a single request is the sum of all pipeline stages:
+
+```
+latency ≈ serialization_wait + changelog_write + network_rtt_to_followers
+          + automaton_queue_wait + automaton_apply_time
+```
+
+The most common sources of elevated latency are:
+
+**1. Serialization wait (batching delay)**
+
+Mutations accumulate in the draft queue until `SerializeMutations` runs. By default this executor fires every 5 ms (`mutation_serialization_period`). If the system is lightly loaded, a mutation submitted between two ticks simply waits up to 5 ms before it is even serialized. Enable `minimize_commit_latency: true` to trigger flush immediately after each serialization pass, trading slightly higher throughput for lower tail latency.
+
+**2. Automaton queue depth**
+
+After a mutation is committed (quorum reached) it is placed in a list to be applied by the automaton thread. If the automaton thread is already busy applying a large mutation, all subsequent mutations wait. The queue of committed-but-not-yet-applied mutations is visible in the Hydra monitoring endpoint as `last_offloaded_sequence_number - automaton_sequence_number`. A large gap here indicates automaton thread saturation.
+
+**3. Mutation queue limits and restart**
+
+The leader maintains a bounded in-memory queue of logged mutations that have not yet been confirmed as received by all peers (needed to retransmit to lagging followers). The queue is bounded by:
+
+| Parameter | Default | Action when exceeded |
+|-----------|---------|----------------------|
+| `max_queued_mutation_count` | 100 000 | `LoggingFailed` — triggers quorum restart |
+| `max_queued_mutation_data_size` | 2 GB | `LoggingFailed` — triggers quorum restart |
+
+These limits protect against memory exhaustion when followers fall far behind. Hitting them causes the Hydra group to restart, which is disruptive. Monitor the metric `mutation_queue_size` and `mutation_queue_data_size` to detect growth before limits are reached.
+
+**4. In-flight limits to followers**
+
+To prevent network and memory overload, the leader caps the number of in-flight `AcceptMutations` requests to each follower:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `max_in_flight_accept_mutations_request_count` | 10 | Maximum concurrent RPC calls per follower |
+| `max_in_flight_mutations_count` | 100 000 | Maximum mutations in-flight per follower |
+| `max_in_flight_mutation_data_size` | 2 GB | Maximum data in-flight per follower |
+
+When a follower's in-flight limits are hit, the leader skips sending new mutations to that follower until acknowledgments arrive. This can delay quorum promotion if the follower is also a quorum member.
+
+**5. Slow followers**
+
+A follower in slow mode (after an RPC error or rejection) is sent only one request at a time. If that follower is needed for quorum, every commit waits for a full round-trip to that follower. Watch for log lines `Accept mutations mode is set to slow` — they indicate a follower recovery or network issue.
 
 ### Memory
 
@@ -291,6 +428,7 @@ Key checks:
 - `yt_resource_tracker_total_cpu{thread="Automaton"}` — automaton thread CPU.
 - `yt_resource_tracker_memory_usage_rss{service="yt-master"}` — master RSS.
 - `yt_changelogs_available_space` / `yt_snapshots_available_space` — disk space for Hydra storage.
+- `mutation_queue_size` / `mutation_queue_data_size` — leader in-memory mutation backlog. Sustained growth indicates followers falling behind or slow changelog I/O.
 
 The `//sys` Cypress node exposes multicell status including registered cell tags:
 
