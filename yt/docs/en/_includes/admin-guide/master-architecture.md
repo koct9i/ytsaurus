@@ -321,4 +321,4 @@ A single-cell master setup is sufficient for most clusters. Consider adding seco
 
 Starting with three secondary chunk-host cells provides a practical balance between operational complexity and capacity headroom. Up to 48 secondary cells are supported.
 
-When new secondary cells are added, existing chunks do not automatically move — only new chunks are assigned to the new cells. Rebalancing existing data requires changing the `external_cell_tag` on table objects, which should be done deliberately.
+When new secondary cells are added, existing chunks do not automatically move — only new chunks are assigned to the new cells. To rebalance existing data, rewrite it into newly created tables (for example, via merge or copy-based workflows) so that new chunks are allocated under the current placement rules. Do not attempt to move an existing table's chunk tree by changing `external_cell_tag`: this attribute is not a supported knob for rebalancing existing tables.
