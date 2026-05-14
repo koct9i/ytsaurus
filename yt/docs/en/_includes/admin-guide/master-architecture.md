@@ -177,7 +177,7 @@ The role of each secondary cell is configured at `//sys/@config/multicell_manage
 | `ex_transaction_coordinator` | The cell can coordinate externalized transactions. |
 | `sequoia_node_host` | The cell can host Sequoia metadata nodes. |
 
-If no roles are assigned, the secondary cell is idle and does no useful work.
+If no roles are configured, the secondary cell is idle only when no default roles are applied (for example, for dynamically propagated descriptors, or when `remove_secondary_cell_default_roles` is enabled). Otherwise, non-dynamically-propagated secondary cells may still receive the default roles `cypress_node_host | chunk_host`.
 
 ## Portals: Cypress sharding { #portals }
 
