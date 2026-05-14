@@ -474,7 +474,7 @@ Key properties of this pipeline:
 | **Fast** | Leader pre-advances `NextExpectedSequenceNumber` and sends the next batch immediately. | Default when follower is healthy. |
 | **Slow** | Leader waits for acknowledgment before sending the next batch. | Follower RPC error, or follower returns `mutations_accepted=false`. |
 
-In slow mode, follower replication latency is at least one round-trip per batch, which can significantly slow quorum commit when `N=3` (only 2 peers needed but one is lagging).
+In slow mode, replication to that follower takes at least one round-trip per batch. This does not by itself slow quorum commit in a 3-peer cell if the leader and another voting follower are healthy; it delays commits only when the slow follower is actually needed for quorum (for example, if another voting peer is unavailable or also slow).
 
 ### Interference between read requests, mutations, and snapshots { #read-mutation-snapshot-interference }
 
