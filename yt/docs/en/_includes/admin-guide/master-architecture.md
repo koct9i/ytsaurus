@@ -426,6 +426,130 @@ The three situations that produce hotspots are:
 3. **Keep transaction trees shallow**: use `commit` / `start new root transaction` patterns instead of deep nesting when the sub-tasks are truly independent.
 4. **Adjust ping period**: transactions with long timeouts can use a larger `ping_period` to reduce the ping mutation rate per transaction (the default ping period is `min(ping_period, timeout/2)`).
 
+## Master transaction lifecycle and cost model { #transaction-lifecycle }
+
+This section complements the user-facing [Transactions](../../user-guide/storage/transactions.md#master_transactions) page. It focuses on operator-visible behavior: where transaction work runs, what scales with transaction count, and why some workloads overload one coordinator cell.
+
+### Lifecycle
+
+1. **Start**
+   - The client chooses a coordinator cell according to [coordinator selection rules](#coordinator-selection).
+   - The start RPC creates the transaction object on that coordinator cell as a Hydra mutation.
+   - `replicate_to_master_cell_tags` can replicate the transaction to selected cells immediately. Without it, replication is usually deferred until the first cross-cell access.
+
+2. **Attach participants on demand**
+   - A transaction is initially known only to its coordinator and any cells replicated eagerly at start time.
+   - When a read or mutation under that transaction touches an object on another cell, the transaction is replicated to that cell before local execution.
+   - For mutating paths, replication uses boomerang ordering so that the transaction context and the mutation arrive safely on the leader in the required order.
+   - For read paths, replication is lighter, but it can still require the same [cross-cell freshness synchronization](#read-transactions) as other transactional reads.
+
+3. **Acquire locks and update state**
+   - Locks are taken on the cells that own the affected objects. Conflicts are detected when locks are acquired, not at commit time.
+   - Nested transactions inherit their parent's coordinator. Transactions with prerequisite transactions are pinned to the same coordinator cell.
+   - The coordinator tracks the participant set so that commit or abort can later be propagated to every cell that observed the transaction.
+
+4. **Keep the lease alive**
+   - While the transaction is active, the client periodically sends keep-alive pings.
+   - The effective ping period is `min(configured_ping_period, timeout / 2)`.
+   - If `ping_ancestors` is enabled, the same ping also renews the lease of every ancestor transaction.
+   - If the coordinator stops receiving pings for longer than the timeout, the transaction expires and is aborted.
+
+5. **Finish**
+   - `abort_tx` aborts the transaction and all nested children.
+   - `commit_tx` succeeds only after child transactions have already committed.
+   - For cross-cell transactions, commit uses the [transaction replication](#transaction-replication) protocol: once locks are held, the coordinator commits and broadcasts the result to participant cells through Hive.
+
+6. **Survive failover**
+   - Transaction state is durable because it lives in Hydra changelogs and snapshots.
+   - Leader failover does not by itself abort active transactions. The practical risk is lease expiration while the client is disconnected or while pings are delayed.
+
+### Feature summary
+
+| Feature | What it changes operationally | Main trade-off |
+|---------|-------------------------------|----------------|
+| Root transaction | Coordinator is chosen randomly from cells with `transaction_coordinator` role | Best load spreading |
+| Nested transaction | Reuses parent coordinator and lock lineage | Simpler semantics, but creates coordinator stickiness |
+| Prerequisite transactions | Force a single coordinator cell for all prerequisites | Preserves ordering, but can serialize unrelated work |
+| `replicate_to_master_cell_tags` | Pays replication cost at start instead of first touch | Lower first-access latency, higher upfront traffic |
+| `ping_period` | Controls steady-state keep-alive rate | Lower rate reduces load, but slows expiry detection |
+| `ping_ancestors` | Renews ancestor leases together with the child | Fewer lease surprises, more work per ping |
+| Cross-cell transactional reads | May need transaction replication and `SyncWith` before the read | Fresher view, higher read latency |
+
+### Cost model
+
+For an operator, transaction cost is dominated by coordinator mutations, cross-cell replication, and participant fanout.
+
+**Start**
+
+```text
+start_latency
+  ≈ client_rpc
+  + coordinator_hydra_commit
+  + optional_eager_replication
+```
+
+If the transaction starts only on the coordinator, the first cross-cell access pays the deferred replication cost later.
+
+**Steady state**
+
+```text
+effective_ping_period = min(ping_period, timeout / 2)
+coordinator_ping_qps ≈ active_transactions / effective_ping_period
+```
+
+If `ping_ancestors` is enabled, one ping refreshes more leases, but the coordinator still executes extra transaction work for the ancestor chain. Deep transaction trees therefore amplify coordinator load even when the user-visible transaction count looks moderate.
+
+**First cross-cell touch**
+
+```text
+first_touch_latency
+  ≈ transaction_replication
+  + optional_sync_with_remote_cell
+  + local_lock_or_mutation_cost
+```
+
+This is why workloads that touch many cells under the same transaction usually show worse tail latency than purely local transactions.
+
+**Commit**
+
+```text
+commit_cost
+  ≈ coordinator_hydra_commit
+  + hive_fanout_to_participants
+  + participant_apply_cost
+```
+
+For a single-cell transaction, the last two terms are absent. For a multi-cell transaction, the extra work grows roughly with the number of participant cells, not with the number of individual objects.
+
+### Resource footprint
+
+**CPU**
+
+- The coordinator pays for start, ping, commit, and abort mutations.
+- Participant cells pay when the transaction is replicated there, when locks are taken locally, and when the final commit or abort is applied.
+- Coordinator overload usually appears first on the automaton thread, because all of this work is serialized there.
+
+**Memory**
+
+- Every active transaction occupies memory on the coordinator.
+- Every replicated participant cell stores its own copy of transaction metadata.
+- Memory grows with transaction count, nesting depth, participant-cell count, lock count, staged objects, branched nodes, and prerequisite metadata.
+
+The user-facing transaction attributes listed in [Transactions](../../user-guide/storage/transactions.md#attributes) are a good proxy for what consumes memory: `nested_transaction_ids`, `staged_object_ids`, `branched_node_ids`, `locked_node_ids`, `lock_ids`, and `resource_usage`.
+
+**Network**
+
+- Start, ping, commit, and abort each generate control-plane RPC traffic.
+- Multi-cell transactions additionally generate Hive traffic for replication and finalization.
+- Cross-cell transactional reads can add `SyncWith` traffic before the read itself runs.
+
+### Practical implications
+
+- Many long-lived transactions mostly consume coordinator memory and steady ping bandwidth.
+- Deep or wide transaction trees mostly consume coordinator automaton CPU.
+- Transactions that touch many cells mostly consume Hive traffic and participant apply capacity.
+- Increasing `timeout` alone does not reduce load if `ping_period` stays small. To reduce ping pressure, both must be tuned together.
+
 ## Mutation ordering and commit pipeline { #mutation-pipeline }
 
 All durable state changes in a Hydra cell follow a strict pipeline:
