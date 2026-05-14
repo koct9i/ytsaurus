@@ -316,6 +316,6 @@ A single-cell master setup is sufficient for most clusters. Consider adding seco
 - Master RSS memory is approaching the safety margin.
 - Node registration and disposal operations are causing significant latency spikes (visible as long mutation queues in logs).
 
-Starting with three secondary chunk-host cells provides a practical balance between operational complexity and capacity headroom. Up to 32 secondary cells are supported; this limit was raised in later versions.
+Starting with three secondary chunk-host cells provides a practical balance between operational complexity and capacity headroom. Up to 48 secondary cells are supported.
 
 When new secondary cells are added, existing chunks do not automatically move — only new chunks are assigned to the new cells. Rebalancing existing data requires changing the `external_cell_tag` on table objects, which should be done deliberately.
