@@ -214,8 +214,8 @@ The reliable delivery protocol works as follows:
 1. The sender's persistent mailbox is an ordered queue of outgoing mutations with two pointers:
    - **Persistent pointer**: the last message confirmed as durably applied by the receiver.
    - **Transient pointer**: the last message sent (but not yet confirmed).
-2. Periodically, the receiver cell polls the sender asking for new messages above the transient pointer. Received messages are applied as mutations, and the receiver's running count of applied messages is persisted atomically with each applied mutation.
-3. The receiver reports its count back to the sender, which advances the persistent pointer.
+2. Periodically, the sender posts outgoing messages above its persistent pointer to the receiver (via `PostMessages`). The receiver applies them as mutations, and persists its incoming progress atomically with each applied mutation.
+3. The receiver returns its persistent/transient incoming pointers to the sender, which uses them to advance the sender-side persistent pointer.
 
 The protocol is similar to TCP acknowledgements. Because both the outgoing queue and the per-channel counter are persistent, messages survive restarts on either side.
 
