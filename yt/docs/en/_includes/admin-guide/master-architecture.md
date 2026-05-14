@@ -305,7 +305,7 @@ Because Hive preserves per-channel ordering, transaction start and commit messag
 
 ### Chunk placement { #chunk-placement }
 
-When a table is created (or when a table's chunk-list needs to be allocated to a secondary cell), the primary cell calls `PickSecondaryChunkHostCell`. The algorithm is:
+When a table is created (or when a table's chunk-list needs to be allocated to a secondary cell), the cell hosting the native Cypress node for that object calls `PickSecondaryChunkHostCell`. In the common case this is the primary cell, but for objects inside a portal subtree it is the corresponding external/portal cell for that subtree. The algorithm is:
 
 1. Collect all registered secondary cells that have the `chunk_host` role.
 2. Fetch the current chunk count for each candidate cell from the in-memory multicell statistics cache.
