@@ -171,7 +171,7 @@ The role of each secondary cell is configured at `//sys/@config/multicell_manage
 | Role | Description |
 |------|-------------|
 | `chunk_host` | The cell hosts chunk metadata. New chunks are automatically assigned to chunk-host cells. |
-| `dedicated_chunk_host` | The cell is dedicated to hosting chunk metadata. |
+| `dedicated_chunk_host` | The cell is dedicated to hosting chunk metadata for explicit placement via `external_cell_tag`. It is not considered for automatic chunk-host placement and must not be combined with `chunk_host`. |
 | `cypress_node_host` | The cell can host Cypress subtrees moved there via portals. Subtree assignment is manual. |
 | `transaction_coordinator` | The cell can act as transaction coordinator for cross-cell transactions. |
 | `ex_transaction_coordinator` | The cell can coordinate externalized transactions. |
