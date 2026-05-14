@@ -175,7 +175,7 @@ The role of each secondary cell is configured at `//sys/@config/multicell_manage
 | `cypress_node_host` | The cell can host Cypress subtrees moved there via portals. Subtree assignment is manual. |
 | `transaction_coordinator` | The cell can act as transaction coordinator for cross-cell transactions. |
 | `ex_transaction_coordinator` | The cell can coordinate externalized transactions. |
-| `sequoia_node_host` | The cell can host Sequoia metadata nodes. |
+| `sequoia_node_host` | The cell can host Sequoia metadata nodes and must not be combined with `chunk_host`. |
 
 If no roles are configured, the secondary cell is idle only when no default roles are applied (for example, for dynamically propagated descriptors, or when `remove_secondary_cell_default_roles` is enabled). Otherwise, non-dynamically-propagated secondary cells may still receive the default roles `cypress_node_host | chunk_host`.
 
