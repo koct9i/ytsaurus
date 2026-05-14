@@ -137,8 +137,8 @@ Every persistent object (Cypress node, chunk, transaction, account, etc.) has a 
 
 | Part | Meaning |
 |------|---------|
-| A | Hydra term (election epoch) in which the object was created |
-| B | Mutation sequence number within that term |
+| A | Version segment identifier for the object |
+| B | Version record identifier within that segment |
 | C | Encoded **Object Type** and **Cell Tag** of the creating cell |
 | D | Random component |
 
