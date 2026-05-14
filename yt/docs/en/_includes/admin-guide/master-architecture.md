@@ -289,7 +289,7 @@ Skipping or replaying mutations from a Hive channel is dangerous. The Hive deliv
 Hive messages are not pushed in real time. There are two delivery mechanisms:
 
 1. **Periodic delivery**: the sender schedules periodic `PostOutcomingMessages` runs and posts pending messages to the receiver via `PostMessages` on a configurable interval (typically a few hundred milliseconds to a few seconds).
-2. **Explicit SyncWith**: a cell can call `SyncWith(remote_cell_id)` to block until all messages from that remote cell that were already queued before the call are delivered and applied locally. This is used in cross-cell read operations that require causal consistency.
+2. **Explicit SyncWith**: a cell can call `SyncWith(remote_cell_id)` to block until all messages that were already queued on the remote cell before the call are posted by that remote sender via the normal `PostMessages` flow, delivered to the local cell, and applied locally. This is used in cross-cell read operations that require causal consistency.
 
 ### Confirmed `SyncWith` semantics (code-level) { #syncwith-semantics }
 
