@@ -476,6 +476,24 @@ Key properties of this pipeline:
 
 In slow mode, follower replication latency is at least one round-trip per batch, which can significantly slow quorum commit when `N=3` (only 2 peers needed but one is lagging).
 
+### Interference between read requests, mutations, and snapshots { #read-mutation-snapshot-interference }
+
+Read requests, mutations, and snapshot operations are not independent in practice. They share Hydra queues, CPU, memory, and disk resources, so load in one path can increase latency in the others.
+
+| Interference pair | Mechanism | User-visible effect |
+|-------------------|-----------|---------------------|
+| **Reads ↔ Mutations** | Follower reads wait for `SyncWithUpstream`; heavy mutation streams increase catch-up and automaton apply backlog. | Read latency increases, even for read-only workloads. |
+| **Reads ↔ Snapshots** | Snapshot creation forks the master process; copy-on-write and memory pressure can slow CPU scheduling and cache locality while reads still execute. | Temporary tail-latency growth for reads during snapshot windows. |
+| **Mutations ↔ Snapshots** | Normal snapshots do not stop mutations, but snapshot I/O and memory pressure can compete with changelog and automaton work. Read-only snapshots explicitly stop mutation acceptance. | Higher mutation commit latency; in read-only snapshot mode, write requests are rejected. |
+| **Cross-cell reads ↔ Read-only mode** | Cross-cell reads that request synchronization (`cell_tags_to_sync_with` or transaction-replication sync) need `SyncWith`; object service rejects this when Hydra is read-only. | Read requests that require cross-cell freshness fail with `ReadOnly`. |
+
+#### Practical guidance
+
+1. Schedule snapshot builds outside peak write/read windows when possible.
+2. For latency-sensitive reads, avoid unnecessary cross-cell synchronization tags; use them only when read-after-write visibility across cells is required.
+3. Monitor both mutation and read indicators together: automaton CPU, mutation queue depth, and read latency percentiles.
+4. Use read-only snapshot mode only for maintenance windows where temporary write unavailability is acceptable.
+
 ## Performance considerations { #performance }
 
 ### Automaton thread bottleneck
