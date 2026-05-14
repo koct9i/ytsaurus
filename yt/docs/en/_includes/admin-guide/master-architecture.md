@@ -232,6 +232,41 @@ Hive messages are not pushed in real time. There are two delivery mechanisms:
 1. **Periodic polling**: the receiver polls the sender on a configurable interval (typically a few hundred milliseconds to a few seconds).
 2. **Explicit SyncWith**: a cell can call `SyncWith(remote_cell_id)` to block until all messages from that remote cell queued before the call are received and applied locally. This is used in cross-cell read operations that require causal consistency.
 
+### Confirmed `SyncWith` semantics (code-level) { #syncwith-semantics }
+
+The exact guarantee implemented by `IHiveManager::SyncWith` is:
+
+- The sync is **per remote cell** (not global): for a given remote cell `R`, wait until all mutations that were already queued on `R` at call time are durably applied on the local cell.
+- The operation is effectively a local barrier keyed by the remote mailbox progress, so it is not transitive across third cells.
+- `SyncWith(self)` is a no-op.
+- If the remote cell is unknown/disconnected or sync times out, the operation fails with `Unavailable`.
+
+On the object-service path, sync is part of request execution:
+
+- The execute session collects cell tags from request metadata (`cell_tags_to_sync_with`) and transaction-replication context, then performs sync phases before/after invocation.
+- By default, phase one also waits for the strongly ordered transaction barrier (Sequoia-related); this can be explicitly suppressed.
+- If synchronization is required while the master is in read-only mode, the request fails (`Cannot synchronize with cells when read-only mode is active`).
+
+### Examples and request impact { #syncwith-examples }
+
+Typical effects on user-visible request behavior:
+
+1. **Cross-cell metadata read with explicit sync target**
+   - A client adds `cell_tags_to_sync_with=[X]` to force synchronization with cell `X` before serving a local read.
+   - Result: stronger causal visibility for data replicated from `X`, at the cost of extra latency.
+
+2. **Default execution path with automatic sync dependencies**
+   - Object-service execution may add sync dependencies from transaction replication and run multiple sync phases.
+   - Result: reads/writes that touch cross-cell transactional state can block longer than purely local requests.
+
+3. **Suppressed synchronization flags**
+   - Request flags such as `suppress_upstream_sync`, `suppress_transaction_coordinator_sync`, and `suppress_strongly_ordered_transaction_barrier` disable parts of synchronization.
+   - Result: lower latency and fewer cross-cell waits, but the response may observe a less up-to-date or weaker ordered view.
+
+4. **Remote cell failover or connectivity loss**
+   - If a required remote cell cannot be synchronized with, `SyncWith` fails.
+   - Result: the request returns a transient failure (`Unavailable`) instead of serving potentially inconsistent cross-cell state.
+
 ### The three-cell ordering problem { #three-cell-problem }
 
 Hive channels are **per-pair** and do not provide global ordering across channels. Consider three cells A, B, C:
