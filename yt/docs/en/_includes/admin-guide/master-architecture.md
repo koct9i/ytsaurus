@@ -155,6 +155,65 @@ Each type of persistent object has one of two replication policies:
 
 Globally replicated objects enable each cell to perform local validations (quota checks, codec validation, etc.) without round-tripping to the primary cell on every mutation.
 
+#### Read consistency for globally replicated objects { #global-object-read-consistency }
+
+Because globally replicated objects are updated by posting the change as a Hive message from the native cell to every secondary cell, reads on different cells observe the state at different points in time:
+
+| Read target | Consistency level | When up-to-date |
+|-------------|------------------|-----------------|
+| **Primary (native) cell** | Strongly consistent: always reflects the latest committed mutation. | Immediately after the write returns. |
+| **Secondary cell** | Eventually consistent: reflects the state at the time the Hive message for the last write was applied. | After the Hive message for that write has been received and applied. |
+
+The Hive channel between any two cells maintains strict per-channel ordering, so an observer on a given secondary cell always sees writes to the same object in the order they were applied on the primary. However, two independent secondaries may apply the same write at different times, so a client that reads from multiple secondary cells may temporarily see different values for the same attribute.
+
+**When this matters operationally:**
+
+- After modifying an account's quota on the primary cell (`//sys/accounts/<name>/@resource_limits`), a subsequent read from a secondary cell may still return the old quota until the Hive message is applied.
+- After creating a new account, the account may not yet be visible on a secondary cell even if the primary cell has already confirmed the creation. Reading the account list from any secondary before the Hive message is applied will not include the new account.
+- To guarantee that a secondary cell has applied a write, use `SyncWith` against that cell (see [SyncWith semantics](#syncwith-semantics)) or direct the subsequent read to the primary cell.
+
+#### Global object update mechanics and performance implications { #global-object-update-mechanics }
+
+Every write to a globally replicated object (account, user, group, medium, etc.) produces a **broadcast fan-out**: after the mutation is committed on the native cell, the object manager posts one Hive message per secondary cell carrying the updated writable attributes. The total cost of one attribute write scales with the number of secondary cells.
+
+**Two-phase creation and removal**
+
+Accounts, users, and groups (types with `TwoPhaseCreation` and `TwoPhaseRemoval` flags) use a distributed confirmation protocol to ensure every cell sees the object in a consistent state:
+
+```
+Creation:
+  Native cell commits CreateObject mutation → object at CreationStarted
+      │
+      ├──► Hive: TReqCreateForeignObject → secondary cell 1  ──┐
+      ├──► Hive: TReqCreateForeignObject → secondary cell 2  ──┤ all confirm
+      └──► Hive: TReqCreateForeignObject → secondary cell N  ──┤ via TReqConfirmObjectLifeStage
+                                                                │
+                            vote count == N+1  ◄───────────────┘
+                                     │
+                          CreationPreCommitted
+                                     │
+                    secondaries confirm again
+                                     │
+                          CreationCommitted ← object becomes usable
+```
+
+Until `CreationCommitted` is reached, the object exists on the native cell but cannot yet be used as a valid reference (e.g., a new account cannot be set as the parent of another account until committed).
+
+Removal follows the symmetric path (`RemovalStarted` → `RemovalPreCommitted` → `RemovalAwaitingCellsSync` → `RemovalCommitted`), where the object is removed from all cells only after every secondary has confirmed it released its reference counter.
+
+**Performance implications of writes to globally replicated objects:**
+
+- **Fan-out cost**: writing one attribute to a globally replicated object in a cluster with *N* secondary cells triggers *N* Hive messages. Each message is a mutation on a secondary cell's automaton thread.
+- **Creation throughput**: two-phase creation requires two full rounds of all-secondary confirmations. Bulk account creation is therefore serialized and throughput is proportional to `1 / (2 × max_secondary_hive_round_trip_latency)`. Avoid creating thousands of accounts in a tight loop.
+- **Hot global objects**: the root account (`//sys/accounts/root`) or other shared objects that are modified frequently (e.g., quota enforcement side effects from gossip) generate a steady stream of Hive fan-out mutations to all secondary cells. Heavy traffic to a hot global object can increase automaton-thread load on every cell in the cluster.
+- **Large clusters**: the fan-out effect grows linearly with the number of secondary cells. Clusters with many secondary cells are more sensitive to bursts of global object mutations than single-cell deployments.
+
+**Mitigation strategies:**
+
+1. **Batch attribute updates**: where the type supports setting multiple attributes in one RPC (`MultisetAttributes`), batch changes to reduce the number of Hive fan-out rounds.
+2. **Avoid unnecessary modifications to global objects**: even no-op attribute sets (setting an attribute to its existing value) can trigger a replication message depending on how the proxy is invoked.
+3. **Monitor Hive queue depth**: a growing queue depth on any Hive channel to a secondary cell is an early sign of a fan-out overload. Check `/orchid/monitoring/hive/mailboxes/{cell_id}/outgoing_message_count` on the primary cell.
+
 ### Native and external table objects { #native-external }
 
 When chunk multi-cell is used, a table has two representations:
