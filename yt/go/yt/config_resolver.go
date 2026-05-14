@@ -36,11 +36,11 @@ type ytConfigProfile struct {
 }
 
 type ytConfigFile struct {
-	Proxy          ytConfigProxy            `yson:"proxy" json:"proxy"`
-	Token          string                   `yson:"token" json:"token"`
-	TokenPath      string                   `yson:"token_path" json:"token_path"`
-	ConfigVersion  *int64                   `yson:"config_version" json:"config_version"`
-	DefaultProfile string                   `yson:"default_profile" json:"default_profile"`
+	Proxy          ytConfigProxy              `yson:"proxy" json:"proxy"`
+	Token          string                     `yson:"token" json:"token"`
+	TokenPath      string                     `yson:"token_path" json:"token_path"`
+	ConfigVersion  *int64                     `yson:"config_version" json:"config_version"`
+	DefaultProfile string                     `yson:"default_profile" json:"default_profile"`
 	Profiles       map[string]ytConfigProfile `yson:"profiles" json:"profiles"`
 }
 
