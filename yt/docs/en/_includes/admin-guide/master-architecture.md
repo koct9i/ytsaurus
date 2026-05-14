@@ -502,7 +502,7 @@ After cells are added and global objects are replicated, assign roles via:
 yt set //sys/@config/multicell_manager/cell_descriptors/<cell_tag>/roles '[chunk_host]'
 ```
 
-Until roles are assigned, secondary cells accept no work and serve no traffic.
+If no explicit roles are assigned, a secondary cell may still receive the default `cypress_node_host | chunk_host` roles unless `remove_secondary_cell_default_roles` is enabled or the cell is dynamically propagated. Assign roles explicitly to control what work the new cell serves after addition.
 
 ### Scaling recommendations
 
