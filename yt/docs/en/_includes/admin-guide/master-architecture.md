@@ -318,7 +318,7 @@ When a table is created (or when a table's chunk-list needs to be allocated to a
 
 The `bias` parameter (typically `1.0`) doubles the effective probability of low candidates compared to high ones. This gives **biased stochastic load balancing**: underloaded cells are strongly preferred but all cells can still receive new objects, avoiding starvation of any cell.
 
-The statistics used for the decision are collected by a periodic gossip round (see [Account usage gossip](#gossip)), so they can lag by a few seconds. In practice this means placement decisions during a burst of table creation events may not be perfectly balanced, but they converge quickly.
+The statistics used for the decision come from periodic multicell node statistics updates (`TMulticellNodeStatistics`; see `GetMulticellNodeStatistics()`), so they can lag by a few seconds. In practice this means placement decisions during a burst of table creation events may not be perfectly balanced, but they converge quickly.
 
 {% note info %}
 
