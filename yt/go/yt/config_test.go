@@ -260,6 +260,33 @@ func TestNormalizeConfigV2Profile(t *testing.T) {
 	require.Equal(t, "t2", resolved.Token)
 }
 
+func TestNormalizeConfigJSONFile(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".yt")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+
+	configPath := filepath.Join(configDir, "config")
+	content := []byte(`{
+		"proxy": {
+			"url": "json-proxy",
+			"http_proxy_role": "json-http-role",
+			"enable_proxy_discovery": false
+		},
+		"token": "json-token"
+	}`)
+	require.NoError(t, os.WriteFile(configPath, content, 0o644))
+
+	t.Setenv("HOME", home)
+	t.Setenv("YT_CONFIG_FORMAT", "json")
+
+	resolved, err := NormalizeConfig(&Config{}, ConfigBackendHTTP)
+	require.NoError(t, err)
+	require.Equal(t, "json-proxy", resolved.Proxy)
+	require.Equal(t, "json-http-role", resolved.ProxyRole)
+	require.Equal(t, "json-token", resolved.Token)
+	require.True(t, resolved.DisableProxyDiscovery)
+}
+
 func TestNormalizeConfigExplicitOverrides(t *testing.T) {
 	t.Setenv("YT_PROXY", "env-proxy")
 	t.Setenv("YT_HTTP_PROXY_ROLE", "env-http-role")

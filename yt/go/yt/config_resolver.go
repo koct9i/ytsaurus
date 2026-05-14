@@ -18,6 +18,32 @@ const (
 	ConfigBackendRPC  ConfigBackend = "rpc"
 )
 
+type ytConfigProxy struct {
+	URL                  string `yson:"url" json:"url"`
+	HTTPProxyRole        string `yson:"http_proxy_role" json:"http_proxy_role"`
+	RPCProxyRole         string `yson:"rpc_proxy_role" json:"rpc_proxy_role"`
+	NetworkName          string `yson:"network_name" json:"network_name"`
+	ProxyDiscoveryURL    string `yson:"proxy_discovery_url" json:"proxy_discovery_url"`
+	EnableProxyDiscovery *bool  `yson:"enable_proxy_discovery" json:"enable_proxy_discovery"`
+	PreferHTTPS          *bool  `yson:"prefer_https" json:"prefer_https"`
+	TVMOnly              *bool  `yson:"tvm_only" json:"tvm_only"`
+}
+
+type ytConfigProfile struct {
+	Proxy     ytConfigProxy `yson:"proxy" json:"proxy"`
+	Token     string        `yson:"token" json:"token"`
+	TokenPath string        `yson:"token_path" json:"token_path"`
+}
+
+type ytConfigFile struct {
+	Proxy          ytConfigProxy            `yson:"proxy" json:"proxy"`
+	Token          string                   `yson:"token" json:"token"`
+	TokenPath      string                   `yson:"token_path" json:"token_path"`
+	ConfigVersion  *int64                   `yson:"config_version" json:"config_version"`
+	DefaultProfile string                   `yson:"default_profile" json:"default_profile"`
+	Profiles       map[string]ytConfigProfile `yson:"profiles" json:"profiles"`
+}
+
 func NormalizeConfig(c *Config, backend ConfigBackend) (*Config, error) {
 	if c == nil {
 		return nil, fmt.Errorf("config is nil")
@@ -30,40 +56,29 @@ func NormalizeConfig(c *Config, backend ConfigBackend) (*Config, error) {
 
 	resolved := *c
 
-	proxyFromFile := readString(fromFile, "proxy", "url")
-	httpProxyRoleFromFile := readString(fromFile, "proxy", "http_proxy_role")
-	rpcProxyRoleFromFile := readString(fromFile, "proxy", "rpc_proxy_role")
-	networkNameFromFile := readString(fromFile, "proxy", "network_name")
-	proxyDiscoveryURLFromFile := readString(fromFile, "proxy", "proxy_discovery_url")
-	enableProxyDiscoveryFromFile := readBoolPtr(fromFile, "proxy", "enable_proxy_discovery")
-	preferHTTPSFromFile := readBoolPtr(fromFile, "proxy", "prefer_https")
-	tvmOnlyFromFile := readBoolPtr(fromFile, "proxy", "tvm_only")
-	tokenFromFile := readString(fromFile, "token")
-	tokenPathFromFile := readString(fromFile, "token_path")
-
 	if resolved.Proxy == "" {
-		resolved.Proxy = firstNonEmpty(os.Getenv("YT_PROXY"), proxyFromFile)
+		resolved.Proxy = firstNonEmpty(os.Getenv("YT_PROXY"), fromFile.Proxy.URL)
 	}
 	if resolved.ProxyRole == "" {
-		resolved.ProxyRole = readProxyRoleForBackend(backend, httpProxyRoleFromFile, rpcProxyRoleFromFile)
+		resolved.ProxyRole = readProxyRoleForBackend(backend, fromFile.Proxy.HTTPProxyRole, fromFile.Proxy.RPCProxyRole)
 	}
 	if resolved.NetworkName == "" {
-		resolved.NetworkName = networkNameFromFile
+		resolved.NetworkName = fromFile.Proxy.NetworkName
 	}
 	if resolved.HostsPath == "" {
-		resolved.HostsPath = firstNonEmpty(os.Getenv("YT_HOSTS"), proxyDiscoveryURLFromFile)
+		resolved.HostsPath = firstNonEmpty(os.Getenv("YT_HOSTS"), fromFile.Proxy.ProxyDiscoveryURL)
 	}
 	if resolved.Token == "" {
-		resolved.Token = firstNonEmpty(os.Getenv("YT_TOKEN"), tokenFromFile)
+		resolved.Token = firstNonEmpty(os.Getenv("YT_TOKEN"), fromFile.Token)
 	}
 	if resolved.TokenPath == "" {
-		resolved.TokenPath = firstNonEmpty(lookupTokenFileFromEnv(), tokenPathFromFile)
+		resolved.TokenPath = firstNonEmpty(lookupTokenFileFromEnv(), fromFile.TokenPath)
 	}
 	if !resolved.ReadTokenFromFile && resolved.Token == "" && resolved.TokenPath != "" {
 		resolved.ReadTokenFromFile = true
 	}
 
-	enableProxyDiscovery, err := readEnableProxyDiscovery(enableProxyDiscoveryFromFile)
+	enableProxyDiscovery, err := readEnableProxyDiscovery(fromFile.Proxy.EnableProxyDiscovery)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +86,7 @@ func NormalizeConfig(c *Config, backend ConfigBackend) (*Config, error) {
 		resolved.DisableProxyDiscovery = true
 	}
 
-	preferHTTPS, err := readPreferHTTPS(preferHTTPSFromFile)
+	preferHTTPS, err := readPreferHTTPS(fromFile.Proxy.PreferHTTPS)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +94,7 @@ func NormalizeConfig(c *Config, backend ConfigBackend) (*Config, error) {
 		resolved.UseTLS = true
 	}
 
-	tvmOnly, err := readTVMOnly(tvmOnlyFromFile)
+	tvmOnly, err := readTVMOnly(fromFile.Proxy.TVMOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -150,10 +165,10 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func loadYTConfigFromFile() (map[string]any, error) {
+func loadYTConfigFromFile() (*ytConfigProfile, error) {
 	configPath, ok := resolveYTConfigPath()
 	if !ok {
-		return nil, nil
+		return &ytConfigProfile{}, nil
 	}
 
 	content, err := os.ReadFile(configPath)
@@ -162,7 +177,7 @@ func loadYTConfigFromFile() (map[string]any, error) {
 	}
 
 	configFormat := strings.ToLower(firstNonEmpty(os.Getenv("YT_CONFIG_FORMAT"), "yson"))
-	var parsed map[string]any
+	var parsed ytConfigFile
 	switch configFormat {
 	case "yson":
 		if err = yson.Unmarshal(content, &parsed); err != nil {
@@ -218,161 +233,34 @@ func isReadable(path string) bool {
 	return true
 }
 
-func extractProfileConfig(parsed map[string]any) (map[string]any, error) {
-	configVersionValue, exists := parsed["config_version"]
-	if !exists {
-		return parsed, nil
-	}
-	configVersion, ok := readInt(configVersionValue)
-	if !ok {
-		return nil, fmt.Errorf("unknown config version %v", configVersionValue)
-	}
-
-	if configVersion != 2 {
-		return nil, fmt.Errorf("unknown config version %d", configVersion)
+func extractProfileConfig(parsed ytConfigFile) (*ytConfigProfile, error) {
+	if parsed.ConfigVersion == nil {
+		profile := ytConfigProfile{
+			Proxy:     parsed.Proxy,
+			Token:     parsed.Token,
+			TokenPath: parsed.TokenPath,
+		}
+		return &profile, nil
 	}
 
-	profilesAny, ok := parsed["profiles"]
-	if !ok {
+	if *parsed.ConfigVersion != 2 {
+		return nil, fmt.Errorf("unknown config version %d", *parsed.ConfigVersion)
+	}
+	if parsed.Profiles == nil {
 		return nil, fmt.Errorf("missing profiles key in YT config")
-	}
-	profiles, ok := profilesAny.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("profiles should be object")
 	}
 
 	profileName := os.Getenv("YT_CONFIG_PROFILE")
 	if profileName == "" {
-		defaultProfile, _ := parsed["default_profile"].(string)
-		profileName = defaultProfile
+		profileName = parsed.DefaultProfile
 		if profileName == "" {
 			return nil, fmt.Errorf("profile has not been set and there is no default profile in the config")
 		}
 	}
 
-	profileAny, ok := profiles[profileName]
+	profile, ok := parsed.Profiles[profileName]
 	if !ok {
 		return nil, fmt.Errorf("unknown profile %q", profileName)
 	}
-
-	profile, ok := profileAny.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("profile %q should be object", profileName)
-	}
-
-	return profile, nil
-}
-
-func readInt(value any) (int64, bool) {
-	switch v := value.(type) {
-	case int:
-		return int64(v), true
-	case int8:
-		return int64(v), true
-	case int16:
-		return int64(v), true
-	case int32:
-		return int64(v), true
-	case int64:
-		return v, true
-	case uint:
-		return int64(v), true
-	case uint8:
-		return int64(v), true
-	case uint16:
-		return int64(v), true
-	case uint32:
-		return int64(v), true
-	case uint64:
-		return int64(v), true
-	case float64:
-		if !isWholeFloat64(v) {
-			return 0, false
-		}
-		return int64(v), true
-	case float32:
-		if !isWholeFloat64(float64(v)) {
-			return 0, false
-		}
-		return int64(v), true
-	default:
-		return 0, false
-	}
-}
-
-func readString(config map[string]any, path ...string) string {
-	value := readPath(config, path...)
-	if s, ok := value.(string); ok {
-		return s
-	}
-	return ""
-}
-
-func readBoolPtr(config map[string]any, path ...string) *bool {
-	value := readPath(config, path...)
-	if value == nil {
-		return nil
-	}
-
-	switch b := value.(type) {
-	case bool:
-		return &b
-	case int:
-		v := b != 0
-		return &v
-	case int8:
-		v := b != 0
-		return &v
-	case int16:
-		v := b != 0
-		return &v
-	case int32:
-		v := b != 0
-		return &v
-	case int64:
-		v := b != 0
-		return &v
-	case uint:
-		v := b != 0
-		return &v
-	case uint8:
-		v := b != 0
-		return &v
-	case uint16:
-		v := b != 0
-		return &v
-	case uint32:
-		v := b != 0
-		return &v
-	case uint64:
-		v := b != 0
-		return &v
-	case float32:
-		v := b != 0
-		return &v
-	case float64:
-		v := b != 0
-		return &v
-	default:
-		return nil
-	}
-}
-
-func readPath(config map[string]any, path ...string) any {
-	if config == nil {
-		return nil
-	}
-
-	var value any = config
-	for _, key := range path {
-		m, ok := value.(map[string]any)
-		if !ok {
-			return nil
-		}
-		value, ok = m[key]
-		if !ok {
-			return nil
-		}
-	}
-	return value
+	return &profile, nil
 }
