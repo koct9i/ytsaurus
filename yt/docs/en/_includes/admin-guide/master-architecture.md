@@ -580,9 +580,10 @@ The `enable_local_read_busy_wait` flag makes the automaton thread spin-wait
 instead of sleeping during the read quantum, which keeps automaton CPU counters
 accurate but consumes the core continuously.
 
-There is also a `LocalReadOffloadPool_` (1 thread, `LocalReadOff`) used for
+There is also a `LocalReadOffloadPool_` (`LocalReadOff`) used for
 off-loading specific heavy sub-operations within a read (for example,
-serialization of very large attribute maps).
+serialization of very large attribute maps). Its size is configured via
+`local_read_offload_thread_count`.
 
 ### Per-user throttling
 
