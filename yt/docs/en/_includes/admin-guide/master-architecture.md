@@ -70,8 +70,8 @@ Failover is local to a Hydra cell and usually completes within seconds, but clie
 | 1. Healthy leader | One peer is leader and accepts mutations; followers serve most reads after `SyncWithUpstream`. | Normal read/write latency. |
 | 2. Leader loss detected | Current leader crashes, loses connectivity, or loses quorum. | New writes to this cell fail or are retried until a new leader is elected. |
 | 3. Election and quorum recovery | Remaining peers run leader election and establish a new term. | This cell is temporarily unavailable for linearizable read/write traffic. |
-| 4. New leader elected | A new leader is chosen. | Write traffic can recover, while read traffic may still see a short gap due to lease/grace logic. |
-| 5. Leader grace delay ends | New leader starts serving reads after old lease is guaranteed expired. | Normal service resumes for this cell. |
+| 4. New leader elected | A new leader is chosen, but it is still completing recovery steps before transitioning to active service. | External read/write traffic for this cell is still unavailable during grace delay, follower recovery, lease acquisition, and the initial heartbeat. |
+| 5. Leader grace delay ends | Recovery completes, the old lease is guaranteed expired, and the new leader begins serving external traffic. | Normal read/write service resumes for this cell. |
 
 In multicell setups, this timeline applies **independently to each cell**.
 
