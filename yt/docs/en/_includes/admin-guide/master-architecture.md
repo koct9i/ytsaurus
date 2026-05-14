@@ -57,9 +57,29 @@ The same mechanism also works across cells: a cell can sync with another cell's 
 
 ### Leader lease and leader grace delay
 
-After a leader is elected it does not serve requests immediately. There is a configurable **leader lease grace delay** during which the new leader waits before answering reads. The reason: the previous leader may have answered some read requests and those answers must not be invalidated. Even though the previous leader can no longer commit mutations (it lost its changelog), it could still have cached responses in flight. The grace delay ensures the old leader's lease expires before the new leader starts serving.
+After a leader is elected it does not serve requests immediately. There is a configurable **leader lease grace delay** during which the new leader waits before answering reads. The reason: the previous leader may have answered some read requests and those answers must not be invalidated. Even though the previous leader can no longer commit mutations (it no longer has leadership and cannot append new changelog records), it could still have cached responses in flight. The grace delay ensures the old leader's lease expires before the new leader starts serving.
 
 This delay is short (typically a few seconds) but it is visible as an unavailability window during leader failover.
+
+### Master failover and availability timeline { #failover-timeline }
+
+Failover is local to a Hydra cell and usually completes within seconds, but clients observe it as a short sequence of degraded states:
+
+| Phase | What happens | Availability impact |
+|-------|--------------|---------------------|
+| 1. Healthy leader | One peer is leader and accepts mutations; followers serve most reads after `SyncWithUpstream`. | Normal read/write latency. |
+| 2. Leader loss detected | Current leader crashes, loses connectivity, or loses quorum. | New writes to this cell fail or are retried until a new leader is elected. |
+| 3. Election and quorum recovery | Remaining peers run leader election and establish a new term. | This cell is temporarily unavailable for linearizable read/write traffic. |
+| 4. New leader elected | A new leader is chosen. | Write traffic can recover, while read traffic may still see a short gap due to lease/grace logic. |
+| 5. Leader grace delay ends | New leader starts serving reads after old lease is guaranteed expired. | Normal service resumes for this cell. |
+
+In multicell setups, this timeline applies **independently to each cell**.
+
+Possible multicell interference during failover:
+
+- A failover in one secondary cell does not stop unrelated traffic on other cells, but any operation that touches the failed cell (for example, table/chunk metadata hosted there) will stall or retry.
+- Cross-cell reads can see amplified latency because they may need both local catch-up (`SyncWithUpstream`) and remote Hive synchronization with the recovering cell.
+- If the primary cell is the one failing over, user-visible impact is broader because the primary hosts the root Cypress tree and coordinates global metadata flows.
 
 ### Changelog and snapshot storage { #changelog-snapshot }
 
