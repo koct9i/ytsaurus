@@ -13,7 +13,7 @@ Dynamic tables do not scale by one universal knob. Different problems require di
 - **Queue throughput** scales by sharding ordered tables and by spreading producers and consumers across tablets.
 - **Data volume** scales only if the bundle also has headroom for compaction, partitioning, preload, and balancing.
 
-The raw meeting logs highlight a useful mental model: a tablet is not only a logical shard, but also a unit of background work. If you increase traffic without keeping enough room for flush and compaction, performance degrades long before physical storage is exhausted.
+A useful mental model is that a tablet is not only a logical shard, but also a unit of background work. If you increase traffic without keeping enough room for flush and compaction, performance degrades long before physical storage is exhausted.
 
 ## Initial sizing checklist
 
