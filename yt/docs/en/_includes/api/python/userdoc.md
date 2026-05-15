@@ -62,8 +62,8 @@ When each configuration layer is applied, all dict nodes are merged rather than 
 * `update_config_from_env(config, config_profile=None)` — applies environment/file sources to the provided config in this order:
    1. `YT_CONFIG_PATCHES` (list_fragment; patches are applied from last to first).
    2. Shared Python SDK/CLI configuration file:
-      - Path selection: `YT_CONFIG_PATH` if it points to an existing file, otherwise `~/.yt/config`, otherwise `/etc/ytclient.conf`.
-      - If none of these files is readable, this source is skipped.
+      - Path selection: `YT_CONFIG_PATH` if it points to an existing file; otherwise `~/.yt/config` if it exists; otherwise `/etc/ytclient.conf`.
+      - If the selected file is unreadable, the loader does not fall back to the next candidate. If `YT_CONFIG_PATH` points to an existing but unreadable file, loading fails with `YtConfigError`; otherwise this source is skipped.
       - Format selection: `YT_CONFIG_FORMAT` (`yson` or `json`), by default `yson`.
       - For `config_version=2`, profile selection uses (in order): explicit `config_profile` argument, `YT_CONFIG_PROFILE`, then `default_profile` from the file.
    3. `YT_*` environment variables from default-config shortcuts (`YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`, `YT_LOG_LEVEL`, and others).
