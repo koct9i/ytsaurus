@@ -89,6 +89,152 @@ Periodically, Hydra takes a **snapshot** — a complete serialized image of the 
 
 Snapshot creation uses a **fork** on master processes (forked child serializes the state while the parent continues running). This means the master process needs roughly double its working-set memory available at snapshot time. For large clusters the snapshot can be hundreds of gigabytes. Storage for snapshots is configured separately from changelogs.
 
+#### When the master initiates a snapshot { #snapshot-initiation }
+
+Snapshots are initiated by the **active leader** of a Hydra cell. The leader requests a checkpoint in the following cases:
+
+1. **Periodic snapshot timer**
+   - Hydra keeps a deadline `now + snapshot_build_period + random(snapshot_build_splay)`.
+   - By default this is **60 minutes + up to 5 minutes of splay**.
+   - The periodic trigger is skipped while the cell is read-only.
+
+2. **Changelog record-count limit**
+   - If the current changelog reaches `max_changelog_record_count`, the leader rotates to a new changelog and builds a snapshot.
+   - Default: **1,000,000 records**.
+
+3. **Changelog data-size limit**
+   - If the current changelog reaches `max_changelog_data_size`, the leader also checkpoints.
+   - Default: **1 GB** of changelog payload.
+
+4. **Manual snapshot request**
+   - Operators can force a snapshot explicitly, for example with `yt-admin build-master-snapshots --read-only --wait-for-snapshot-completion`.
+   - Read-only mode first commits a barrier mutation, then switches the cell into read-only state, so the resulting snapshot has a clean empty tail changelog.
+
+5. **Final recovery action**
+   - Some recovery flows request `BuildSnapshotAndRestart` after recovery completes.
+
+Only one snapshot can be built at a time. If a snapshot is already in progress, additional requests fail or reuse the current in-flight result, depending on the request mode.
+
+#### How snapshots and changelogs are named { #snapshot-naming }
+
+Local Hydra persistence uses a shared numeric ID space for snapshots and changelog segments:
+
+- Snapshot file: `000000123.snapshot`
+- Changelog data file: `000000123.log`
+- Changelog index file: `000000123.log.index`
+
+The numeric part is the **segment ID**.
+
+Hydra tracks two related counters:
+
+- **Sequence number** — a monotonic counter across all physical mutations in the cell. It is used for commit ordering, `SyncWithUpstream`, and recovery targets.
+- **Version = (segment_id, record_id)** — the physical location of a mutation inside changelog storage.
+
+Within a single changelog segment, `record_id` increases from `0`. When Hydra rotates to a new changelog, `segment_id` increases by one and `record_id` resets to `0`.
+
+The important consequence is:
+
+- Snapshot `N` is built **after** Hydra rotates into changelog segment `N`.
+- Snapshot `N` therefore captures all mutations up to the end of segment `N-1`.
+- Recovery loads `000000123.snapshot` and then replays changelog `000000123.log` and later segments.
+
+The snapshot metadata also stores the exact last included mutation as `last_segment_id` and `last_record_id`, plus the corresponding `sequence_number`.
+
+#### How many changelog files exist at once { #changelog-count }
+
+At runtime there is exactly **one active changelog segment** per leader cell. Older segments remain on disk until cleanup removes them.
+
+The number of retained historical files depends on:
+
+- How frequently snapshots are built.
+- How much history is needed for recovery after the latest snapshot.
+- Janitor retention limits (`max_snapshot_count_to_keep`, `max_snapshot_size_to_keep`, `max_changelog_count_to_keep`, `max_changelog_size_to_keep`).
+
+Hydra also forces a new snapshot right after leader recovery if the remaining tail after the last snapshot becomes too large. The trigger is based on:
+
+- `max_changelogs_for_recovery`
+- `max_changelog_mutation_count_for_recovery`
+- `max_total_changelog_size_for_recovery`
+
+This keeps restart and catch-up time bounded.
+
+#### Flush and fsync behavior { #changelog-flush }
+
+Mutation records are not fsynced one by one. The write path is batched:
+
+1. Mutations are serialized on the control thread and appended to the active changelog queue.
+2. The changelog dispatcher flushes queued data when any of these happens:
+   - queued data reaches `data_flush_size` (default **16 MB**),
+   - `flush_period` elapses since the previous flush (default **10 ms**),
+   - an explicit/forced flush is requested.
+3. Each flush issues a data-file flush (`FlushFile(..., Data)`), which is the durable persistence point for the changelog payload.
+4. The changelog index is flushed separately:
+   - asynchronously after `index_flush_size` bytes (default **16 MB**),
+   - synchronously on explicit finish/close/rotation.
+
+At the Hydra level, leader-to-follower mutation shipping is driven by a separate executor with period `mutation_flush_period` (default **5 ms**). This controls how often the leader tries to send logged mutations to followers; it is distinct from the local disk flush period of the changelog file itself.
+
+#### How previous snapshots are removed { #snapshot-retention }
+
+Old local Hydra files are removed by the **local Hydra janitor**:
+
+- It runs every `cleanup_period` (default **10 seconds**).
+- It is enabled by `enable_local_janitor` (default **true**).
+- By default it keeps up to `max_snapshot_count_to_keep = 10` snapshots.
+- Optional size-based limits can also be set for both snapshots and changelogs.
+
+Cleanup is based on a **threshold ID** computed jointly for snapshots and changelogs:
+
+- files with ID **strictly less** than the threshold can be removed;
+- if no snapshot exists, nothing is removed;
+- the latest snapshot is never removed by cleanup;
+- changelogs newer than the latest snapshot are never removed;
+- changelog `0` is treated conservatively so recovery does not lose its bootstrap segment unexpectedly.
+
+As a result, cleanup removes old generations only after there is a newer snapshot that makes them obsolete for recovery.
+
+#### How to monitor snapshots, state size, and changelog state { #snapshot-monitoring }
+
+For per-peer Hydra state, inspect the master's monitoring Orchid subtree:
+
+```text
+/hydra
+```
+
+Useful fields include:
+
+- `building_snapshot` — whether a snapshot is in progress now;
+- `last_snapshot_id` — newest successfully built snapshot ID;
+- `last_snapshot_read_only` — whether that snapshot was read-only;
+- `last_snapshot_id_used_for_recovery` — which snapshot the peer loaded on startup;
+- `automaton_sequence_number` — latest applied mutation sequence number;
+- `read_only` — whether the peer is in read-only mode.
+
+To monitor **live in-memory state size**, use:
+
+- `yt_resource_tracker_memory_usage_rss{service="yt-master"}`
+
+This is the best operational proxy for the current master state footprint. Because snapshot build uses `fork`, safe host memory should be roughly **2 × RSS**.
+
+To monitor the **latest snapshot size**, use Hydra profiling gauges:
+
+- `/compressed_snapshot_size`
+- `/uncompressed_snapshot_size`
+
+These reflect the most recently completed snapshot. For on-disk usage trends, also watch the actual contents of the `snapshots` directory and the free-space metric:
+
+- `yt_snapshots_available_space{service="yt-master"}`
+
+To monitor **changelog footprint and headroom**, use:
+
+- `yt_changelogs_available_space{service="yt-master"}`
+- `mutation_queue_size`
+- `mutation_queue_data_size`
+
+The first shows storage headroom. The latter two show the in-memory backlog of logged mutations that still must be retained for follower delivery.
+
+For request-side consequences of these persistence mechanics, see [Mutation ordering and commit pipeline](#mutation-pipeline) and [Performance considerations](#performance). For the operator workflow that forces a clean read-only snapshot, see the **Snapshots and read-only mode** section below.
+
 {% note warning %}
 
 The disk used for changelogs should have **good sequential-write performance**. Slow changelog writes increase mutation latency for all writers. NVMe SSDs are recommended.
