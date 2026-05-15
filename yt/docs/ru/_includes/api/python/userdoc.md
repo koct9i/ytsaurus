@@ -64,8 +64,8 @@ print(client.list("/"))
 3. `update_config_from_env(config, config_profile=None)` — применяет env/file-источники к переданному конфигу в таком порядке:
    1. `YT_CONFIG_PATCHES` (list_fragment; патчи применяются от последнего к первому).
    2. Общий для Python SDK и CLI конфигурационный файл:
-      - Выбор пути: `YT_CONFIG_PATH`, если указывает на существующий файл, иначе `~/.yt/config`, иначе `/etc/ytclient.conf`.
-      - Если ни один из файлов не читается, этот источник не применяется.
+      - Выбор пути: `YT_CONFIG_PATH`, если он указывает на существующий файл; иначе `~/.yt/config`, если этот файл существует; иначе `/etc/ytclient.conf`.
+      - После выбора пути fallback при нечитаемом файле не выполняется: слой просто не применяется. Если `YT_CONFIG_PATH` указывает на существующий, но нечитаемый файл, чтение завершается с `YtConfigError`.
       - Выбор формата: `YT_CONFIG_FORMAT` (`yson` или `json`).
       - Для `config_version=2` профиль выбирается так (по порядку): явный аргумент `config_profile`, `YT_CONFIG_PROFILE`, затем `default_profile` из файла.
    3. Переменные окружения `YT_*` из shortcut-ов дефолтного конфига (`YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`, `YT_LOG_LEVEL` и другие).
