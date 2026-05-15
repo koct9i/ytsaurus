@@ -570,7 +570,7 @@ The three situations that produce hotspots are:
 1. **Distribute coordinator roles**: assign `transaction_coordinator` to several secondary cells so that the random selection spreads load across them.
 2. **Avoid unnecessary parent–child relationships**: if two groups of transactions do not share locks, start them as independent root transactions so they can land on different coordinator cells.
 3. **Keep transaction trees shallow**: use `commit` / `start new root transaction` patterns instead of deep nesting when the sub-tasks are truly independent.
-4. **Adjust ping period**: transactions with long timeouts can use a larger `ping_period` to reduce the ping mutation rate per transaction (the default ping period is `min(ping_period, timeout/2)`).
+4. **Adjust ping period**: transactions with long timeouts can use a larger `ping_period` to reduce the ping mutation rate per transaction. The native client defaults `default_ping_period` to `5s` (and requires it to be less than the transaction timeout), while the Python wrapper defaults `ping_period` to `timeout / 3`.
 
 ## Master transaction lifecycle and cost model { #transaction-lifecycle }
 
