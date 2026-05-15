@@ -154,7 +154,7 @@ For detailed knobs and metrics, see:
 - [Ordered dynamic tables](../../../user-guide/dynamic-tables/ordered-dynamic-tables.md)
 - [Compaction](../../../user-guide/dynamic-tables/compaction.md)
 - [Tablet balancing](../../../user-guide/dynamic-tables/tablet-balancing.md)
-- [FAQ](../../../faq/faq-dynamic-tables.md)
+- [FAQ](../../../user-guide/dynamic-tables/faq.md)
 
 ## Useful links { #links }
 
