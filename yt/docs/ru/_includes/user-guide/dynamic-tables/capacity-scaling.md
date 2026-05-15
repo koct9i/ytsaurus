@@ -105,8 +105,12 @@
 
 Пример:
 
+Для ручного resharding таблица должна быть предварительно размонтирована:
+
 ```bash
+yt unmount-table //path/to/table
 yt reshard-table //path/to/table --tablet-count 64
+yt mount-table //path/to/table
 ```
 
 Если таблица уже испытывает давление, resharding часто эффективнее, чем изменение низкоуровневых mount-параметров.
