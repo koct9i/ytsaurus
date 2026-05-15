@@ -154,9 +154,9 @@ For static tables, there is also a `commit_ordering` attribute, but it is always
 
 - For transactions involving multiple tablet cells, a successful commit response from the coordinator does not guarantee immediate row visibility in ordered tables.
 - In `weak` `commit_ordering`, append order may differ from commit timestamp order.
-- In `strong` `commit_ordering`, timestamp order is preserved, but visibility may be delayed because rows become visible only after corresponding serialization progress (`barrier-ts` logic).
+- In `strong` `commit_ordering`, timestamp order is preserved within each tablet, but visibility may be delayed because rows become visible only after corresponding serialization progress (`barrier-ts` logic).
 
-If consumers require deterministic replay order across producers, use `$timestamp` and `commit_ordering=strong`, and account for additional visibility lag in SLAs.
+If consumers require deterministic replay order across producers, use `$timestamp` and `commit_ordering=strong`, but remember that multi-tablet ordered tables still do not provide a single global order. For deterministic replay, use a single-tablet table or merge rows explicitly by `$timestamp` together with tablet position (`$tablet_index`, `$row_index`), and account for additional visibility lag in SLAs.
 
 ### Trim, reshard, and conversion pitfalls
 
@@ -177,7 +177,7 @@ Design queue retention and tablet topology with these constraints in mind to avo
 
 ### Operational playbook for queue-like workloads
 
-1. Explicitly decide whether global commit-time ordering is required.
+1. Explicitly decide whether per-tablet ordering is sufficient; if consumers need deterministic replay across producers, use a single tablet or merge rows by `$timestamp` and tablet position.
 2. Set and test trim policy together with consumer checkpoint/replay logic.
 3. Use remount and staged rollout for mount-config changes.
 4. Treat force unmount as emergency-only and plan client retry/idempotency behavior for transient routing or cell-move errors.
