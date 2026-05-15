@@ -106,7 +106,9 @@ Use the following approach:
 Example:
 
 ```bash
+yt unmount-table //path/to/table
 yt reshard-table //path/to/table --tablet-count 64
+yt mount-table //path/to/table
 ```
 
 If the table is already under pressure, resharding is often more effective than changing low-level mount parameters.
