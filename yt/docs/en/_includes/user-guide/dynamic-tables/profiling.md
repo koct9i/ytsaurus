@@ -116,7 +116,7 @@ Ordered tables are often used as queues. In this mode, performance analysis must
 - **Can the system append rows fast enough?**
 - **Can consumers observe and process rows fast enough?**
 
-The raw meeting logs emphasize that ordered tables are append-only and that commit ordering may be weak or strong. Stronger ordering improves semantics, but it may reduce throughput and add sensitivity to internal delays. Use it only when the workload requires the guarantee.
+Ordered tables are append-only, and commit ordering may be weak or strong. Stronger ordering improves semantics, but it may reduce throughput and add sensitivity to internal delays. Use it only when the workload requires the guarantee.
 
 If queue lag grows:
 
