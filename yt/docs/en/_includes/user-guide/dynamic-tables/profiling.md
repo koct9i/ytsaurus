@@ -37,7 +37,7 @@ Dynamic tables scale well only when requests are aligned with the key layout.
 
 If the query shape is wrong, adding nodes often does not help. First fix the access pattern or the schema.
 
-## Hot tablets and uneven key distribution
+### Hot tablets and uneven key distribution
 
 One overloaded tablet can dominate tail latency even when the bundle looks underutilized.
 
