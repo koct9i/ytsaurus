@@ -130,7 +130,7 @@ During operation:
 1. Watch table/tablet attributes (`@tablets`, `@tablet_errors`, structure counters).
 2. Track key latency/RPS/error metrics on tablet nodes.
 3. Remount after changing mount- or reader-related options.
-4. Use forced operations (for example, forced compaction) only as explicit operational intervention.
+4. Use forced operations (for example, forced compaction) only as an explicit operational intervention.
 
 ### Corner cases to account for in design
 
