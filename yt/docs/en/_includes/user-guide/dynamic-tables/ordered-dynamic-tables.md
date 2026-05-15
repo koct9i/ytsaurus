@@ -156,7 +156,7 @@ For static tables, there is also a `commit_ordering` attribute, but it is always
 - In `weak` `commit_ordering`, append order may differ from commit timestamp order.
 - In `strong` `commit_ordering`, timestamp order is preserved within each tablet, but visibility may be delayed because rows become visible only after corresponding serialization progress (`barrier-ts` logic).
 
-If consumers require deterministic replay order across producers, use `$timestamp` and `commit_ordering=strong`, but remember that multi-tablet ordered tables still do not provide a single global order. For deterministic replay, use a single-tablet table or merge rows explicitly by `$timestamp` together with tablet position (`$tablet_index`, `$row_index`), and account for additional visibility lag in SLAs.
+If consumers require deterministic replay order across producers, do not rely on `$timestamp` and `commit_ordering=strong` alone when reading from multiple tablets. Ordered dynamic tables do not provide a single global order across tablets, so deterministic replay requires either a single-tablet table or an explicit merge strategy by `$timestamp` together with tablet position (`$tablet_index`, `$row_index`). In this setup, `commit_ordering=strong` helps preserve timestamp order within each tablet, and SLAs should account for the additional visibility lag caused by `barrier-ts`.
 
 ### Trim, reshard, and conversion pitfalls
 
