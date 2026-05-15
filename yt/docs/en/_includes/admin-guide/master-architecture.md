@@ -793,14 +793,24 @@ sub-request is classified independently:
 ### Freshness synchronization (SyncWithUpstream)
 
 Before any local sub-request is executed, the peer must guarantee that it is not
-serving stale data. Followers call `SyncWithUpstream`: they contact the leader,
-learn the current committed sequence number, and wait until they have applied all
-mutations up to that point.  This sync phase is performed on the RPC thread (not
-the automaton thread) and adds roughly 10–20 ms in practice.
+serving stale data. On followers, `SyncWithUpstream` means contacting the leader,
+learning the current committed sequence number, and waiting until all mutations
+up to that point have been applied locally.
+
+In multicell mode, there is an additional freshness step for secondary masters:
+before serving local reads, a secondary cell may also need to synchronize with
+the primary cell via Hive so that cross-cell metadata imported from the primary
+is up to date. This primary-to-secondary sync may be needed even when the
+secondary peer itself is leader in its cell.
+
+These synchronization steps are performed on the RPC thread (not the automaton
+thread) and add roughly 10–20 ms in practice, potentially more if the request
+must also wait for the secondary cell to observe fresh state from the primary.
 
 The sync can be suppressed by setting the `suppress_upstream_sync` flag in the
-request header, which allows callers to accept potentially stale data in exchange
-for lower latency.
+request header. This skips both the follower-to-leader catch-up and, in
+multicell mode, the primary-to-secondary freshness step, allowing lower latency
+at the cost of potentially stale local or cross-cell metadata.
 
 ### Session queuing and fair scheduling
 
