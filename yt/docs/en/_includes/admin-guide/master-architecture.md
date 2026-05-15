@@ -94,7 +94,7 @@ Snapshot creation uses a **fork** on master processes (forked child serializes t
 Snapshots are initiated by the **active leader** of a Hydra cell. The leader requests a checkpoint in the following cases:
 
 1. **Periodic snapshot timer**
-   - Hydra keeps a deadline `now + snapshot_build_period + random_value_in_[0, snapshot_build_splay]`.
+   - Hydra keeps a deadline `now + snapshot_build_period + a random value between 0 and snapshot_build_splay`.
    - By default this is **60 minutes + up to 5 minutes of splay**.
    - The periodic trigger is skipped while the cell is read-only.
 
