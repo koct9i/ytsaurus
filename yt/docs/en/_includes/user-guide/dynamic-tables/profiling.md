@@ -62,7 +62,7 @@ Writes first enter the in-memory dynamic store. If passive stores do not flush t
 
 Common symptoms:
 
-- `Node is out of tablet memory; all writes disabled`
+- `Node is out of tablet memory, all writes disabled`
 - `Active store is overflown, all writes disabled`
 - Long periods with growing in-memory data and no reduction
 
