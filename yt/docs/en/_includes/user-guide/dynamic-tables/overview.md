@@ -134,7 +134,7 @@ During operation:
 
 ### Corner cases to account for in design
 
-- A committed transaction does not always imply immediate visibility of writes to all readers (depends on table type, transaction shape, and read mode).
+- A committed transaction does not always imply immediate visibility of writes to all readers (depends on table type, whether the commit is local or distributed across multiple tablet cells, and read mode).
 - Reads by old timestamps can fail if retention/TTL removed required versions.
 - In-memory tables may temporarily reject reads after mount or tablet movement until preload finishes.
 - Tablet movement/balancing can produce transient errors such as stale tablet routing; clients must retry idempotently.

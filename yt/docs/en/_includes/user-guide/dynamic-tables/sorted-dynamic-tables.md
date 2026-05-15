@@ -358,12 +358,12 @@ Filter-specific metrics:
 ### Consistency and timestamp pitfalls
 
 - `sync_last_committed` and `async_last_committed` are useful for freshness, but they do not provide a globally consistent snapshot across all rows/tables. Use an explicit timestamp for that.
-- The same transaction cannot read its own writes from dynamic tables.
+- Read APIs and SQL queries in a transaction operate on a snapshot taken at transaction start, so they do not read writes performed by the same transaction.
 - Reads by explicit old timestamp may fail when the requested history has already been removed by TTL/retention (`retained timestamp` class of errors).
 
 ### Write-path and lock-related pitfalls
 
-- `atomicity=none` removes row-level conflict protection. This can significantly increase write throughput but may create very high version counts for hot keys and unexpected final values.
+- `atomicity=none` removes row-level conflict protection. This can significantly increase write throughput but may create very high version counts for hot keys and non-deterministic final values for concurrent writes to the same key.
 - Frequent updates of the same key can cause row-version explosion. Plan retention/compaction settings and schema (including aggregation columns) for this pattern from the beginning.
 - Forced unmount is an emergency tool. It may cause data loss and two-phase commit side effects.
 
