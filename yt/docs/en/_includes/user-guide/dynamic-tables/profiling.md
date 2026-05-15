@@ -1,6 +1,6 @@
 # Performance profiling and bottleneck analysis
 
-This article describes how to investigate slow or unstable dynamic tables in production. It is based on the operational topics discussed in the raw meeting logs: tablet layout, flush, compaction, queue semantics, and tablet-cell execution.
+This article describes how to investigate slow or unstable dynamic tables in production. It covers practical operational topics such as tablet layout, flush, compaction, queue semantics, and tablet-cell execution.
 
 For background, see [Dynamic tables](../../../user-guide/dynamic-tables/overview.md), [Automatic sharding and dynamic table balancing](../../../user-guide/dynamic-tables/tablet-balancing.md), and [Background compaction](../../../user-guide/dynamic-tables/compaction.md).
 
