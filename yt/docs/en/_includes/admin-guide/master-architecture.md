@@ -142,7 +142,7 @@ The snapshot metadata also stores the exact last included mutation as `last_segm
 
 #### How many changelog files exist at once { #changelog-count }
 
-At runtime there is exactly **one active changelog segment** per leader cell. Older segments remain on disk until cleanup removes them.
+At runtime there is exactly **one active changelog segment** per Hydra peer. In a replicated cell, each peer maintains its own active segment locally. Older segments remain on disk until cleanup removes them.
 
 The number of retained historical files depends on:
 
