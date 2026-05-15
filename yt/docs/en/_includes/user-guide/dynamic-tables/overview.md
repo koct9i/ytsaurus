@@ -123,7 +123,7 @@ Before enabling high traffic on a new table:
    - [Ordered dynamic tables](../../../user-guide/dynamic-tables/ordered-dynamic-tables.md): queue-like append/read-by-index workload.
 2. Set realistic tablet count and balancing configuration.
 3. Select table format (`optimize_for`) based on access pattern.
-4. Set retention/cleanup settings (`min_data_ttl`, `max_data_ttl`, versions).
+4. Set retention/cleanup settings (`min_data_ttl`, `max_data_ttl`, `min_data_versions`, `max_data_versions`).
 5. Mount and check tablet/cell health before opening traffic.
 
 During operation:
