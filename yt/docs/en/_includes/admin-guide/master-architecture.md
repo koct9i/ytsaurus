@@ -191,7 +191,7 @@ Cleanup is based on a **threshold ID** computed jointly for snapshots and change
 - changelogs newer than the latest snapshot are never removed;
 - changelog `0` is treated conservatively so recovery does not lose its bootstrap segment unexpectedly.
 
-As a result, cleanup removes old generations only after there is a newer snapshot that makes them obsolete for recovery.
+As a result, cleanup removes older Hydra persistence generations — one snapshot together with the changelog tail that precedes the next retained snapshot — only after there is a newer snapshot that makes them obsolete for recovery.
 
 #### How to monitor snapshots, state size, and changelog state { #snapshot-monitoring }
 
@@ -214,7 +214,7 @@ To monitor **live in-memory state size**, use:
 
 - `yt_resource_tracker_memory_usage_rss{service="yt-master"}`
 
-This is the best operational proxy for the current master state footprint. Because snapshot build uses `fork`, safe host memory should be budgeted conservatively at about **2 × RSS**. Actual peak memory is often lower and depends on how many pages are dirtied while the child is writing the snapshot.
+This is the best operational proxy for the current master state footprint. Because snapshot build uses `fork`, safe host memory should be budgeted conservatively at about **2 × the master's RSS at snapshot time**. Actual peak memory is often lower and depends on how many pages are dirtied while the child is writing the snapshot.
 
 To monitor the **latest snapshot size**, use Hydra profiling gauges:
 
