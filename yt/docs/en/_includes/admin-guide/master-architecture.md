@@ -441,7 +441,7 @@ Hive messages are not pushed in real time. There are two delivery mechanisms:
 
 The exact guarantee implemented by `IHiveManager::SyncWith` is:
 
-- The sync is **per remote cell** (not global): for a given remote cell `R`, wait until all mutations that were already queued on `R` at call time are durably applied on the local cell.
+- The sync is **per remote cell** (not global): for a given remote cell `R`, wait until the local cell has received and applied messages from `R`'s outgoing Hive mailbox up to the remote `last_outcoming_message_id` captured for the sync. It does **not** guarantee that unrelated Hydra mutations queued on `R` are applied locally.
 - The operation is effectively a local barrier keyed by the remote mailbox progress, so it is not transitive across third cells.
 - `SyncWith(self)` is a no-op.
 - If the remote cell is unknown/disconnected, the operation fails with `Unavailable`; if the sync exceeds `Config_->SyncTimeout`, it fails with `Timeout`.
