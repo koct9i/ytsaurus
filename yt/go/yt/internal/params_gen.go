@@ -1572,6 +1572,10 @@ func writeIssueTokenOptions(w *yson.Writer, o *yt.IssueTokenOptions) {
 	if o == nil {
 		return
 	}
+	if o.Description != nil {
+		w.MapKeyString("description")
+		w.Any(o.Description)
+	}
 }
 
 func logIssueTokenOptions(o *yt.IssueTokenOptions) []log.Field {
@@ -1579,6 +1583,9 @@ func logIssueTokenOptions(o *yt.IssueTokenOptions) []log.Field {
 		return nil
 	}
 	fields := []log.Field{}
+	if o.Description != nil {
+		fields = append(fields, log.Any("description", o.Description))
+	}
 	return fields
 }
 

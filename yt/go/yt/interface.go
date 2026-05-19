@@ -898,7 +898,9 @@ type RemoveMemberOptions struct {
 
 type SetUserPasswordOptions struct{}
 
-type IssueTokenOptions struct{}
+type IssueTokenOptions struct {
+	Description *string `http:"description,omitnil"`
+}
 
 type RevokeTokenOptions struct {
 	// TokenIsHash indicates that the token parameter is already a SHA256 hash.
