@@ -399,7 +399,10 @@ std::pair<TString, INodePtr> TMapNodeMixin::PrepareSetChildOrChildValue(
                     tokenizer.ThrowUnexpected();
                 }
 
-                auto attributePath = TYPath("/" + TString(tokenizer.GetInput()));
+                TString attributePath;
+                attributePath.reserve(1 + tokenizer.GetInput().size());
+                attributePath.append("/");
+                attributePath.append(tokenizer.GetInput());
                 SyncYPathSet(
                     currentNode,
                     attributePath,
