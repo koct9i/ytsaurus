@@ -399,9 +399,7 @@ std::pair<TString, INodePtr> TMapNodeMixin::PrepareSetChildOrChildValue(
                     tokenizer.ThrowUnexpected();
                 }
 
-                tokenizer.Advance();
-                auto suffix = TYPath(tokenizer.GetSuffix());
-                auto attributePath = TYPath("/@" + suffix);
+                auto attributePath = TYPath("/" + TString(tokenizer.GetInput()));
                 SyncYPathSet(
                     currentNode,
                     attributePath,
