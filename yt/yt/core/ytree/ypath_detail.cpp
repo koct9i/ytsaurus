@@ -742,7 +742,7 @@ void TSupportsAttributes::ExistsAttribute(
     }));
 }
 
-void TSupportsAttributes::DoSetAttribute(const TYPath& path, const TYsonString& newYson, bool force)
+void TSupportsAttributes::DoSetAttribute(const TYPath& path, const TYsonString& newYson, bool force, bool recursive)
 {
     TCachingAdHocPermissionValidator permissionValidator(this);
 
@@ -857,12 +857,14 @@ void TSupportsAttributes::DoSetAttribute(const TYPath& path, const TYsonString& 
                     }
                 } else {
                     auto oldWholeYson = builtinAttributeProvider->FindBuiltinAttribute(internedKey);
-                    if (!oldWholeYson) {
+                    auto oldWholeNode = oldWholeYson
+                        ? ConvertToNode(oldWholeYson)
+                        : GetEphemeralNodeFactory()->CreateMap();
+                    if (!oldWholeYson && !recursive) {
                         ThrowNoSuchBuiltinAttribute(key);
                     }
 
-                    auto oldWholeNode = ConvertToNode(oldWholeYson);
-                    SyncYPathSet(oldWholeNode, TYPath(tokenizer.GetInput()), newYson);
+                    SyncYPathSet(oldWholeNode, TYPath(tokenizer.GetInput()), newYson, recursive);
                     auto newWholeYson = ConvertToYsonString(oldWholeNode);
 
                     if (!GuardedSetBuiltinAttribute(internedKey, newWholeYson, force)) {
@@ -882,12 +884,14 @@ void TSupportsAttributes::DoSetAttribute(const TYPath& path, const TYsonString& 
                     customAttributes->SetYson(key, newYson);
                 } else {
                     auto oldWholeYson = customAttributes->FindYson(key);
-                    if (!oldWholeYson) {
+                    auto wholeNode = oldWholeYson
+                        ? ConvertToNode(oldWholeYson)
+                        : GetEphemeralNodeFactory()->CreateMap();
+                    if (!oldWholeYson && !recursive) {
                         ThrowNoSuchCustomAttribute(key);
                     }
 
-                    auto wholeNode = ConvertToNode(oldWholeYson);
-                    SyncYPathSet(wholeNode, TYPath(tokenizer.GetInput()), newYson);
+                    SyncYPathSet(wholeNode, TYPath(tokenizer.GetInput()), newYson, recursive);
                     auto newWholeYson = ConvertToYsonString(wholeNode);
 
                     customAttributes->SetYson(key, newWholeYson);
@@ -917,7 +921,7 @@ void TSupportsAttributes::SetAttribute(
     TYsonString safeValue = requestValue.capacity() <= requestValue.length() * 5 / 4
         ? TYsonString{requestValue}
         : TYsonString{TStringBuf(requestValue)};
-    DoSetAttribute(path, std::move(safeValue), request->force());
+    DoSetAttribute(path, std::move(safeValue), request->force(), request->recursive());
     context->Reply();
 }
 

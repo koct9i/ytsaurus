@@ -186,6 +186,14 @@ class TestCypress(YTEnvSetup):
         set("//tmp/m1/m2", {})
         set("//tmp/m1/m2/@acl", [make_ace("allow", ["u"], ["read", "write"])])
 
+    @authors("khlebnikov")
+    def test_recursive_attribute_set_with_missing_parents(self):
+        set("//tmp/rset/a/b/@c/d", 1, recursive=True)
+        assert get("//tmp/rset/a/b/@c/d") == 1
+
+        set("//tmp/rset/@x/y", 2, recursive=True)
+        assert get("//tmp/rset/@x/y") == 2
+
     @authors("babenko", "ignat")
     def test_list_command(self):
         set("//tmp/map", {"a": 1, "b": 2, "c": 3}, force=True)

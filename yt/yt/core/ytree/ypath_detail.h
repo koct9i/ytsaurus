@@ -368,7 +368,11 @@ private:
         const NYson::TYsonString& wholeYson);
     TFuture<NYson::TYsonString> DoListAttribute(const TYPath& path);
 
-    void DoSetAttribute(const TYPath& path, const NYson::TYsonString& newYson, bool force = false);
+    void DoSetAttribute(
+        const TYPath& path,
+        const NYson::TYsonString& newYson,
+        bool force = false,
+        bool recursive = false);
     void DoRemoveAttribute(const TYPath& path, bool force);
 
     bool GuardedGetBuiltinAttribute(TInternedAttributeKey key, NYson::IYsonConsumer* consumer);

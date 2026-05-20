@@ -10,6 +10,10 @@ from getpass import getpass
 def _set_attribute(path, name, value, recursive, client=None):
     """ Sets attribute at given path
     """
+    if recursive and "/" in name:
+        yt.set("{}/@{}".format(path, name), value, recursive=True, client=client)
+        return
+
     if recursive:
         batch_client = yt.create_batch_client(client=client)
 

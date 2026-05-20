@@ -614,8 +614,6 @@ def mkdir(
 
 
 def _check_attribute_name(attribute_name):
-    if "/" in attribute_name:
-        raise YtError("Attribute commands forbid to use '/' in attribute names")
     if "@" in attribute_name:
         raise YtError("Attribute commands forbid to use '@' in attribute names")
 

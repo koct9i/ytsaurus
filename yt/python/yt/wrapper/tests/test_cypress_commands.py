@@ -102,6 +102,10 @@ class TestCypressCommands(object):
         assert yt.get(TEST_DIR + "/some_node", attributes=["attr", "other_attr"])\
             .attributes == {"attr": 1}
 
+        yt.set(TEST_DIR + "/some_node/@nested", {})
+        yt.set_attribute(TEST_DIR + "/some_node", "nested/path", 2)
+        assert yt.get(TEST_DIR + "/some_node/@nested/path") == 2
+
         assert json.loads(yt.get(TEST_DIR, format=yt.format.JsonFormat())) == {"some_node": {}}
         assert json.loads(yt.get(TEST_DIR, format="json")) == {"some_node": {}}
 
@@ -811,6 +815,11 @@ class TestCypressCommands(object):
         cli_impl._remove_attribute(TEST_DIR, "my_attr", recursive=True)
         for path in paths:
             assert not yt.exists(path + "&/@my_attr")
+
+    @authors("khlebnikov")
+    def test_set_nested_attribute_recursively(self):
+        cli_impl._set_attribute(yt.ypath_join(TEST_DIR, "missing/node"), "a/b", 1, recursive=True)
+        assert yt.get(yt.ypath_join(TEST_DIR, "missing/node/@a/b")) == 1
 
     @authors("aleexfi")
     def test_get_table_schema(self):

@@ -2,6 +2,7 @@
 #include "tree_visitor.h"
 #include "exception_helpers.h"
 #include "attribute_filter.h"
+#include "ypath_client.h"
 
 #include <yt/yt/core/ypath/token.h>
 #include <yt/yt/core/ypath/tokenizer.h>
@@ -390,6 +391,25 @@ std::pair<TString, INodePtr> TMapNodeMixin::PrepareSetChildOrChildValue(
             tokenizer.Expect(NYPath::ETokenType::Slash);
 
             tokenizer.Advance();
+            if (tokenizer.GetType() == NYPath::ETokenType::At) {
+                if (!std::holds_alternative<TYsonString>(childOrChildValue)) {
+                    THROW_ERROR_EXCEPTION("Cannot set attributes from node value");
+                }
+                if (currentNode == rootNode) {
+                    tokenizer.ThrowUnexpected();
+                }
+
+                tokenizer.Advance();
+                auto suffix = TYPath(tokenizer.GetSuffix());
+                auto attributePath = TYPath("/@" + suffix);
+                SyncYPathSet(
+                    currentNode,
+                    attributePath,
+                    std::get<TYsonString>(childOrChildValue),
+                    recursive);
+                return {rootKey, rootChild};
+            }
+
             tokenizer.Expect(NYPath::ETokenType::Literal);
             auto key = tokenizer.GetLiteralValue();
             int maxKeyLength = GetMaxKeyLength();
