@@ -30,6 +30,20 @@ Typical workflow:
 2. If progress stalls or state becomes `failed`, call `list_jobs` to locate problematic jobs.
 3. Call `get_job_stderr` for failed jobs and inspect operation `result` and `alerts`.
 
+## Spec options that simplify diagnostics and later lookup
+
+When starting an operation, these spec fields are especially useful for observability:
+
+- `annotations` — structured metadata persisted to the operations archive and usable in archive search/filter flows.
+- `title`, `description`, `alias` — improve discoverability in UI and API-based lookup.
+- `suspend_on_job_failure` + `max_failed_job_count` — keep failed operations in a debuggable state instead of fast final failure in noisy scenarios.
+- `max_stderr_count` — controls how many job stderrs are retained for the operation (up to 150).
+- `max_stderr_size` (user job option) — controls per-job stderr truncation threshold.
+- `stderr_table_path` — writes full stderr of jobs (except `aborted`) to your table for longer retention and offline analysis.
+- `core_table_path` — stores core dump metadata/data for postmortem analysis.
+
+For exact definitions, see [Operation options](../../../../user-guide/data-processing/operations/operations-options.md).
+
 ## After finish: result and diagnostics
 
 When the operation reaches a terminal state (`completed`, `failed`, `aborted`):
@@ -52,6 +66,35 @@ For efficient historical queries:
 Notes:
 - with `include_archive=true`, `from_time` and `to_time` are required for archive querying;
 - `get_operation` works both for running and finished operations, but completed operations may be served from archive depending on lifecycle stage.
+
+## Stderr retention limits and pruning behavior
+
+Stderr data is retained with several limits:
+- Per job, only up to `max_stderr_size` bytes are kept; extra bytes are dropped.
+- Scheduler-level cap: at most 150 job stderrs are retained.
+- Operation-level cap: by default, up to 20 job stderrs are retained; this limit can be raised (up to 150, including via `max_stderr_count`).
+
+If you need longer and fuller retention, configure `stderr_table_path` in operation spec.
+
+## How long operation/job data lives in archive
+
+There is no single fixed retention duration in public user docs: archive/data lifetime is cluster-policy dependent.
+
+Practical implications:
+- `get_job`/`list_jobs` return data when job info is still available; `archive_job_count` shows how much came from archive.
+- `has_spec`, `stderr_size`, and related job fields indicate what exactly was preserved.
+- For guaranteed long-term diagnostics artifacts, save them explicitly (for example, `stderr_table_path`) and/or export structured logs.
+
+## Log rotation and pruning (cluster logs)
+
+For server debug/structured logs written to files, rotation is configured by `rotationPolicy`:
+- `rotationPeriodMilliseconds`
+- `maxSegmentSize`
+- `maxTotalSizeToKeep` (oldest segments are deleted)
+- `maxSegmentCountToKeep` (oldest segments are deleted)
+
+When `writerType=stderr`, rotation settings are ignored.
+See [Configuring server component logging](../../../../admin-guide/logging.md).
 
 ## Metrics and alerts
 
