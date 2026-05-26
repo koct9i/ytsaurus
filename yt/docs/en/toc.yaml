@@ -413,6 +413,8 @@ items:
        - name: Problems
          when: audience == "public"
          items:
+         - name: Debugging API calls via proxies
+           href: user-guide/problems/debug-api-calls.md
          - name: Debugging MapReduce programs
            href: user-guide/problems/mapreduce-debug.md
          - name: Jobshell and slow jobs
