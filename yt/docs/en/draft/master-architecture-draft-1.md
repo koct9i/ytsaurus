@@ -582,7 +582,7 @@ The three situations that produce hotspots are:
 
 ## Master transaction lifecycle and cost model { #transaction-lifecycle }
 
-This section complements the user-facing [Transactions](../../user-guide/storage/transactions.md#master_transactions) page. It focuses on operator-visible behavior: where transaction work runs, what scales with transaction count, and why some workloads overload one coordinator cell.
+This section complements the user-facing [Transactions](../user-guide/storage/transactions.md#master_transactions) page. It focuses on operator-visible behavior: where transaction work runs, what scales with transaction count, and why some workloads overload one coordinator cell.
 
 ### Lifecycle
 
@@ -689,7 +689,7 @@ For a single-cell transaction, the last two terms are absent. For a multi-cell t
 - Every replicated participant cell stores its own copy of transaction metadata.
 - Memory grows with transaction count, nesting depth, participant-cell count, lock count, staged objects, branched nodes, and prerequisite metadata.
 
-The user-facing transaction attributes listed in [Transactions](../../user-guide/storage/transactions.md#attributes) are a good proxy for what consumes memory: `nested_transaction_ids`, `staged_object_ids`, `branched_node_ids`, `locked_node_ids`, `lock_ids`, and `resource_usage`.
+The user-facing transaction attributes listed in [Transactions](../user-guide/storage/transactions.md#attributes) are a good proxy for what consumes memory: `nested_transaction_ids`, `staged_object_ids`, `branched_node_ids`, `locked_node_ids`, `lock_ids`, and `resource_usage`.
 
 **Network**
 
@@ -1065,7 +1065,7 @@ yt get //sys/@dynamically_propagated_masters_cell_tags
 
 ### Adding new master cells
 
-Adding secondary cells requires a complete cluster downtime. For detailed steps, see [Extending master servers](../../admin-guide/cell-addition.md).
+Adding secondary cells requires a complete cluster downtime. For detailed steps, see [Extending master servers](../admin-guide/cell-addition.md).
 
 After cells are added and global objects are replicated, assign roles via:
 
