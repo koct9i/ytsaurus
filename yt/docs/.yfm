@@ -1,16 +1,30 @@
-allowHTML: true
-apply-presets: true
+# https://diplodoc.com/docs/ru/settings
+# https://diplodoc.com/docs/en/settings
+
+lint: true
+
+allowHtml: true
+applyPresets: true
 varsPreset: public
-langs: ['ru', 'en']
-allow-custom-resources: true
-#mtimes: true
+langs: ['en', 'ru']
+allowCustomResources: true
+
+mtimes: true
+supportGithubAnchors: true
+
+vcs:
+  enabled: true
+  remoteBase: https://github.com/koct9i/ytsaurus/tree/pain/yt/docs
+
+extensions:
+  - name: github-vcs
 
 docs-viewer:
   project-name: YTsaurus
-  metrika: 96741000
   show-revision: true
-  langs: ['ru', 'en']
-  themes: ['light', 'dark']
+  land: en
+  langs: ['en', 'ru']
+  themes: ['dark', 'light']
   github-url-prefix: https://github.com/ytsaurus/ytsaurus/tree/main/yt/docs
   favicon-src: https://ytsaurus.tech/favicon/favicon.svg
   logo-options:
@@ -32,43 +46,16 @@ docs-viewer:
     title: YT-public
     description: "YTsaurus public docs"
 
-  gtm:
-    id: GTM-W2MMVTR
-
 resources:
   csp:
-    - script-src-elem:
-        - https://mc.yandex.ru
     - connect-src:
         - https://*.algolia.net
         - https://*.algolianet.com
     - img-src:
+        - https://ytsaurus.tech
         - https://storage.yandexcloud.net
 
-# This configuration parameter is used to directly control the Edit button behaviour.
-vcs:
-  remoteBase: https://github.com/ytsaurus/ytsaurus/tree/main/yt/docs
-  enabled: true
-
 search:
-  provider: algolia
-  appId: WW7EWG7Y6T
-  indexName: ytsaurus-docs
-  index: true
-  searchApiKey: f039bc42de5c29003db67eb703353c1d
-  indexSettings:
-    searchableAttributes:
-      - title
-      - content
-      - headings
-      - keywords
-    attributesToHighlight:
-      - title
-      - content
-  querySettings:
-    hitsPerPage: 10
-    attributesToRetrieve:
-      - title
-      - content
-      - url
-      - section
+  provider: local
+  tolerance: 2
+  confidense: phrased
