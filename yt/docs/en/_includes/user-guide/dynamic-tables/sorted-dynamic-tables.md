@@ -352,7 +352,3 @@ Filter-specific metrics:
 - yt.tablet_node.select.range_filter.input_range_count.rate: Number of ranges that the filter received as input.
 - yt.tablet_node.select.range_filter.filtered_out_range_count.rate: Number of ranges filtered out by the filter.
 - yt.tablet_node.select.range_filter.false_positive_range_count.rate: Number of ranges that were not filtered out by the filter, even though they did not actually exist.
-
-## Operational corner cases and administration notes { #ops_corner_cases }
-
-This operational topic is currently maintained as a draft article: [Draft-9: Dynamic tables (sorted) — operational corner cases and administration notes](../../../draft/dynamic-tables-sorted-ops-corner-cases-draft-9.md).

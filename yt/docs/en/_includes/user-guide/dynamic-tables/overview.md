@@ -103,10 +103,6 @@ The access control system applies to dynamic tables:
 - To run the `mount_table`, `unmount_table`, `remount_table`, and `reshard_table` commands, the user must have the `mount` permission for the table.
 - Similar to accounts, in order to create tables linked to a bundle, the user must have the `use` permission for the bundle. The same rule is required to change the table bundle.
 
-## Operating dynamic tables in production { #operations_in_production }
-
-This operational topic is currently maintained as a draft article: [Draft-8: Dynamic tables — operating in production](../../../draft/dynamic-tables-operations-topic-draft-8.md).
-
 ## Useful links { #links }
 
 Webinars:

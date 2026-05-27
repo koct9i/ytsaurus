@@ -147,7 +147,3 @@ In `strong` mode, the table is ordered by the `$timestamp` field, provided it ex
 In `strong` mode, each tablet cell tracks a special `barrier-ts` value. This value constantly and monotonically increases, and no transaction can get a `commit-ts` that is smaller than the `barrier-ts`. When `barrier-ts` exceeds the `commit-ts` of a transaction, the rows written by this transaction to an ordered dynamic table in `strong` mode do not appear in the table immediately at the time of the commit. Thus, the system serializes all transactions by `commit-ts`, but only those for which `commit-ts < barrier-ts`. For transactions with `commit-ts > barrier-ts`, the system can define a relative order, but cannot guarantee that there will not be a new transaction in the future that violates the established order.
 
 For static tables, there is also a `commit_ordering` attribute, but it is always `weak`.
-
-## Operational corner cases and administration notes { #ops_corner_cases }
-
-This operational topic is currently maintained as a draft article: [Draft-10: Dynamic tables (ordered) — operational corner cases and administration notes](../../../draft/dynamic-tables-ordered-ops-corner-cases-draft-10.md).

@@ -158,10 +158,6 @@ items:
           href: user-guide/dynamic-tables/tablet-balancing.md
         - name: Фоновая компактификация
           href: user-guide/dynamic-tables/compaction.md
-        - name: Профилирование и поиск узких мест
-          href: user-guide/dynamic-tables/profiling.md
-        - name: Планирование мощности и масштабирование
-          href: user-guide/dynamic-tables/capacity-scaling.md
         - name: MapReduce по динамическим таблицам
           href: user-guide/dynamic-tables/mapreduce.md
         - name: Вставка из операций

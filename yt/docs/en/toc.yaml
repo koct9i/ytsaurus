@@ -153,10 +153,6 @@ items:
            href: user-guide/dynamic-tables/tablet-balancing.md
          - name: Background compaction
            href: user-guide/dynamic-tables/compaction.md
-         - name: Performance profiling and bottleneck analysis
-           href: user-guide/dynamic-tables/profiling.md
-         - name: Capacity planning and scaling
-           href: user-guide/dynamic-tables/capacity-scaling.md
          - name: Running operations on dynamic tables
            href: user-guide/dynamic-tables/mapreduce.md
          - name: Inserting from operations into dynamic tables
