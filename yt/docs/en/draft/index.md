@@ -40,3 +40,8 @@ Articles in this category are **work-in-progress**. Content may be temporarily i
 - [Draft-3: Master server architecture — transaction lifecycle and mutation pipeline](./master-architecture-draft-3.md)
 - [Draft-4: Master server architecture — read request execution](./master-architecture-draft-4.md)
 - [Draft-5: Master server architecture — performance and administration](./master-architecture-draft-5.md)
+- [Draft-6: Dynamic tables — performance profiling and bottleneck analysis](./dynamic-tables-profiling-draft-6.md)
+- [Draft-7: Dynamic tables — capacity planning and scaling](./dynamic-tables-capacity-scaling-draft-7.md)
+- [Draft-8: Dynamic tables — operating in production](./dynamic-tables-operations-topic-draft-8.md)
+- [Draft-9: Dynamic tables (sorted) — operational corner cases and administration notes](./dynamic-tables-sorted-ops-corner-cases-draft-9.md)
+- [Draft-10: Dynamic tables (ordered) — operational corner cases and administration notes](./dynamic-tables-ordered-ops-corner-cases-draft-10.md)
