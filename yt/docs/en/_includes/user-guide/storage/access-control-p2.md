@@ -171,14 +171,13 @@ In shell scripts, it is convenient to check access first and grant missing permi
 set -euo pipefail
 
 USER_NAME="robot-analytics"
-GROUP_NAME="analytics"
 PERMISSION="write"
 PATH_NAME="//home/project"
 
 if yt check-permission "${USER_NAME}" "${PERMISSION}" "${PATH_NAME}" | grep -q '"action" = "allow"'; then
   echo "Permission already granted"
 else
-  yt set "${PATH_NAME}/@acl/end" "{action=allow;subjects=[${GROUP_NAME}];permissions=[${PERMISSION}];inheritance_mode=object_and_descendants}"
+  yt set "${PATH_NAME}/@acl/end" "{action=allow;subjects=[${USER_NAME}];permissions=[${PERMISSION}];inheritance_mode=object_and_descendants}"
 fi
 ```
 

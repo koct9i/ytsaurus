@@ -169,14 +169,13 @@ $ yt check-permission pavel-kulenov write //tmp
 set -euo pipefail
 
 USER_NAME="robot-analytics"
-GROUP_NAME="analytics"
 PERMISSION="write"
 PATH_NAME="//home/project"
 
 if yt check-permission "${USER_NAME}" "${PERMISSION}" "${PATH_NAME}" | grep -q '"action" = "allow"'; then
   echo "Право уже выдано"
 else
-  yt set "${PATH_NAME}/@acl/end" "{action=allow;subjects=[${GROUP_NAME}];permissions=[${PERMISSION}];inheritance_mode=object_and_descendants}"
+  yt set "${PATH_NAME}/@acl/end" "{action=allow;subjects=[${USER_NAME}];permissions=[${PERMISSION}];inheritance_mode=object_and_descendants}"
 fi
 ```
 
