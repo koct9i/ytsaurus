@@ -1,0 +1,77 @@
+name: Docs GitHub Pages
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - pain
+    paths:
+      - 'yt/docs/**'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SRC_ROOT: "./yt/docs"
+      PAGES_ROOT: "./_docs-pages"
+    steps:
+      # https://github.com/actions/checkout
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: "yt/docs"
+
+      # https://github.com/diplodoc-platform/docs-build-action
+      - name: Build docs for static hosting
+        uses: diplodoc-platform/docs-build-action@v3.2.1
+        with:
+          revision: "${{ github.sha }}"
+          src-root: "${{ env.SRC_ROOT }}"
+          lint-root: "${{ env.PAGES_ROOT }}"
+          cli-version: "latest"
+
+      - name: Smoke check generated docs
+        run: |
+          set -euo pipefail
+          test -f "${{ env.PAGES_ROOT }}/en/index.html"
+          test -f "${{ env.PAGES_ROOT }}/ru/index.html"
+          test -d "${{ env.PAGES_ROOT }}/images"
+          [[ "$(find "${{ env.PAGES_ROOT }}/en" -name "*.html" | wc -l)" -gt 0 ]]
+          [[ "$(find "${{ env.PAGES_ROOT }}/ru" -name "*.html" | wc -l)" -gt 0 ]]
+        shell: bash
+
+      # https://github.com/actions/upload-artifact
+      - name: Upload static artifact (fallback hosting)
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs-pages-static
+          path: ${{ env.PAGES_ROOT }}
+          retention-days: 14
+
+
+      # https://github.com/actions/upload-pages-artifact
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ env.PAGES_ROOT }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # https://github.com/actions/deploy-pages
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
