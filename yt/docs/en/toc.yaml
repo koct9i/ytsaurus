@@ -583,7 +583,25 @@ items:
      href: other/video-posts.md
    - name: Draft
      items:
-       - name: About drafts (draft-0)
-         href: draft/index.md
-       - name: Master server architecture (draft-1)
-         href: draft/master-architecture-draft-1.md
+        - name: About drafts (draft-0)
+          href: draft/index.md
+        - name: Master server architecture (draft-1)
+          href: draft/master-architecture-draft-1.md
+        - name: Master server architecture (draft-2)
+          href: draft/master-architecture-draft-2.md
+        - name: Master server architecture (draft-3)
+          href: draft/master-architecture-draft-3.md
+        - name: Master server architecture (draft-4)
+          href: draft/master-architecture-draft-4.md
+        - name: Master server architecture (draft-5)
+          href: draft/master-architecture-draft-5.md
+        - name: Dynamic tables profiling (draft-6)
+          href: draft/dynamic-tables-profiling-draft-6.md
+        - name: Dynamic tables capacity scaling (draft-7)
+          href: draft/dynamic-tables-capacity-scaling-draft-7.md
+        - name: Dynamic tables operations in production (draft-8)
+          href: draft/dynamic-tables-operations-topic-draft-8.md
+        - name: Sorted dynamic tables operations corner cases (draft-9)
+          href: draft/dynamic-tables-sorted-ops-corner-cases-draft-9.md
+        - name: Ordered dynamic tables operations corner cases (draft-10)
+          href: draft/dynamic-tables-ordered-ops-corner-cases-draft-10.md
