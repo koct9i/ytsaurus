@@ -47,3 +47,4 @@ Articles in this category are **work-in-progress**. Content may be temporarily i
 - [Draft-8: Dynamic tables — operating in production](./dynamic-tables-operations-topic-draft-8.md)
 - [Draft-9: Dynamic tables (sorted) — operational corner cases and administration notes](./dynamic-tables-sorted-ops-corner-cases-draft-9.md)
 - [Draft-10: Dynamic tables (ordered) — operational corner cases and administration notes](./dynamic-tables-ordered-ops-corner-cases-draft-10.md)
+- [Draft-11: Queues — corner cases, performance analysis, and administration how-to](./queues-corner-cases-draft-11.md)
