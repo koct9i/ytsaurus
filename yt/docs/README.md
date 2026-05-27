@@ -4,9 +4,9 @@ YTsaurus follows the "Documentation as a Code" paradigm. The documentation conte
 - In Russian: https://ytsaurus.tech/docs/ru
 - In English: https://ytsaurus.tech/docs/en
 
-The documentation is built and published using the [Diplodoc](https://diplodoc.com/en/) open-source platform. Content is written using the Yandex Flavored Markdown (YFM). It is a Markdown dialect supplemented with unique elements from other markup languages and template engines, such as notes, tabs, reusable content, etc. For more information, see the [YFM Syntax Quick Reference](#yfm-syntax-quick-reference) section.
+The documentation is built using the [Diplodoc](https://diplodoc.com/en/) open-source platform and Yandex Flavored Markdown (YFM). Production publishing currently includes the existing Diplodoc release pipeline and a GitHub Pages deployment pipeline. YFM is a Markdown dialect supplemented with unique elements from other markup languages and template engines, such as notes, tabs, reusable content, etc. For more information, see the [YFM Syntax Quick Reference](#yfm-syntax-quick-reference) section.
 
-The documentation is released asynchronously from the main branch. The release cycle is once a week.
+The documentation is released asynchronously from the main branch through CI workflows.
 
 You are welcome to contribute to the YTsaurus documentation: correct typos, provide new content, and share your feedback and ideas. For more information, see the [Contribution](#contribution) section.
 
@@ -463,6 +463,56 @@ For information about images usage, read the [YFM documentation](https://diplodo
    - http://localhost:8888/en (English)
    - http://localhost:8888/ru (Russian)
    ```
+
+## Documentation Deployment
+
+The following workflows are currently used and should coexist during migration:
+
+- `.github/workflows/docs-build.yaml`: PR preview build for docs-only changes.
+- `.github/workflows/docs-release.yaml`: existing Diplodoc auto-release from `main`.
+- `.github/workflows/docs-release-testing.yaml`: existing manual Diplodoc testing upload.
+- `.github/workflows/docs-github-pages.yaml`: GitHub Pages build/deploy pipeline.
+
+### GitHub Pages workflow
+
+`docs-github-pages.yaml` runs on:
+
+- Pushes to `main` affecting `yt/docs/**`.
+- Manual `workflow_dispatch`.
+
+The workflow:
+
+1. Runs `diplodoc-platform/docs-build-action` to build `yt/docs`.
+2. Runs smoke checks for:
+   - `en/index.html` and `ru/index.html`.
+   - At least one generated HTML file in both language trees (`en/**`, `ru/**`).
+   - Top-level generated `images/` directory presence.
+3. Uploads `docs-pages-static` artifact for fallback/static hosting (S3/CloudFront, Cloudflare Pages, or similar). Default artifact retention is 14 days.
+4. Uploads artifact for the GitHub Pages deploy job.
+5. Deploys only when:
+   - Triggered by `push` to `main`, or
+   - Triggered manually with `deploy=true`.
+
+### Staged rollout
+
+1. Trigger `docs-github-pages.yaml` manually with default `deploy=false` to build, validate, and publish only artifacts.
+2. Use the `docs-pages-static` artifact as staging content in alternative static hosting.
+3. Validate language switching, navigation, redirects, images, "Edit on GitHub" links, and search behavior.
+4. Switch to public publishing by enabling deploy (`deploy=true`) or by allowing `main` pushes to deploy automatically.
+
+### Search strategy
+
+GitHub Pages workflow does not reindex Algolia. During migration, search index updates are produced only by the existing Diplodoc release workflows. Search on GitHub Pages can lag behind content updates until indexing is migrated to the Pages pipeline.
+
+The release workflows build docs with `diplodoc-platform/docs-build-action` and run a separate Algolia indexing step afterward.
+
+### GitHub Pages settings
+
+Configure repository Pages to use **GitHub Actions** as source. If required, configure a custom domain and environment protection rules for the `github-pages` environment.
+
+### Rollback
+
+To rollback, redeploy a previously validated commit (rerun `docs-github-pages.yaml` for that commit) or republish the previously produced `docs-pages-static` artifact to fallback hosting.
 
 ## Need Help?
 
