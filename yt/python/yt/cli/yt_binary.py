@@ -1970,6 +1970,7 @@ def check_permission(**kwargs):
         kwargs["format"] = None
     result = yt.check_permission(**kwargs)
     if quiet:
+        yt.config._cleanup()
         sys.exit(0 if result["action"] == "allow" else 1)
     print_to_output(result, eoln=False)
 
