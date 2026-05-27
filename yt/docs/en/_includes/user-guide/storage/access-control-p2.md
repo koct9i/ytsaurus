@@ -162,6 +162,47 @@ $ yt check-permission pavel-kulenov write //tmp
 }
 ```
 
+### Checking and granting permissions from shell scripts { #acl_shell_scripts }
+
+In shell scripts, it is convenient to check access first and grant missing permissions only when needed:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_NAME="robot-analytics"
+PERMISSION="write"
+PATH_NAME="//home/project"
+
+if yt check-permission "${USER_NAME}" "${PERMISSION}" "${PATH_NAME}" | grep -q '"action" = "allow"'; then
+  echo "Permission already granted"
+else
+  yt set "${PATH_NAME}/@acl/end" "{action=allow;subjects=[${USER_NAME}];permissions=[${PERMISSION}];inheritance_mode=object_and_descendants}"
+fi
+```
+
+To grant multiple permissions at once, add them in one ACE:
+
+```bash
+yt set //home/project/@acl/end '{action=allow;subjects=[analytics];permissions=[read;write;remove];inheritance_mode=object_and_descendants}'
+```
+
+### Reviewing user and group permissions { #review_subject_permissions }
+
+To review why access is granted or denied:
+
+```bash
+# effective ACL on a Cypress node
+yt get //home/project/@effective_acl
+
+# groups of a user (direct and transitive)
+yt get //sys/users/robot-analytics/@member_of
+yt get //sys/users/robot-analytics/@member_of_closure
+
+# group members
+yt get //sys/groups/analytics/@members
+```
+
 ## Requesting access { #request_access }
 
 To gain access to an existing account or directory in {{product-name}}, {% if audience == "public" %}contact your system administrator{%else%}see [Configuring access to data](../../../user-guide/storage/acl-manage.md){%endif%}.

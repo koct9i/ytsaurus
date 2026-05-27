@@ -116,6 +116,21 @@ my_subaccount2
 yt create account --attributes='{ name = "my_subaccount3"; parent_name = "my_account" }'
 ```
 
+Чтобы создать вложенный аккаунт без отдельного эффективного лимита, выставьте ему лимиты родительского аккаунта:
+
+```bash
+yt create account --attributes='{ name = "my_subaccount3"; parent_name = "my_account" }'
+yt set //sys/accounts/my_subaccount3/@resource_limits "$(yt get //sys/accounts/my_account/@resource_limits)"
+```
+
+Если несколько дочерних аккаунтов должны делить одну родительскую квоту, включите оверкоммит лимитов детей на родителе:
+
+```bash
+yt set //sys/account_tree/my_account/@allow_children_limit_overcommit %true
+```
+
+Даже в этом режиме реальное потребление всё равно ограничено квотой родительского аккаунта и всех его предков.
+
 {% endcut %}
 
 ### Удаление аккаунта { #account_tree_removing }

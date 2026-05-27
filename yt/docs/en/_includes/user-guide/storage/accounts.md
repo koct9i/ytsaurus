@@ -106,6 +106,21 @@ To create an account, specify its name in the `name` attribute and the parent na
 yt create account --attributes='{ name = "my_subaccount3"; parent_name = "my_account" }'
 ```
 
+To create a nested account without introducing an additional effective limit, set the child limits to the parent limits:
+
+```bash
+yt create account --attributes='{ name = "my_subaccount3"; parent_name = "my_account" }'
+yt set //sys/accounts/my_subaccount3/@resource_limits "$(yt get //sys/accounts/my_account/@resource_limits)"
+```
+
+If several child accounts should share the same parent quota, allow child limit overcommit on the parent:
+
+```bash
+yt set //sys/account_tree/my_account/@allow_children_limit_overcommit %true
+```
+
+Even in this mode, real consumption is still limited by the parent account and all its ancestors.
+
 {% endcut %}
 
 ### Removing an account { #account_tree_removing }

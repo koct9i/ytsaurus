@@ -160,6 +160,47 @@ $ yt check-permission pavel-kulenov write //tmp
 }
 ```
 
+### Проверка и выдача прав из shell-скриптов { #acl_shell_scripts }
+
+В shell-скриптах удобно сначала проверять доступ, а затем выдавать недостающие права:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_NAME="robot-analytics"
+PERMISSION="write"
+PATH_NAME="//home/project"
+
+if yt check-permission "${USER_NAME}" "${PERMISSION}" "${PATH_NAME}" | grep -q '"action" = "allow"'; then
+  echo "Право уже выдано"
+else
+  yt set "${PATH_NAME}/@acl/end" "{action=allow;subjects=[${USER_NAME}];permissions=[${PERMISSION}];inheritance_mode=object_and_descendants}"
+fi
+```
+
+Чтобы выдать сразу несколько прав, добавьте их в одну ACE:
+
+```bash
+yt set //home/project/@acl/end '{action=allow;subjects=[analytics];permissions=[read;write;remove];inheritance_mode=object_and_descendants}'
+```
+
+### Как проверить права пользователя и группы { #review_subject_permissions }
+
+Для проверки причин выдачи или запрета доступа:
+
+```bash
+# эффективный ACL узла Кипариса
+yt get //home/project/@effective_acl
+
+# группы пользователя (прямые и транзитивные)
+yt get //sys/users/robot-analytics/@member_of
+yt get //sys/users/robot-analytics/@member_of_closure
+
+# состав группы
+yt get //sys/groups/analytics/@members
+```
+
 ## Запрос доступа { #request_access }
 
 Для получения доступа к существующему аккаунту или директории в {{product-name}} обратитесь к {% if audience == "public" %}администратору системы{%else%}разделу [Настройка доступа к данным](../../../user-guide/storage/acl-manage.md){%endif%}.
