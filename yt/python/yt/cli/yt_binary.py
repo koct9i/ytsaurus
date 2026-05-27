@@ -1968,9 +1968,10 @@ def check_permission(**kwargs):
     quiet = kwargs.pop("quiet", False)
     if quiet:
         kwargs["format"] = None
-        result = yt.check_permission(**kwargs)
+    result = yt.check_permission(**kwargs)
+    if quiet:
         sys.exit(0 if result["action"] == "allow" else 1)
-    print_to_output(yt.check_permission(**kwargs), eoln=False)
+    print_to_output(result, eoln=False)
 
 
 def add_check_permission_parser(add_parser):
