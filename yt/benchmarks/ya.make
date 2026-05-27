@@ -1,4 +1,5 @@
 RECURSE(
+    map_perf
     run
 )
 
