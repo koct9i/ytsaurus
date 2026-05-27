@@ -594,3 +594,11 @@ items:
           href: draft/draft-0.md
         - name: Master server architecture (draft-1)
           href: draft/master-architecture-draft-1.md
+        - name: Master server architecture (draft-2)
+          href: draft/master-architecture-draft-2.md
+        - name: Master server architecture (draft-3)
+          href: draft/master-architecture-draft-3.md
+        - name: Master server architecture (draft-4)
+          href: draft/master-architecture-draft-4.md
+        - name: Master server architecture (draft-5)
+          href: draft/master-architecture-draft-5.md
