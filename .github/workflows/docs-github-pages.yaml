@@ -27,6 +27,8 @@ jobs:
       # https://github.com/actions/checkout
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          sparse-checkout: "yt/docs"
 
       # https://github.com/diplodoc-platform/docs-build-action
       - name: Build docs for static hosting
