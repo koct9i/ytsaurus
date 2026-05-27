@@ -586,4 +586,4 @@ items:
        - name: About drafts (draft-0)
          href: draft/index.md
        - name: Master server architecture (draft-1)
-         href: draft/draft-1.md
+         href: draft/master-architecture-draft-1.md

@@ -1,3 +1,11 @@
+<!--
+Draft number: 1
+Author: AI agent (GitHub Copilot)
+Created: 2026-05-27
+Status: In progress
+Target: admin-guide/master-architecture.md
+-->
+
 # Master server architecture
 
 This page describes the internal architecture of {{product-name}} master servers, covering the Hydra consensus engine, multi-cell topology, inter-cell communication, and performance characteristics relevant for users, administrators, and developers diagnosing performance issues.
