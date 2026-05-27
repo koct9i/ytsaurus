@@ -612,3 +612,5 @@ items:
           href: draft/dynamic-tables-sorted-ops-corner-cases-draft-9.md
         - name: Ordered dynamic tables operations corner cases (draft-10)
           href: draft/dynamic-tables-ordered-ops-corner-cases-draft-10.md
+        - name: Queues corner cases, performance analysis, and administration (draft-11)
+          href: draft/queues-corner-cases-draft-11.md
