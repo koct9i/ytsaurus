@@ -1965,6 +1965,11 @@ def add_unlock_parser(add_parser):
 
 @copy_docstring_from(yt.check_permission)
 def check_permission(**kwargs):
+    quiet = kwargs.pop("quiet", False)
+    if quiet:
+        kwargs["format"] = None
+        result = yt.check_permission(**kwargs)
+        sys.exit(0 if result["action"] == "allow" else 1)
     print_to_output(yt.check_permission(**kwargs), eoln=False)
 
 
@@ -1973,6 +1978,8 @@ def add_check_permission_parser(add_parser):
     add_hybrid_argument(parser, "user")
     add_hybrid_argument(parser, "permission", help="one of read, write, administer, create, use")
     add_ypath_argument(parser, "path", hybrid=True)
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="do not write anything to standard output; exit with 0 if permission is granted, 1 otherwise")
     add_read_from_arguments(parser)
     add_structured_argument(parser, "--columns")
     add_structured_format_argument(parser, default=output_format)

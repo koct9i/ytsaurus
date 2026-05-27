@@ -627,6 +627,14 @@ class TestYtBinary(object):
         stdout = yt_cli.check_output(["yt", "check-permission", "test_user", "read", "//home/wrapper_test/table", "--columns", "[a]"])
         assert b"allow" in stdout
 
+        completed_process = yt_cli.run(["yt", "check-permission", "test_user", "read", table, "--quiet"])
+        assert completed_process.returncode == 0
+        assert completed_process.stdout == b""
+
+        completed_process = yt_cli.run(["yt", "check-permission", "test_user", "write", table, "-q"])
+        assert completed_process.returncode == 1
+        assert completed_process.stdout == b""
+
     @authors("ilyaibraev")
     def test_transfer_account_resources(self, yt_cli: YtCli):
         yt_cli.check_output(["yt", "create", "account", "--attributes", "{name=a1;resource_limits={node_count=10}}"])
