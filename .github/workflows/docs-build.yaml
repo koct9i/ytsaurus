@@ -20,3 +20,8 @@ jobs:
         with:
           revision: "pr-${{ github.event.pull_request.number }}"
           src-root: "./yt/docs"
+
+      - name: Report errors and warnings
+        if: always()
+        run: |
+          awk '/^ERR / { print "::error::" $0 } /^WARN / { print "::warning::" $0 }' ./build-html.log
