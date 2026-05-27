@@ -32,3 +32,11 @@ Articles in this category are **work-in-progress**. Content may be temporarily i
 - **Author:** AI agent (GitHub Copilot)
 - **Created:** 2026-05-27
 - **Status:** Final — this article is the permanent description of the Draft category and is not subject to graduation.
+
+## Current draft articles
+
+- [Draft-1: Master server architecture — Hydra and persistence foundations](./master-architecture-draft-1.md)
+- [Draft-2: Master server architecture — cell topology and inter-cell communication](./master-architecture-draft-2.md)
+- [Draft-3: Master server architecture — transaction lifecycle and mutation pipeline](./master-architecture-draft-3.md)
+- [Draft-4: Master server architecture — read request execution](./master-architecture-draft-4.md)
+- [Draft-5: Master server architecture — performance and administration](./master-architecture-draft-5.md)
