@@ -131,11 +131,11 @@ The table below lists all user-facing settings. The **YQL-agent default** column
 | --- | --- | --- | --- | --- |
 | `EnableComputeActor` | `0`/`1` | `1` | — | Enable DQ compute actor execution. Must be `1` for DQ to work. |
 | `ComputeActorType` | string | `async` | — | Compute actor implementation type. Accepted value: `async`. |
-| `EnableStrip` | bool | `true` | — | Strip unused columns from input before passing to compute actors. |
+| `EnableStrip` | bool | `true` | — | Strip unused input columns early to reduce data transferred to compute actors. |
 | `EnableInsert` | bool | `true` | — | Enable DQ-side INSERT support. |
 | `EnableFullResultWrite` | bool | `true` | — | Write full query results via DQ (instead of through coordinator). |
 | `AnalyzeQuery` | bool | `true` | — | Analyze query complexity before execution; enables automatic DQ/fallback routing. |
-| `FallbackPolicy` | string | — | — | Controls when to fall back to the YT engine. Accepted values: `never`, `always`, `condition`. |
+| `FallbackPolicy` | string | — | `default` | Controls when DQ falls back to the YT map-reduce engine. Accepted values: `default` (fall back on runtime errors and task-limit exceeded), `never` (disable fallback; fail on any DQ error), `always` (always fall back to YT engine, effectively disabling DQ). |
 | `UseFinalizeByKey` | bool | — | — | Use finalize-by-key aggregation when possible (reduces shuffle). |
 | `UseAggPhases` | bool | `true` | — | Enable multi-phase aggregation (combine-then-reduce). |
 | `EnableDqReplicate` | bool | — | `false` | Enable DQ replicate operator (required for some broadcast joins). |
@@ -145,7 +145,7 @@ The table below lists all user-facing settings. The **YQL-agent default** column
 | `DisableLLVMForBlockStages` | bool | — | — | Disable LLVM codegen for block-processing stages. |
 | `OptLLVM` | string | — | — | LLVM optimization level override (e.g. `O2`). |
 | `UseGraceJoinCoreForMap` | bool | — | — | Use grace-join algorithm for map-side joins. |
-| `HashJoinMode` | string | `off` | — | Hash join algorithm. Accepted values: `off`, `map`, `broadcast`, `grace`, `graceandself`. |
+| `HashJoinMode` | string | `off` | — | Hash join algorithm for DQ joins. Accepted values: `off` (use default sort-merge or map join), `map` (force map-side join), `broadcast` (broadcast smaller side to all workers), `grace` (grace hash join for large inputs that may spill), `graceandself` (grace join + self-join optimization). |
 
 ### Network and transport
 
@@ -166,8 +166,8 @@ The table below lists all user-facing settings. The **YQL-agent default** column
 
 | Setting | Type | YQL-agent default | Code default | Description |
 | --- | --- | --- | --- | --- |
-| `SpillingEngine` | string | — | `disable` | Spilling backend. Accepted values: `disable`, `file`. |
-| `EnableSpillingNodes` | uint64 | — | `0` | Bitmask of node types allowed to spill (0 = none). |
+| `SpillingEngine` | string | — | `disable` | Spilling backend. Accepted values: `disable` (no spilling), `file` (spill to local disk files). |
+| `EnableSpillingNodes` | uint64 or string | — | `0` | Which operator types may spill to disk. Accepted named values: `None` (`0`), `GraceJoin` (`1`), `Aggregation` (`2`), `All` (all bits set). Numeric bitmask values are also accepted; combine by summing, e.g. `3` enables both GraceJoin and Aggregation. Requires `SpillingEngine` to be non-`disable`. |
 | `EnableSpillingInChannels` | bool | — | `false` | Allow channel buffers to spill to disk when full. |
 | `DisableCheckpoints` | bool | — | — | Disable DQ checkpointing (useful for debugging or when checkpoints are not needed). |
 
@@ -178,7 +178,7 @@ The table below lists all user-facing settings. The **YQL-agent default** column
 | `AggregateStatsByStage` | bool | — | `true` | Aggregate task statistics at the stage level before reporting. |
 | `EnableChannelStats` | bool | — | `false` | Collect and report per-channel statistics. |
 | `ExportStats` | bool | — | `false` | Export statistics to the YT cluster. |
-| `TaskRunnerStats` | string | — | `basic` | Level of task-runner statistics. Accepted values: `disable`, `basic`, `full`, `profile`. |
+| `TaskRunnerStats` | string | — | `basic` | Level of task-runner statistics collected and reported. `disable`: no stats (lowest overhead). `basic`: lightweight counters (default; recommended for production). `full`: detailed per-operator stats (moderate overhead). `profile`: full profiling including per-row metrics (high overhead; for debugging only). |
 | `CollectCoreDumps` | bool | — | — | Collect core dumps from failed compute actors for debugging. |
 | `WorkerFilter` | string | — | — | Filter expression to select which DQ workers handle a query (for testing/routing). |
 
