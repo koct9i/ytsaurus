@@ -96,6 +96,131 @@ Minimal example:
 }
 ```
 
+## DQ gateway: settings reference {#dq-settings-reference}
+
+Settings in `dq_gateway_config.default_settings[]` control DQ query execution behavior. Each entry has the form `{ "name" = "<SettingName>"; "value" = "<value>"; }`.
+
+The table below lists all user-facing settings. The **YQL-agent default** column shows the value applied by the YQL-agent plugin (from `yt/yql/plugin/config.cpp`). When a YQL-agent default is present it takes precedence over the built-in code default.
+
+### Task limits
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `MaxTasksPerOperation` | uint32 | `100` | `70` | Maximum number of DQ tasks across all stages of a single operation. Operations that would exceed this limit fall back to the YT map-reduce engine (if fallback is allowed). |
+| `MaxTasksPerStage` | uint32 | `30` | `20` | Maximum number of tasks per single DQ stage. |
+| `WorkersPerOperation` | uint32 | — | — | Fixed number of workers to allocate for an operation. When unset, the number is computed automatically. |
+| `ParallelOperationsLimit` | uint64 | — | `16` | Maximum number of DQ operations that may run in parallel within a single query. |
+| `HashShuffleTasksRatio` | double | — | `0.5` | Fraction of available workers assigned to hash-shuffle stages. |
+| `HashShuffleMaxTasks` | uint32 | — | `24` | Upper cap on hash-shuffle task count regardless of ratio. |
+
+### Memory and data sizes
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `MemoryLimit` | size string | `3G` | — | Per-job memory limit for DQ compute actors (e.g. `3G`, `512M`). |
+| `ChannelBufferSize` | uint64 (bytes) | `1000000` | `2147483648` (2 GB) | Size of in-memory channel buffers between compute actors. |
+| `OutputChunkMaxSize` | uint64 (bytes) | — | `4194304` (4 MB) | Maximum size of a single output chunk written by a compute actor. |
+| `ChunkSizeLimit` | uint64 (bytes) | — | `134217728` (128 MB) | Maximum allowed chunk size when reading from YT. Chunks larger than this value are split. |
+| `DataSizePerJob` | uint64 (bytes) | — | `134217728` (128 MB) | Target input data size per DQ job when splitting input. |
+| `MaxDataSizePerJob` | uint64 (bytes) | — | `629145600` (600 MB) | Hard upper limit on input data size per DQ job. |
+| `MaxDataSizePerQuery` | uint64 (bytes) | — | — | Total input data size cap for a DQ query. Queries exceeding this fall back to YT engine. |
+
+### Execution and fallback
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `EnableComputeActor` | `0`/`1` | `1` | — | Enable DQ compute actor execution. Must be `1` for DQ to work. |
+| `ComputeActorType` | string | `async` | — | Compute actor implementation type. Accepted value: `async`. |
+| `EnableStrip` | bool | `true` | — | Strip unused columns from input before passing to compute actors. |
+| `EnableInsert` | bool | `true` | — | Enable DQ-side INSERT support. |
+| `EnableFullResultWrite` | bool | `true` | — | Write full query results via DQ (instead of through coordinator). |
+| `AnalyzeQuery` | bool | `true` | — | Analyze query complexity before execution; enables automatic DQ/fallback routing. |
+| `FallbackPolicy` | string | — | — | Controls when to fall back to the YT engine. Accepted values: `never`, `always`, `condition`. |
+| `UseFinalizeByKey` | bool | — | — | Use finalize-by-key aggregation when possible (reduces shuffle). |
+| `UseAggPhases` | bool | `true` | — | Enable multi-phase aggregation (combine-then-reduce). |
+| `EnableDqReplicate` | bool | — | `false` | Enable DQ replicate operator (required for some broadcast joins). |
+| `SplitStageOnDqReplicate` | bool | — | `true` | Automatically split stages at replicate boundaries. |
+| `UseSimpleYtReader` | bool | — | — | Use simpler YT reader instead of the block-optimized one. |
+| `UseBlockReader` | bool | — | — | Use block (Arrow) reader for YT input. |
+| `DisableLLVMForBlockStages` | bool | — | — | Disable LLVM codegen for block-processing stages. |
+| `OptLLVM` | string | — | — | LLVM optimization level override (e.g. `O2`). |
+| `UseGraceJoinCoreForMap` | bool | — | — | Use grace-join algorithm for map-side joins. |
+| `HashJoinMode` | string | `off` | — | Hash join algorithm. Accepted values: `off`, `map`, `broadcast`, `grace`, `graceandself`. |
+
+### Network and transport
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `PullRequestTimeoutMs` | uint64 (ms) | `3000000` | — | Timeout for pulling results from a compute actor (milliseconds). |
+| `PingTimeoutMs` | uint64 (ms) | `30000` | — | Heartbeat ping timeout for compute actors (milliseconds). |
+| `UseWideChannels` | bool | `true` | — | Use wide (multi-column) channels between compute actors for better throughput. |
+| `UseWideBlockChannels` | bool | — | — | Use block-encoded wide channels. |
+| `UseFastPickleTransport` | bool | `true` | `false` | Use fast pickle serialization for inter-actor data transport. |
+| `UseOOBTransport` | bool | `true` | `false` | Use out-of-band transport for large data chunks between compute actors. |
+| `MaxNetworkRetries` | int | — | `5` | Number of network-level retries before failing a task. |
+| `MaxRetries` | int | — | — | Total retry limit for a failed DQ operation. |
+| `RetryBackoffMs` | uint64 (ms) | — | — | Backoff delay between retries (milliseconds). |
+| `Scheduler` | string | — | — | DQ task scheduler algorithm override. |
+
+### Spilling (overflow to disk)
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `SpillingEngine` | string | — | `disable` | Spilling backend. Accepted values: `disable`, `file`. |
+| `EnableSpillingNodes` | uint64 | — | `0` | Bitmask of node types allowed to spill (0 = none). |
+| `EnableSpillingInChannels` | bool | — | `false` | Allow channel buffers to spill to disk when full. |
+| `DisableCheckpoints` | bool | — | — | Disable DQ checkpointing (useful for debugging or when checkpoints are not needed). |
+
+### Statistics and diagnostics
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `AggregateStatsByStage` | bool | — | `true` | Aggregate task statistics at the stage level before reporting. |
+| `EnableChannelStats` | bool | — | `false` | Collect and report per-channel statistics. |
+| `ExportStats` | bool | — | `false` | Export statistics to the YT cluster. |
+| `TaskRunnerStats` | string | — | `basic` | Level of task-runner statistics. Accepted values: `disable`, `basic`, `full`, `profile`. |
+| `CollectCoreDumps` | bool | — | — | Collect core dumps from failed compute actors for debugging. |
+| `WorkerFilter` | string | — | — | Filter expression to select which DQ workers handle a query (for testing/routing). |
+
+### Watermarks (streaming queries)
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `WatermarksMode` | string | — | — | Watermark mode for streaming execution (e.g. `default`). |
+| `WatermarksEnableIdlePartitions` | bool | — | — | Advance watermarks for idle (no-data) partitions. |
+| `WatermarksIdleTimeoutMs` | uint64 (ms) | — | `5000` | How long a partition must be idle before its watermark is advanced. |
+| `WatermarksGranularityMs` | uint64 (ms) | — | `1000` | Watermark advancement granularity. |
+| `WatermarksLateArrivalDelayMs` | uint64 (ms) | — | `5000` | Tolerance window for late-arriving data before it is discarded. |
+| `AnalyticsHopping` | bool | — | — | Enable analytics hopping windows in streaming mode. |
+
+### Data format and serialization
+
+| Setting | Type | YQL-agent default | Code default | Description |
+| --- | --- | --- | --- | --- |
+| `ValuePackerVersion` | string | — | `v0` | Serialization format version for inter-actor values. Accepted values: `v0`, `v1`. |
+
+### Example: tuning DQ for a large cluster
+
+```yson
+{
+    "yql_agent" = {
+        "enable_dq" = %true;
+        "dq_gateway_config" = {
+            "default_settings" = [
+                { "name" = "EnableComputeActor"; "value" = "1"; };
+                { "name" = "MemoryLimit"; "value" = "8G"; };
+                { "name" = "MaxTasksPerOperation"; "value" = "200"; };
+                { "name" = "MaxTasksPerStage"; "value" = "50"; };
+                { "name" = "ChannelBufferSize"; "value" = "33554432"; };
+                { "name" = "HashJoinMode"; "value" = "grace"; };
+                { "name" = "ParallelOperationsLimit"; "value" = "32"; };
+                { "name" = "FallbackPolicy"; "value" = "condition"; };
+            ];
+        };
+    };
+}
+```
+
 ## YQL DQ architecture: manager, gateway, ports, coordinator
 
 At runtime, DQ in YQL-agent is split into two roles:
