@@ -79,7 +79,7 @@ The main types of structured logs:
 - `master_security_log` — log of security events like adding a user to a group or modifying an ACL (written on the master, `SecurityServer` category)
 - `structured_http_proxy_log` — log of requests to http proxy, one line per request (written on http proxy, `HttpStructuredProxy` category)
 - `chyt_log` — log of requests to CHYT, one line per request (written on http proxy, `ClickHouseProxyStructured` catgeory)
-- `structured_rpc_proxy_log` — log of requests to rpc proxy, one line per request (written on rpc proxy, `RpcProxyStructuredMain` category)
+- `structured_rpc_proxy_log` — request log of rpc proxy (written on rpc proxy, `RpcProxyStructuredMain` category; for error-only stream you can also configure `RpcProxyStructuredError`)
 - `scheduler_event_log` — scheduler event log, written by the scheduler (`SchedulerEventLog` category)
 - `controller_event_log` — log of controller agent events, written on the controller agent (`ControllerEventLog` category)
 
@@ -120,6 +120,120 @@ This log contains entries for all requests handled by the HTTP proxy.
 | `out_bytes`                                  | Size of the response data in bytes                                                                                            |
 | `remote_address`                             | Address from which the request originated                                                                                     |
 
+### RPC Proxy request logs { #rpc_proxy_log }
+
+RPC proxy provides two structured categories for request diagnostics:
+- `RpcProxyStructuredMain` — full request log for requests selected by dynamic config.
+- `RpcProxyStructuredError` — lighter error-only stream (records are emitted only for failed requests).
+
+Both are written by the RPC proxy process. You configure output files via `structured_loggers` in RPC proxy logging settings.
+
+<small>Table 3 — Recommended structured loggers for RPC proxy</small>
+
+| Logger category | Purpose | Typical usage |
+|---|---|---|
+| `RpcProxyStructuredMain` | Full request telemetry, including request metadata and (subject to limits) request payload | Deep incident debugging, short-term investigations |
+| `RpcProxyStructuredError` | Failed requests only, smaller payload | Long-running error analytics with lower volume |
+
+Example static logging fragment for rpc-proxy:
+
+```yaml
+rpcProxies:
+  ...
+  structuredLoggers:
+    - name: rpc-main
+      minLogLevel: info
+      format: yson
+      category: RpcProxyStructuredMain
+      rotationPolicy:
+        maxTotalSizeToKeep: 20_000_000_000
+        rotationPeriodMilliseconds: 900000
+    - name: rpc-error
+      minLogLevel: info
+      format: yson
+      category: RpcProxyStructuredError
+      rotationPolicy:
+        maxTotalSizeToKeep: 10_000_000_000
+        rotationPeriodMilliseconds: 900000
+```
+
+<small>Table 4 — Key fields in `RpcProxyStructuredMain`</small>
+
+| Field | Description |
+|---|---|
+| `request_id` | Request identifier |
+| `endpoint` | Endpoint attributes for the rpc call |
+| `method` | RPC method name (`GetNode`, `SelectRows`, etc.) |
+| `path` | Request path when applicable |
+| `request` | Structured request payload (subject to size controls) |
+| `identity` | Authenticated identity |
+| `trace_id` | Trace ID (when trace context exists) |
+| `error`, `error_skeleton`, `error_codes` | Structured error information |
+| `request_body_size`, `response_body_size` | Body sizes when available |
+| `request_attachment_total_size`, `response_attachment_total_size` | Attachment sizes |
+| `arrive_instant`, `wait_time`, `execution_time`, `finish_instant` | Request timing on proxy |
+| `cpu_time` | CPU time spent in the request context (when available) |
+
+`RpcProxyStructuredError` contains a reduced subset focused on failed requests: `request_id`, `endpoint`, `method`, `path`, `identity`, `error`, `error_skeleton`, `error_codes`.
+
+#### RPC proxy dynamic controls for structured logging
+
+RPC proxy dynamic config is stored at `//sys/rpc_proxies/@config`. Structured logging controls are under `/api`:
+
+- `structured_logging_main_topic/enable` (`%true` by default).
+- `structured_logging_main_topic/suppressed_methods` (default suppressed methods: `ModifyRows`, `BatchModifyRows`, `LookupRows`, `VersionedLookupRows`).
+- `structured_logging_main_topic/methods/<Method>/enable` (per-method switch, default `%true`).
+- `structured_logging_main_topic/methods/<Method>/max_request_byte_size` (per-method request payload limit).
+- `structured_logging_error_topic/enable` (`%true` by default).
+- `structured_logging_max_request_byte_size` (global request payload limit for structured logs, default `10_KB`).
+- `structured_logging_query_truncation_size` (query text truncation limit, default `256`).
+
+Examples:
+
+Enable main topic logging for all methods:
+```bash
+yt set //sys/rpc_proxies/@config '{
+  api = {
+    structured_logging_main_topic = {
+      enable = %true;
+      suppressed_methods = [];
+      methods = {};
+    };
+  };
+}'
+```
+
+Disable logging for a specific method:
+```bash
+yt set //sys/rpc_proxies/@config '{
+  api = {
+    structured_logging_main_topic = {
+      methods = {
+        ListNode = {
+          enable = %false;
+        };
+      };
+    };
+  };
+}'
+```
+
+Set strict request payload limits globally and for one method:
+```bash
+yt set //sys/rpc_proxies/@config '{
+  api = {
+    structured_logging_max_request_byte_size = 1024;
+    structured_logging_main_topic = {
+      methods = {
+        SelectRows = {
+          max_request_byte_size = 16384;
+        };
+      };
+    };
+  };
+}'
+```
+
 ### Delivery of structured master logs to Cypress { #structured_log_delivery }
 
 {% include [Delivery of structured master logs](structured-log-delivery.md) %}
@@ -127,7 +241,7 @@ This log contains entries for all requests handled by the HTTP proxy.
 ## Configuring log rotation { #log_rotation }
 For debug and structured logs written to a file, you can configure the built-in rotation mechanism (the `rotationPolicy` field). The rotation settings are detailed in the table. If the `useTimestampSuffix` option isn't enabled, an index number is appended to the file names of old segments on rotation.
 
-<small>Table 3 — Log rotation settings </small>
+<small>Table 5 — Log rotation settings </small>
 
 | **Field** | **Description** |
 | ------------------- |  ------- |
