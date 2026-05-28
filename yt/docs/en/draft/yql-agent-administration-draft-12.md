@@ -214,7 +214,7 @@ The table below lists all user-facing settings. The **YQL-agent default** column
                 { "name" = "ChannelBufferSize"; "value" = "33554432"; };
                 { "name" = "HashJoinMode"; "value" = "grace"; };
                 { "name" = "ParallelOperationsLimit"; "value" = "32"; };
-                { "name" = "FallbackPolicy"; "value" = "condition"; };
+                { "name" = "FallbackPolicy"; "value" = "default"; };
             ];
         };
     };
@@ -485,6 +485,94 @@ Each item:
 - `remote_file_patterns[]` (`TRemoteFilePattern`)
 - `cluster_mapping[]` (`TYtClusterConfig`)
 - `default_settings[]` (`TAttr`)
+
+#### YT settings groups for `default_settings[]` and `cluster_mapping[].settings[]` (complete lists)
+
+Below are source-derived complete lists for YT settings. This intentionally includes internal/underscore-prefixed settings even when meaning is not documented yet.
+
+`DefaultGatewaySettings` (plugin-injected defaults from `yt/yql/plugin/config.cpp`):
+
+```text
+DefaultCalcMemoryLimit=1G
+EvaluationTableSizeLimit=1M
+DefaultMaxJobFails=5
+DefaultMemoryLimit=512m
+MapJoinLimit=2048m
+MapJoinShardCount=4
+CommonJoinCoreLimit=128m
+CombineCoreLimit=128m
+SwitchLimit=128m
+JoinMergeTablesLimit=64
+DataSizePerJob=1g
+MaxJobCount=16384
+PublishedCompressionCodec=zstd_5
+TemporaryCompressionCodec=zstd_5
+PublishedErasureCodec=none
+TemporaryErasureCodec=none
+OptimizeFor=scan
+PythonCpu=4.0
+JavascriptCpu=4.0
+ErasureCodecCpu=5.0
+AutoMerge=relaxed
+QueryCacheMode=normal
+QueryCacheSalt=YQLOVERYT-41
+UseSkiff=1
+MaxInputTables=1000
+MaxInputTablesForSortedMerge=100
+MaxOutputTables=50
+InferSchemaTableCountThreshold=50
+MaxExtraJobMemoryToFuseOperations=3g
+UseColumnarStatistics=auto
+ParallelOperationsLimit=16
+ReleaseTempData=immediate
+LookupJoinLimit=1M
+LookupJoinMaxRows=900
+MaxReplicationFactorToFuseOperations=20.0
+LLVMMemSize=256M
+LLVMPerNodeMemSize=10K
+JoinEnableStarJoin=true
+FolderInlineItemsLimit=200
+FolderInlineDataLimit=500K
+WideFlowLimit=101
+NativeYtTypeCompatibility=complex,date,null,void,date,float,json,decimal,uuid
+MapJoinUseFlow=1
+HybridDqDataSizeLimitForOrdered=384M
+HybridDqDataSizeLimitForUnordered=8G
+UseYqlRowSpecCompactForm=false
+_UseKeyBoundApi=false
+UseNewPredicateExtraction=true
+PruneKeyFilterLambda=true
+JoinCommonUseMapMultiOut=true
+UseAggPhases=true
+EnforceJobUtc=true
+_EnforceRegexpProbabilityFail=0
+_ForceJobSizeAdjuster=true
+_EnableWriteReorder=true
+_EnableYtPartitioning=true
+HybridDqExecution=true
+DQRPCReaderInflight=1
+UseNativeYtTypes=true
+UseNativeDynamicTableRead=true
+RuntimeClusterSelection=auto
+```
+
+`DefaultClusterSettings` (plugin-injected defaults for `cluster_mapping[].settings[]`):
+
+```text
+QueryCacheChunkLimit=100000
+_UseKeyBoundApi=true
+```
+
+Complete setting groups accepted by YT gateway settings dispatcher (`yt/yql/providers/yt/common/yql_yt_settings.h`):
+
+- `static per-cluster` (21):
+  `ExternalTx`, `TmpFolder`, `TablesTmpFolder`, `BinaryTmpFolder`, `StaticPool`, `StaticNetworkProject`, `CoreDumpPath`, `JobBlockInput`, `JobBlockTableContent`, `JobBlockInputSupportedTypes`, `JobBlockInputSupportedDataTypes`, `JobBlockOutput`, `JobBlockOutputSupportedTypes`, `JobBlockOutputSupportedDataTypes`, `ValidatePool`, `_QueryDumpFolder`, `_QueryDumpAccount`, `_EnableDynamicTablesWrite`, `_EnableRLSTablesSupport`, `_SecureTmpRoot`, `_EnableQLFilter`.
+- `static global` (50):
+  `Auth`, `TempTablesTtl`, `KeepTempTables`, `InflightTempTablesLimit`, `ReleaseTempData`, `IgnoreYamrDsv`, `IgnoreWeakSchema`, `InferSchema`, `ForceInferSchema`, `InferSchemaTableCountThreshold`, `DefaultCalcMemoryLimit`, `ParallelOperationsLimit`, `LocalCalcLimit`, `QueryCacheMode`, `QueryCacheIgnoreTableRevision`, `QueryCacheSalt`, `QueryCacheTtl`, `QueryCacheUseExpirationTimeout`, `QueryCacheUseForCalc`, `QueryCacheCombineChunksReplace`, `DefaultMaxJobFails`, `DefaultCluster`, `BinaryExpirationInterval`, `IgnoreTypeV3`, `_UseMultisetAttributes`, `FileCacheTtl`, `_ImpersonationUser`, `InferSchemaMode`, `BatchListFolderConcurrency`, `ForceTmpSecurity`, `RuntimeClusterSelection`, `DefaultRuntimeCluster`, `_ForbidSensitiveDataInOperationSpec`, `_LocalTableContentLimit`, `EnableDynamicStoreReadInDQ`, `UseDefaultArrowAllocatorInJobs`, `UseNativeYtDefaultColumnOrder`, `EarlyPartitionPruning`, `ValidateClusters`, `_QueryDumpTableSizeLimit`, `_QueryDumpTableCountPerClusterLimit`, `_QueryDumpFileCountPerOperationLimit`, `KeepWorldDepForFillOp`, `CostBasedOptimizerPartial`, `OmitInaccessibleRows`, `_MinJobStateSizeToPassViaFile`, `_SecureTmpWaitForAclDelay`, `_SecureTmpWaitForAclMaxAttempts`, `_SecureTmpAttributes`, `TmpSecurity`.
+- `job runtime` (100):
+  `Pool`, `DefaultMemoryLimit`, `DefaultMemoryReserveFactor`, `DefaultMemoryDigestLowerBound`, `MaxRowWeight`, `MaxKeyWeight`, `BufferRowCount`, `DataSizePerJob`, `DataSizePerSortJob`, `DataSizePerMapJob`, `DataSizePerPartition`, `DefaultLocalityTimeout`, `MapLocalityTimeout`, `ReduceLocalityTimeout`, `SortLocalityTimeout`, `MinLocalityInputDataWeight`, `MaxJobCount`, `UserSlots`, `DefaultOperationWeight`, `DefaultMapSelectivityFactor`, `NightlyCompress`, `PublishedCompressionCodec`, `TemporaryCompressionCodec`, `PublishedErasureCodec`, `TemporaryErasureCodec`, `ClientMapTimeout`, `UseTmpfs`, `SuspendIfAccountLimitExceeded`, `ExtraTmpfsSize`, `OptimizeFor`, `ExpirationDeadline`, `ExpirationInterval`, `ScriptCpu`, `PythonCpu`, `JavascriptCpu`, `ErasureCodecCpu`, `ErasureCodecCpuForDq`, `Owners`, `OperationReaders`, `SchedulingTag`, `SchedulingTagFilter`, `PoolTrees`, `TentativePoolTrees`, `TentativeTreeEligibilitySampleJobCount`, `TentativeTreeEligibilityMaxJobDurationRatio`, `TentativeTreeEligibilityMinJobDuration`, `UseDefaultTentativePoolTrees`, `IntermediateAccount`, `IntermediateReplicationFactor`, `PublishedReplicationFactor`, `TemporaryReplicationFactor`, `AutoMerge`, `PublishedAutoMerge`, `TemporaryAutoMerge`, `LayerPaths`, `LayerCaches`, `DockerImage`, `JobEnv`, `OperationSpec`, `FmrOperationSpec`, `Annotations`, `StartedBy`, `Description`, `UseSkiff`, `TableContentCompressLevel`, `DisableJobSplitting`, `UseColumnarStatistics`, `TableContentDeliveryMode`, `TableContentUseSkiff`, `TableContentTmpFolder`, `TableContentColumnarStatistics`, `GeobaseDownloadUrl`, `MaxSpeculativeJobCountPerTask`, `LLVMMemSize`, `LLVMPerNodeMemSize`, `LLVMNodeCountLimit`, `SamplingIoBlockSize`, `PublishedMedia`, `TemporaryMedia`, `PublishedPrimaryMedium`, `TemporaryPrimaryMedium`, `IntermediateDataMedium`, `PrimaryMedium`, `QueryCacheChunkLimit`, `NativeYtTypeCompatibility`, `_UseKeyBoundApi`, `NetworkProject`, `_EnableYtPartitioning`, `ForceJobSizeAdjuster`, `EnforceJobUtc`, `_EnforceRegexpProbabilityFail`, `UseRPCReaderInDQ`, `DQRPCReaderInflight`, `DQRPCReaderTimeout`, `BlockReaderSupportedTypes`, `BlockReaderSupportedDataTypes`, `_BinaryCacheFolder`, `RuntimeCluster`, `_AllowRemoteClusterInput`, `_EnableDq`.
+- `optimizers` (92):
+  `ExtendTableLimit`, `CommonJoinCoreLimit`, `CombineCoreLimit`, `SwitchLimit`, `JoinMergeTablesLimit`, `JoinMergeUseSmallAsPrimary`, `JoinMergeReduceJobMaxSize`, `JoinMergeUnsortedFactor`, `JoinMergeForce`, `MapJoinLimit`, `MapJoinShardMinRows`, `MapJoinShardCount`, `MapJoinUseFlow`, `BlockMapJoin`, `LookupJoinLimit`, `LookupJoinMaxRows`, `ConvertDynamicTablesToStatic`, `KeepMergeWithDynamicInput`, `EvaluationTableSizeLimit`, `DisableOptimizers`, `MaxInputTables`, `MaxInputTablesForSortedMerge`, `MaxOutputTables`, `DisableFuseOperations`, `EnableFuseMapToMapReduce`, `FuseMapToMapReduce`, `MaxExtraJobMemoryToFuseOperations`, `MaxReplicationFactorToFuseOperations`, `MaxOperationFiles`, `MinPublishedAvgChunkSize`, `MinTempAvgChunkSize`, `TopSortMaxLimit`, `TopSortSizePerJob`, `TopSortRowMultiplierPerJob`, `JoinUseColumnarStatistics`, `JoinCollectColumnarStatistics`, `JoinColumnarStatisticsFetcherMode`, `JoinWaitAllInputs`, `JoinAllowColumnRenames`, `JoinMergeSetTopLevelFullSort`, `JoinEnableStarJoin`, `FolderInlineDataLimit`, `FolderInlineItemsLimit`, `TableContentMinAvgChunkSize`, `TableContentMaxInputTables`, `TableContentMaxChunksForNativeDelivery`, `TableContentLocalExecution`, `UseTypeV2`, `UseNativeYtTypes`, `UseNativeDescSort`, `UseIntermediateSchema`, `UseIntermediateStreams`, `PassSqlFlagsForViewTranslation`, `UseFlow`, `WideFlowLimit`, `UseSystemColumns`, `HybridDqExecution`, `HybridDqTimeSpentLimit`, `HybridDqDataSizeLimitForOrdered`, `HybridDqDataSizeLimitForUnordered`, `HybridDqExecutionFallback`, `UseYqlRowSpecCompactForm`, `UseNewPredicateExtraction`, `PruneKeyFilterLambda`, `DqPruneKeyFilterLambda`, `UseQLFilter`, `PruneQLFilterLambda`, `MergeAdjacentPointRanges`, `KeyFilterForStartsWith`, `MaxKeyRangeCount`, `MaxChunksForDqRead`, `JoinCommonUseMapMultiOut`, `UseAggPhases`, `UsePartitionsByKeysForFinalAgg`, `MaxCpuUsageToFuseMultiOuts`, `MaxReplicationFactorToFuseMultiOuts`, `ApplyStoredConstraints`, `ViewIsolation`, `PartitionByConstantKeysViaMap`, `ColumnGroupMode`, `MinColumnGroupSize`, `MaxColumnGroups`, `ExtendedStatsMaxChunkCount`, `_EnableYtDqProcessWriteConstraints`, `CompactForDistinct`, `DropUnusedKeysFromKeyFilter`, `ReportEquiJoinStats`, `UseColumnGroupsFromInputTables`, `UseNativeDynamicTableRead`, `DontForceTransformForInputTables`, `_RequestOnlyRequiredAttrs`, `_CacheSchemaBySchemaId`.
 
 ### `dq_gateway_config` (`TDqGatewayConfig`)
 
