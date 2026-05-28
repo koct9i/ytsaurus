@@ -31,11 +31,13 @@ These paths are useful for health checks and troubleshooting.
 
 ## Dynamic configuration
 
-Main dynamic options (`//sys/yql_agent/config`):
+Main dynamic options (`//sys/yql_agent/config` → `yql_agent`):
 
-- `max_simultaneous_queries`: max concurrently running queries per agent.
-- `state_check_period`: YQL-agent state update period.
+- `max_simultaneous_queries` (default: `63`): max concurrently running queries per agent.
+- `state_check_period` (default: `15s`): YQL-agent state update period.
 - `gateways`: dynamic YQL gateways config fragment.
+- `default_yql_ui_version`: overrides the UI version exposed by YQL-agent.
+- `allow_not_released_yql_versions`: allows/disallows unreleased YQL versions in UI/API.
 
 Example:
 
@@ -45,6 +47,8 @@ Example:
         "max_simultaneous_queries" = 64;
         "state_check_period" = "15s";
         "gateways" = {};
+        "default_yql_ui_version" = "2025.03";
+        "allow_not_released_yql_versions" = %false;
     };
 }
 ```
