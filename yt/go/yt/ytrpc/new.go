@@ -28,6 +28,11 @@ func checkNotInsideJob(c *yt.Config) error {
 // Note! Table and File clients have stub implementations.
 // If you need one of those use http client instead.
 func NewClient(c *yt.Config) (yt.Client, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
@@ -36,6 +41,10 @@ func NewClient(c *yt.Config) (yt.Client, error) {
 }
 
 func BuildHTTPClient(c *yt.Config) (*http.Client, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
 	return rpcclient.BuildHTTPClient(c)
 }
 
@@ -44,6 +53,11 @@ func BuildHTTPClient(c *yt.Config) (*http.Client, error) {
 // Note! Table and File clients have stub implementations.
 // If you need one of those use http client instead.
 func NewTestClient(t testing.TB, c *yt.Config) (yt.Client, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
@@ -53,6 +67,11 @@ func NewTestClient(t testing.TB, c *yt.Config) (yt.Client, error) {
 
 // NewCypressClient creates new cypress client from config.
 func NewCypressClient(c *yt.Config) (yt.CypressClient, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
@@ -64,6 +83,11 @@ func NewCypressClient(c *yt.Config) (yt.CypressClient, error) {
 //
 // Clients should rarely use it directly.
 func NewLowLevelTxClient(c *yt.Config) (yt.LowLevelTxClient, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
@@ -73,6 +97,11 @@ func NewLowLevelTxClient(c *yt.Config) (yt.LowLevelTxClient, error) {
 
 // NewAdminClient creates new admin client from config.
 func NewAdminClient(c *yt.Config) (yt.AdminClient, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
@@ -86,6 +115,11 @@ func NewAdminClient(c *yt.Config) (yt.AdminClient, error) {
 //
 // Note! RPC streaming call GetJobStderr is not implemented yet.
 func NewLowLevelSchedulerClient(c *yt.Config) (yt.LowLevelSchedulerClient, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendRPC)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package yt
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,6 +80,12 @@ type Config struct {
 	//
 	// When this variable is set, client tries reading token from ~/.yt/token file.
 	ReadTokenFromFile bool
+
+	// TokenPath configures path to token file.
+	//
+	// If TokenPath is not set, value of YT_TOKEN_FILE or YT_TOKEN_PATH environment variable is used instead.
+	// If both are empty, ~/.yt/token is used.
+	TokenPath string
 
 	// Credentials can be used for authentication.
 	//
@@ -277,7 +284,8 @@ func (c *Config) GetClusterURL() (ClusterURL, error) {
 }
 
 func (c *Config) getTokenFileFromEnv() (string, error) {
-	if tokenFile := os.Getenv("YT_TOKEN_FILE"); tokenFile != "" {
+	tokenFile := lookupTokenFileFromEnv()
+	if tokenFile != "" {
 		if strings.HasPrefix(tokenFile, "~/") {
 			u, err := user.Current()
 			if err != nil {
@@ -290,7 +298,23 @@ func (c *Config) getTokenFileFromEnv() (string, error) {
 	return "", nil
 }
 
+func lookupTokenFileFromEnv() string {
+	tokenFile := os.Getenv("YT_TOKEN_FILE")
+	if tokenFile == "" {
+		tokenFile = os.Getenv("YT_TOKEN_PATH")
+	}
+	return tokenFile
+}
+
+func isWholeFloat64(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value == math.Trunc(value)
+}
+
 func (c *Config) getPathToTokenFile() (string, error) {
+	if c.TokenPath != "" {
+		return c.TokenPath, nil
+	}
+
 	tokenFile, err := c.getTokenFileFromEnv()
 	if err != nil {
 		return "", err

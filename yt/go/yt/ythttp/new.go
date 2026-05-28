@@ -26,6 +26,11 @@ func checkNotInsideJob(c *yt.Config) error {
 
 // NewClient creates new client from config.
 func NewClient(c *yt.Config) (yt.Client, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendHTTP)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
@@ -34,11 +39,20 @@ func NewClient(c *yt.Config) (yt.Client, error) {
 }
 
 func BuildHTTPClient(c *yt.Config) (*http.Client, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendHTTP)
+	if err != nil {
+		return nil, err
+	}
 	return httpclient.BuildHTTPClient(c)
 }
 
 // NewTestClient creates new client from config to be used in integration tests.
 func NewTestClient(t testing.TB, c *yt.Config) (yt.Client, error) {
+	c, err := yt.NormalizeConfig(c, yt.ConfigBackendHTTP)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := checkNotInsideJob(c); err != nil {
 		return nil, err
 	}
