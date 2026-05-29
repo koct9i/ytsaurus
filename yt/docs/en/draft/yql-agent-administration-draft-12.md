@@ -492,76 +492,76 @@ Below are source-derived complete lists for YT settings. This intentionally incl
 
 `DefaultGatewaySettings` (plugin-injected defaults from `yt/yql/plugin/config.cpp`):
 
-```text
-DefaultCalcMemoryLimit=1G
-EvaluationTableSizeLimit=1M
-DefaultMaxJobFails=5
-DefaultMemoryLimit=512m
-MapJoinLimit=2048m
-MapJoinShardCount=4
-CommonJoinCoreLimit=128m
-CombineCoreLimit=128m
-SwitchLimit=128m
-JoinMergeTablesLimit=64
-DataSizePerJob=1g
-MaxJobCount=16384
-PublishedCompressionCodec=zstd_5
-TemporaryCompressionCodec=zstd_5
-PublishedErasureCodec=none
-TemporaryErasureCodec=none
-OptimizeFor=scan
-PythonCpu=4.0
-JavascriptCpu=4.0
-ErasureCodecCpu=5.0
-AutoMerge=relaxed
-QueryCacheMode=normal
-QueryCacheSalt=YQLOVERYT-41
-UseSkiff=1
-MaxInputTables=1000
-MaxInputTablesForSortedMerge=100
-MaxOutputTables=50
-InferSchemaTableCountThreshold=50
-MaxExtraJobMemoryToFuseOperations=3g
-UseColumnarStatistics=auto
-ParallelOperationsLimit=16
-ReleaseTempData=immediate
-LookupJoinLimit=1M
-LookupJoinMaxRows=900
-MaxReplicationFactorToFuseOperations=20.0
-LLVMMemSize=256M
-LLVMPerNodeMemSize=10K
-JoinEnableStarJoin=true
-FolderInlineItemsLimit=200
-FolderInlineDataLimit=500K
-WideFlowLimit=101
-NativeYtTypeCompatibility=complex,date,null,void,date,float,json,decimal,uuid
-MapJoinUseFlow=1
-HybridDqDataSizeLimitForOrdered=384M
-HybridDqDataSizeLimitForUnordered=8G
-UseYqlRowSpecCompactForm=false
-_UseKeyBoundApi=false
-UseNewPredicateExtraction=true
-PruneKeyFilterLambda=true
-JoinCommonUseMapMultiOut=true
-UseAggPhases=true
-EnforceJobUtc=true
-_EnforceRegexpProbabilityFail=0
-_ForceJobSizeAdjuster=true
-_EnableWriteReorder=true
-_EnableYtPartitioning=true
-HybridDqExecution=true
-DQRPCReaderInflight=1
-UseNativeYtTypes=true
-UseNativeDynamicTableRead=true
-RuntimeClusterSelection=auto
-```
+| Setting | Value |
+| --- | --- |
+| `DefaultCalcMemoryLimit` | `1G` |
+| `EvaluationTableSizeLimit` | `1M` |
+| `DefaultMaxJobFails` | `5` |
+| `DefaultMemoryLimit` | `512m` |
+| `MapJoinLimit` | `2048m` |
+| `MapJoinShardCount` | `4` |
+| `CommonJoinCoreLimit` | `128m` |
+| `CombineCoreLimit` | `128m` |
+| `SwitchLimit` | `128m` |
+| `JoinMergeTablesLimit` | `64` |
+| `DataSizePerJob` | `1g` |
+| `MaxJobCount` | `16384` |
+| `PublishedCompressionCodec` | `zstd_5` |
+| `TemporaryCompressionCodec` | `zstd_5` |
+| `PublishedErasureCodec` | `none` |
+| `TemporaryErasureCodec` | `none` |
+| `OptimizeFor` | `scan` |
+| `PythonCpu` | `4.0` |
+| `JavascriptCpu` | `4.0` |
+| `ErasureCodecCpu` | `5.0` |
+| `AutoMerge` | `relaxed` |
+| `QueryCacheMode` | `normal` |
+| `QueryCacheSalt` | `YQLOVERYT-41` |
+| `UseSkiff` | `1` |
+| `MaxInputTables` | `1000` |
+| `MaxInputTablesForSortedMerge` | `100` |
+| `MaxOutputTables` | `50` |
+| `InferSchemaTableCountThreshold` | `50` |
+| `MaxExtraJobMemoryToFuseOperations` | `3g` |
+| `UseColumnarStatistics` | `auto` |
+| `ParallelOperationsLimit` | `16` |
+| `ReleaseTempData` | `immediate` |
+| `LookupJoinLimit` | `1M` |
+| `LookupJoinMaxRows` | `900` |
+| `MaxReplicationFactorToFuseOperations` | `20.0` |
+| `LLVMMemSize` | `256M` |
+| `LLVMPerNodeMemSize` | `10K` |
+| `JoinEnableStarJoin` | `true` |
+| `FolderInlineItemsLimit` | `200` |
+| `FolderInlineDataLimit` | `500K` |
+| `WideFlowLimit` | `101` |
+| `NativeYtTypeCompatibility` | `complex,date,null,void,date,float,json,decimal,uuid` |
+| `MapJoinUseFlow` | `1` |
+| `HybridDqDataSizeLimitForOrdered` | `384M` |
+| `HybridDqDataSizeLimitForUnordered` | `8G` |
+| `UseYqlRowSpecCompactForm` | `false` |
+| `_UseKeyBoundApi` | `false` |
+| `UseNewPredicateExtraction` | `true` |
+| `PruneKeyFilterLambda` | `true` |
+| `JoinCommonUseMapMultiOut` | `true` |
+| `UseAggPhases` | `true` |
+| `EnforceJobUtc` | `true` |
+| `_EnforceRegexpProbabilityFail` | `0` |
+| `_ForceJobSizeAdjuster` | `true` |
+| `_EnableWriteReorder` | `true` |
+| `_EnableYtPartitioning` | `true` |
+| `HybridDqExecution` | `true` |
+| `DQRPCReaderInflight` | `1` |
+| `UseNativeYtTypes` | `true` |
+| `UseNativeDynamicTableRead` | `true` |
+| `RuntimeClusterSelection` | `auto` |
 
 `DefaultClusterSettings` (plugin-injected defaults for `cluster_mapping[].settings[]`):
 
-```text
-QueryCacheChunkLimit=100000
-_UseKeyBoundApi=true
-```
+| Setting | Value |
+| --- | --- |
+| `QueryCacheChunkLimit` | `100000` |
+| `_UseKeyBoundApi` | `true` |
 
 Complete setting groups accepted by YT gateway settings dispatcher (`yt/yql/providers/yt/common/yql_yt_settings.h`):
 
