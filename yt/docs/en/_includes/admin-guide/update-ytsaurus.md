@@ -99,7 +99,7 @@ Before updating the operator, make sure the cluster is healthy. For example, it 
 
 1. Launch the chart update:
     ```bash
-    helm upgrade ytsaurus --install oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version>
+    helm upgrade ytsaurus --install oci://ghcr.io/ytsaurus/ytop-chart --version <new-version>
     ```
    For a list of available operator versions, see the [release page](../../admin-guide/releases.md#kubernetes-operator).
 2. Make sure the operator's old pods have been deleted and new ones have been created:
@@ -118,7 +118,7 @@ Before updating the operator, make sure the cluster is healthy. For example, it 
 
     To manually update the CRDs, download the chart locally and then update them using `kubectl replace`:
     ```bash
-    $ helm pull oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version> --untar
+    $ helm pull oci://ghcr.io/ytsaurus/ytop-chart --version <new-version> --untar
     $ helm template ytop-chart --output-dir ./templates
     wrote ./templates/ytop-chart/templates/serviceaccount.yaml
     wrote ./templates/ytop-chart/templates/manager-config.yaml

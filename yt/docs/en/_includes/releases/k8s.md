@@ -1,7 +1,7 @@
 ## Kubernetes operator
 
 
-Is released as helm charts in the [Docker Hub OCI registry](https://hub.docker.com/r/ytsaurus/ytop-chart).
+Is released as helm charts in the [GitHub Container Registry (ghcr.io)](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart).
 
 
 
@@ -16,7 +16,7 @@ Is released as helm charts in the [Docker Hub OCI registry](https://hub.docker.c
 **Release page:** [v0.32.0](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases/tag/v0.32.0)
 
 
-**Helm chart:** [0.32.0](https://hub.docker.com/r/ytsaurus/ytop-chart/tags?name=0.32.0)
+**Helm chart:** [0.32.0](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart?tag=0.32.0)
 
 
 #### What's Changed

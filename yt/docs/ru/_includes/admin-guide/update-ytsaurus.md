@@ -99,7 +99,7 @@ $ kubectl describe ytsaurus -n <namespace>
 
 1. Запустите обновление чарта:
     ```bash
-    helm upgrade ytsaurus --install oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version>
+    helm upgrade ytsaurus --install oci://ghcr.io/ytsaurus/ytop-chart --version <new-version>
     ```
    {% if audience == "public" %}Список доступных версий оператора приведён на [странице релизов](../../admin-guide/releases.md#kubernetes-operator).{% endif %}
 2. Проверьте, что старые поды оператора удалились, а новые создались:
@@ -118,7 +118,7 @@ $ kubectl describe ytsaurus -n <namespace>
 
     Чтобы вручную обновить CRD, скачайте чарт локально и затем обновите CRD с помощью `kubectl replace`:
     ```bash
-    $ helm pull oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version> --untar
+    $ helm pull oci://ghcr.io/ytsaurus/ytop-chart --version <new-version> --untar
     $ helm template ytop-chart --output-dir ./templates
     wrote ./templates/ytop-chart/templates/serviceaccount.yaml
     wrote ./templates/ytop-chart/templates/manager-config.yaml

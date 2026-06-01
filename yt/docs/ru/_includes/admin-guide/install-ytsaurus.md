@@ -14,7 +14,7 @@
 
 Релизы оператора публикуются в [GitHub Releases](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases).
 
-Helm-чарт публикуется в [OCI-реестре Docker Hub](https://hub.docker.com/r/ytsaurus/ytop-chart).
+Helm-чарт публикуется в [GitHub Container Registry (ghcr.io)](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart).
 
 Текущий релиз оператора требует Kubernetes 1.29+, Helm 3.18+ и установленный в кластере cert-manager.
 
@@ -23,7 +23,7 @@ Helm-чарт публикуется в [OCI-реестре Docker Hub](https://
 1. Убедитесь, что версия вашего Kubernetes-кластера не ниже 1.29.
 2. Установите [Helm](https://helm.sh/docs/intro/install/) версии 3.18 или новее.
 3. Установите cert-manager, следуя [официальной инструкции](https://cert-manager.io/docs/installation/).
-4. Установите чарт `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+4. Установите чарт `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 5. Проверьте результат:
 
 ```bash

@@ -187,7 +187,7 @@
 
   Установите чарт:
   ```bash
-  helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
+  helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
   ```
 
   {% cut "Если возникла ошибка 'Internal error occurred: failed calling webhook "webhook.cert-manager.io"'" %}
@@ -202,7 +202,7 @@
   cert-manager    cert-manager-webhook-764949f558-dldzp     1/1     ContainerCreating    0          2m12s
   ...
   ```
-  Если под находится в состоянии `ContainerCreating`, дождитесь завершения его установки и попробуйте перезапустить команду `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+  Если под находится в состоянии `ContainerCreating`, дождитесь завершения его установки и попробуйте перезапустить команду `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 
   Если у пода состояние `ImagePullBackOff`, это означает, что система не может скачать необходимые образы. Скорее всего, это связано с сетевыми настройками внутри Minikube. Возможные решения проблемы описаны [тут](https://cert-manager.io/docs/troubleshooting/webhook/#error-connect-connection-refused).
 
@@ -396,7 +396,7 @@
 
   Установите чарт:
   ```bash
-  helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
+  helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
   ```
 
   {% cut "Если возникла ошибка 'Internal error occurred: failed calling webhook "webhook.cert-manager.io"'" %}
@@ -411,7 +411,7 @@
   cert-manager    cert-manager-webhook-764949f558-dldzp     1/1     ContainerCreating    0          2m12s
   ...
   ```
-  Если под находится в состоянии `ContainerCreating`, дождитесь завершения его установки и попробуйте перезапустить команду `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+  Если под находится в состоянии `ContainerCreating`, дождитесь завершения его установки и попробуйте перезапустить команду `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 
   Если у пода состояние `ImagePullBackOff`, это означает, что система не может скачать необходимые образы. Скорее всего, это связано с сетевыми настройками внутри Kind. Возможные решения проблемы описаны [тут](https://cert-manager.io/docs/troubleshooting/webhook/#error-connect-connection-refused).
 

@@ -14,7 +14,7 @@ The {{product-name}} team supports and develops its own K8s operator. The operat
 
 Operator releases are published on [GitHub Releases](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases).
 
-The helm chart is published in the [Docker Hub OCI registry](https://hub.docker.com/r/ytsaurus/ytop-chart).
+The helm chart is published in the [GitHub Container Registry (ghcr.io)](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart).
 
 The current operator release requires Kubernetes 1.29+, Helm 3.18+, and cert-manager installed in the cluster.
 
@@ -23,7 +23,7 @@ The current operator release requires Kubernetes 1.29+, Helm 3.18+, and cert-man
 1. Make sure your Kubernetes cluster version is 1.29 or later.
 2. Install [Helm](https://helm.sh/docs/intro/install/) 3.18 or later.
 3. Install cert-manager by following the [official installation guide](https://cert-manager.io/docs/installation/).
-4. Install the chart `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+4. Install the chart `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 5. Check the result:
 
 ```bash
@@ -296,7 +296,7 @@ Another possible reason is that pods cannot be scheduled due to an insufficient 
 
 ## Installing {{product-name}} UI helm chart
 
-### Using with [ytop-chart](https://hub.docker.com/r/ytsaurus/ytop-chart)
+### Using with [ytop-chart](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart)
 
 Follow all required steps to [start the {{product-name}} cluster](#starting-cluster). Then install the chart:
 
