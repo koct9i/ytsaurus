@@ -24,7 +24,7 @@ Is released as a docker image.
 """
 
 K8S_DESCRIPTION = """
-Is released as helm charts in the [Docker Hub OCI registry](https://hub.docker.com/r/ytsaurus/ytop-chart).
+Is released as helm charts in the [GitHub Container Registry (ghcr.io)](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart).
 """
 
 ODIN_DESCRIPTION = """
@@ -325,8 +325,8 @@ COMPONENTS = [
         artifacts=[
             StaticVersionArtifact(
                 label="Helm chart",
-                page_url="https://hub.docker.com/r/ytsaurus/ytop-chart/tags",
-                version_url_template="https://hub.docker.com/r/ytsaurus/ytop-chart/tags?name={version}",
+                page_url="https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart",
+                version_url_template="https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart?tag={version}",
                 version_transform=lambda version: [version.removeprefix("v")],
             ),
         ],
