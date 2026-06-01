@@ -47,6 +47,22 @@ NAME         CLUSTERSTATE   UPDATESTATE   UPDATINGCOMPONENTS
 minisaurus   UpdateBlocked  None
 ```
 
+## Cluster states { #cluster-states }
+
+The operator manages the `Ytsaurus` resource lifecycle through a set of well-defined states. The current state is visible in the `CLUSTERSTATE` column when running `kubectl get ytsaurus`.
+
+| State | Description |
+| --------------- | ----------- |
+| `Initializing` | The cluster was just created. The operator starts all components for the first time. |
+| `Preparing` | All components are running. The operator is performing post-initialization or post-update setup (init jobs, Cypress patches, etc.). |
+| `Running` | The cluster is fully operational. All components are up-to-date and ready. |
+| `Reconfiguration` | The specification was changed in a way that requires restarting some components (for example, a static config change). The operator is applying those changes. |
+| `Maintenance` | The cluster is under maintenance. Some components are deliberately scaled down according to `clusterMaintenance.shutdown`. |
+| `Updating` | A component image or config update is in progress. Use `UPDATESTATE` to track the sub-steps. |
+| `UpdateBlocked` | Pending component updates cannot proceed. This happens when `updatePlan` does not allow the required updates, or when a pre-update check determines the update is impossible. |
+| `UpdateFinished` | An update has just completed. This is a transient state; the cluster moves to `Preparing` immediately. |
+| `UpdateCanceled` | A running update was canceled (for example, by reverting the specification). This is a transient state; the cluster moves to `Preparing` immediately. |
+
 ## Full and partial updates
 
 In the `Ytsaurus` specification, you can set one image for all server components (`coreImage`) or different images for different components (in the components' `image` field). You only need to set individual images in rare cases, and it's recommended that you discuss this with the [{{product-name}} team](https://ytsaurus.tech/#contact) beforehand. If a component has its own image, it will be used. Modifying the `image` initiates a cluster update.
