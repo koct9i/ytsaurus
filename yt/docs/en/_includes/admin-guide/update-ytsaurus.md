@@ -41,7 +41,63 @@ minisaurus   Running        None
 
 ## Full and partial updates
 
-In the `Ytsaurus` specification, you can set one image for all server components (`coreImage`) or different images for different components (in the components' `image` field). You only need to set individual images in rare cases, and it's recommended that you discuss this with the [{{product-name}} team](https://ytsaurus.tech/#contact) beforehand. If a component has its own image, it will be used. Modifying the `image` initiates a cluster update, though this only updates some of the components.
+In the `Ytsaurus` specification, you can set one image for all server components (`coreImage`) or different images for different components (in the components' `image` field). You only need to set individual images in rare cases, and it's recommended that you discuss this with the [{{product-name}} team](https://ytsaurus.tech/#contact) beforehand. If a component has its own image, it will be used. Modifying the `image` initiates a cluster update.
+
+Which components are actually allowed to update is controlled by `updatePlan`.
+
+### Update plan
+
+The `updatePlan` field in the `Ytsaurus` specification replaces the deprecated `enableFullUpdate` flag. It defines which components the operator is allowed to update.
+
+If `updatePlan` is empty, the operator blocks the update. To update the whole cluster, allow the `Everything` class:
+
+```yaml
+spec:
+  updatePlan:
+    - class: Everything
+```
+
+You can also use `updatePlan` to update only part of the cluster:
+
+- `class: Stateless` updates stateless components only.
+- `class: Nothing` explicitly blocks all component updates.
+- `component` selects a specific component type and, if needed, an instance group.
+- `concurrency` limits how many selected instance groups may update at the same time.
+
+You can combine several selectors in one plan. For example, you can update masters first and then allow a broader stateless update in a later change.
+
+When only some components are allowed by `updatePlan`, the operator updates them and keeps the remaining changes blocked. In that case, the cluster can move to the `UpdateBlocked` state until you widen the plan or revert the specification changes.
+
+### Image heater
+
+The image heater pre-pulls required images to the selected Kubernetes nodes before cluster initialization and before updates. This reduces the time pods spend waiting for image downloads during startup.
+
+To enable it for the cluster, set `clusterFeatures.enableImageHeater`:
+
+```yaml
+spec:
+  clusterFeatures:
+    enableImageHeater: true
+```
+
+The operator can also run image heating together with the update plan for the components being updated.
+
+### Rolling update
+
+The `updatePlan` can also define the update strategy for selected components. For StatefulSet-based components, the operator supports the `rollingUpdate` strategy:
+
+```yaml
+spec:
+  updatePlan:
+    - component:
+        type: <component-type>
+      strategy:
+        rollingUpdate: {}
+```
+
+With `rollingUpdate`, pods are recreated automatically according to the StatefulSet rolling update strategy. The unavailable-pod budget is derived from the component's `minReadyInstanceCount`, so the operator keeps the required number of instances ready during the update.
+
+You can also use `strategy.runPreChecks: true` to force pre-update checks for the selected components before the rollout starts.
 
 ## Updating static configs { #configs }
 
@@ -139,4 +195,12 @@ You can remove unrecognized master options either manually or by running the scr
 
 Different operator versions may generate different configs for the same components (for example, a new field may be added in the new operator version). In that case, the cluster update is initiated immediately after starting the operator.
 
-If an update is [impossible](#impossible), the cluster remains in the `Updating` state, and the update status is set to `ImpossibleToStart`. If that happens, you can roll back the operator to cancel the update, and the cluster will enter the `Running` state. Alternatively, you can set the `enableFullUpdate: false` flag in the `Ytsaurus` specification, which also cancels the update and stops the new operator from trying to initiate another cluster update. You can then restore the cluster to a healthy state and retry the update by setting the `enableFullUpdate: true` flag.
+If an update is [impossible](#impossible), the cluster remains in the `Updating` state, and the update status is set to `ImpossibleToStart`. If that happens, you can roll back the operator to cancel the update, and the cluster will enter the `Running` state. Alternatively, you can temporarily block updates in the `Ytsaurus` specification:
+
+```yaml
+spec:
+  updatePlan:
+    - class: Nothing
+```
+
+This cancels the current update and prevents the new operator from starting another one. After you restore the cluster to a healthy state, expand the plan again. For a full cluster update, use `class: Everything`.
