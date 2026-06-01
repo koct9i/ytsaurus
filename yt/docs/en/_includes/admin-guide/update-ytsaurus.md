@@ -39,6 +39,14 @@ NAME         CLUSTERSTATE   UPDATESTATE   UPDATINGCOMPONENTS
 minisaurus   Running        None
 ```
 
+If the operator has already applied the allowed changes but cannot continue because the rest is blocked by `updatePlan`, this is reflected in `CLUSTERSTATE` as `UpdateBlocked`:
+
+```bash
+$ kubectl get ytsaurus -n <namespace>
+NAME         CLUSTERSTATE   UPDATESTATE   UPDATINGCOMPONENTS
+minisaurus   UpdateBlocked  None
+```
+
 ## Full and partial updates
 
 In the `Ytsaurus` specification, you can set one image for all server components (`coreImage`) or different images for different components (in the components' `image` field). You only need to set individual images in rare cases, and it's recommended that you discuss this with the [{{product-name}} team](https://ytsaurus.tech/#contact) beforehand. If a component has its own image, it will be used. Modifying the `image` initiates a cluster update.

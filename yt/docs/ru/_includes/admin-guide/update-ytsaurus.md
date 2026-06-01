@@ -39,6 +39,14 @@ NAME         CLUSTERSTATE   UPDATESTATE   UPDATINGCOMPONENTS
 minisaurus   Running        None
 ```
 
+Если оператор уже применил разрешенные изменения, но не может продолжить обновление, потому что остальные изменения заблокированы `updatePlan`, это отражается в `CLUSTERSTATE` как `UpdateBlocked`:
+
+```bash
+$ kubectl get ytsaurus -n <namespace>
+NAME         CLUSTERSTATE   UPDATESTATE   UPDATINGCOMPONENTS
+minisaurus   UpdateBlocked  None
+```
+
 ## Полное и частичное обновление
 
 В спецификации `Ytsaurus` можно указать как один образ на все серверные компоненты (`coreImage`), так и разные образы для разных компонент (в поле `image` компонент). Указывать отдельные образы следует в редких случаях, желательно предварительно обсудить такое решение с [командой {{product-name}}](https://ytsaurus.tech/#contact). Если у компоненты указан свой собственный образ, то будет использоваться он. При изменении `image` запускается обновление кластера.
