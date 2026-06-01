@@ -173,7 +173,7 @@ Regardless of the installation method, the required system components will be de
 
   Install the chart:
   ```bash
-  helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
+  helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
   ```
 
   {% cut "If you see the error 'Internal error occurred: failed calling webhook "webhook.cert-manager.io"'" %}
@@ -188,7 +188,7 @@ Regardless of the installation method, the required system components will be de
   cert-manager    cert-manager-webhook-764949f558-dldzp     1/1     ContainerCreating    0          2m12s
   ...
   ```
-  If the pod's status is `ContainerCreating`, wait for its installation to complete and try restarting the command: `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+  If the pod's status is `ContainerCreating`, wait for its installation to complete and try restarting the command: `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 
   If the pod's status is `ImagePullBackOff`, it means that the system can't download the required images. Most likely, this is caused by the network settings within Minikube. Click [here](https://cert-manager.io/docs/troubleshooting/webhook/#error-connect-connection-refused) for possible solutions.
 
@@ -382,7 +382,7 @@ Regardless of the installation method, the required system components will be de
 
   Install the chart:
   ```bash
-  helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
+  helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}
   ```
 
   {% cut "If you encounter the error 'Internal error occurred: failed calling webhook "webhook.cert-manager.io"'" %}
@@ -397,7 +397,7 @@ Regardless of the installation method, the required system components will be de
   cert-manager    cert-manager-webhook-764949f558-dldzp     1/1     ContainerCreating    0          2m12s
   ...
   ```
-  If the pod is in `ContainerCreating` state, wait for the installation to finish and try rerunning `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+  If the pod is in `ContainerCreating` state, wait for the installation to finish and try rerunning `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 
   If the pod is in `ImagePullBackOff` state, it means the system cannot pull the required images. This is most likely related to networking settings inside Kind. Possible solutions are described [here](https://cert-manager.io/docs/troubleshooting/webhook/#error-connect-connection-refused).
 

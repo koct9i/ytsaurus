@@ -1,7 +1,7 @@
 # Common presets for both ru and en languages.
 default:
     yt-server-version: 25.3.1
-    k8s-operator-version: 0.31.0
+    k8s-operator-version: 0.32.0
     chyt-version: 2.18.2
     spyt-version: 2.10.0
     strawberry-version: 0.0.17

@@ -10,18 +10,21 @@
 
 ## Kubernetes оператор { #operator }
 
-Команда {{product-name}} поддерживает и развивает собственный k8s-оператор. Код оператора доступен в [github](https://github.com/ytsaurus/ytsaurus-k8s-operator).
+Команда {{product-name}} поддерживает и развивает собственный k8s-оператор. Код оператора доступен на [GitHub](https://github.com/ytsaurus/ytsaurus-k8s-operator).
 
-Релизы оператора выкладываются в [Github Packages](https://github.com/ytsaurus/ytsaurus-k8s-operator/pkgs/container/k8s-operator).
+Релизы оператора публикуются в [GitHub Releases](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases).
 
-Дополнительно выкладываются [helm-чарты](https://github.com/ytsaurus/ytsaurus-k8s-operator/pkgs/container/ytop-chart), позволяющие установить все необходимые компоненты.
+Helm-чарт публикуется в [OCI-реестре Docker Hub](https://hub.docker.com/r/ytsaurus/ytop-chart).
+
+Текущий релиз оператора требует Kubernetes 1.29+, Helm 3.18+ и установленный в кластере cert-manager.
 
 ### Установка оператора
 
-1. Установите утилиту [helm](https://helm.sh/docs/intro/install/).
-2. Установите cert-manager: `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.yaml`
-3. Установите чарт `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
-4. Проверьте результат:
+1. Убедитесь, что версия вашего Kubernetes-кластера не ниже 1.29.
+2. Установите [Helm](https://helm.sh/docs/intro/install/) версии 3.18 или новее.
+3. Установите cert-manager, следуя [официальной инструкции](https://cert-manager.io/docs/installation/).
+4. Установите чарт `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+5. Проверьте результат:
 
 ```bash
 $ kubectl get pod

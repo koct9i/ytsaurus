@@ -24,7 +24,7 @@ Is released as a docker image.
 """
 
 K8S_DESCRIPTION = """
-Is released as helm charts on [GitHub Packages](https://github.com/ytsaurus/ytsaurus-k8s-operator/pkgs/container/ytop-chart).
+Is released as helm charts in the [Docker Hub OCI registry](https://hub.docker.com/r/ytsaurus/ytop-chart).
 """
 
 ODIN_DESCRIPTION = """
@@ -126,6 +126,22 @@ class GithubPackageArtifact(Artifact):
                         package_url = f"https://github.com{match.group(1)}"
                         display_name = self.display_name_template.format(version=package_version, release_version=version)
                         return display_name, package_url
+
+        return None
+
+
+class StaticVersionArtifact(Artifact):
+    def __init__(self, label, page_url, version_url_template, version_transform=None, display_name_template=None):
+        super().__init__(label=label, kind="static-version", page_url=page_url, version_url_template=version_url_template)
+        self.version_transform = version_transform or (lambda version: [version])
+        self.display_name_template = display_name_template or "{version}"
+
+    def get_info(self, component, version):
+        for transformed_version in self.version_transform(version):
+            artifact_url = self.get_version_url(transformed_version)
+            if artifact_url:
+                display_name = self.display_name_template.format(version=transformed_version, release_version=version)
+                return display_name, artifact_url
 
         return None
 
@@ -307,7 +323,12 @@ COMPONENTS = [
         description=K8S_DESCRIPTION,
         filename="k8s.md",
         artifacts=[
-            GithubPackageArtifact(label="Helm chart", repo_name="ytsaurus-k8s-operator", package_name="ytop-chart", version_transform=lambda version: [version, version.removeprefix("v")]),
+            StaticVersionArtifact(
+                label="Helm chart",
+                page_url="https://hub.docker.com/r/ytsaurus/ytop-chart/tags",
+                version_url_template="https://hub.docker.com/r/ytsaurus/ytop-chart/tags?name={version}",
+                version_transform=lambda version: [version.removeprefix("v")],
+            ),
         ],
     ),
     Component(repo_name="ytsaurus", component_name="Python YSON bindings", tag_name="python/ytsaurus-yson", description=PYTHON_YSON_DESCRIPTION, filename="python-yson.md", artifacts=[

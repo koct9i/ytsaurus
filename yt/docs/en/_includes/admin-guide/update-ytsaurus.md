@@ -99,7 +99,7 @@ Before updating the operator, make sure the cluster is healthy. For example, it 
 
 1. Launch the chart update:
     ```bash
-    helm upgrade ytsaurus --install oci://ghcr.io/ytsaurus/ytop-chart --version <new-version>
+    helm upgrade ytsaurus --install oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version>
     ```
    For a list of available operator versions, see the [release page](../../admin-guide/releases.md#kubernetes-operator).
 2. Make sure the operator's old pods have been deleted and new ones have been created:
@@ -118,7 +118,7 @@ Before updating the operator, make sure the cluster is healthy. For example, it 
 
     To manually update the CRDs, download the chart locally and then update them using `kubectl replace`:
     ```bash
-    $ helm pull oci://ghcr.io/ytsaurus/ytop-chart --version <new-version> --untar
+    $ helm pull oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version> --untar
     $ helm template ytop-chart --output-dir ./templates
     wrote ./templates/ytop-chart/templates/serviceaccount.yaml
     wrote ./templates/ytop-chart/templates/manager-config.yaml
@@ -140,4 +140,3 @@ You can remove unrecognized master options either manually or by running the scr
 Different operator versions may generate different configs for the same components (for example, a new field may be added in the new operator version). In that case, the cluster update is initiated immediately after starting the operator.
 
 If an update is [impossible](#impossible), the cluster remains in the `Updating` state, and the update status is set to `ImpossibleToStart`. If that happens, you can roll back the operator to cancel the update, and the cluster will enter the `Running` state. Alternatively, you can set the `enableFullUpdate: false` flag in the `Ytsaurus` specification, which also cancels the update and stops the new operator from trying to initiate another cluster update. You can then restore the cluster to a healthy state and retry the update by setting the `enableFullUpdate: true` flag.
-

@@ -26,7 +26,7 @@ token=""
 
 ## Kubernetes
 
-Для разворачивания {{product-name}} в Kubernetes рекомендуется воспользоваться [оператором](https://github.com/ytsaurus/ytsaurus-k8s-operator). Готовые docker-образы с оператором, UI, серверными компонентами и примерами можно найти в [Github Packages](https://github.com/orgs/ytsaurus/packages).
+Для разворачивания {{product-name}} в Kubernetes рекомендуется воспользоваться [оператором](https://github.com/ytsaurus/ytsaurus-k8s-operator). Релизы оператора публикуются в [GitHub Releases](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases), а Helm-чарт доступен в [OCI-реестре Docker Hub](https://hub.docker.com/r/ytsaurus/ytop-chart).
 
 ### Развёртывание в кластере Kubernetes
 
@@ -34,9 +34,9 @@ token=""
 
 #### Установка оператора
 
-1. Установите утилиту [helm](https://helm.sh/docs/intro/install/).
-2. Установите cert-manager: `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.yaml`.
-3. Установите чарт: `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+1. Установите [Helm](https://helm.sh/docs/intro/install/) версии 3.18 или новее.
+2. Установите cert-manager, следуя [официальной инструкции](https://cert-manager.io/docs/installation/).
+3. Установите чарт: `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 4. Проверьте результат:
 
 ```
@@ -91,7 +91,7 @@ https://kubernetes.io/ru/docs/tasks/tools/install-minikube/
 
 1. Установите утилиту [helm](https://helm.sh/docs/intro/install/).
 2. Установите cert-manager: `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.yaml`.
-3. Установите чарт: `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+3. Установите чарт: `helm install ytsaurus oci://registry-1.docker.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
 4. Проверьте результат:
 
 ```
@@ -152,4 +152,3 @@ yt map cat --src //home/t1 --dst //home/t2 --format json
 ```
 kubectl delete -f cluster_v1_minikube.yaml
 ```
-

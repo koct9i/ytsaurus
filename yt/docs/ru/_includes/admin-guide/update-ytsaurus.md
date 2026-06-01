@@ -99,7 +99,7 @@ $ kubectl describe ytsaurus -n <namespace>
 
 1. Запустите обновление чарта:
     ```bash
-    helm upgrade ytsaurus --install oci://ghcr.io/ytsaurus/ytop-chart --version <new-version>
+    helm upgrade ytsaurus --install oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version>
     ```
    {% if audience == "public" %}Список доступных версий оператора приведён на [странице релизов](../../admin-guide/releases.md#kubernetes-operator).{% endif %}
 2. Проверьте, что старые поды оператора удалились, а новые создались:
@@ -118,7 +118,7 @@ $ kubectl describe ytsaurus -n <namespace>
 
     Чтобы вручную обновить CRD, скачайте чарт локально и затем обновите CRD с помощью `kubectl replace`:
     ```bash
-    $ helm pull oci://ghcr.io/ytsaurus/ytop-chart --version <new-version> --untar
+    $ helm pull oci://registry-1.docker.io/ytsaurus/ytop-chart --version <new-version> --untar
     $ helm template ytop-chart --output-dir ./templates
     wrote ./templates/ytop-chart/templates/serviceaccount.yaml
     wrote ./templates/ytop-chart/templates/manager-config.yaml
@@ -140,4 +140,3 @@ $ kubectl describe ytsaurus -n <namespace>
 Разные версии оператора могут генерировать разные конфиги для одних и тех же компонент — например, в новой версии оператора может добавиться новое поле. В таком случае сразу после запуска оператора будет запущено обновление кластера.
 
 Если обновление окажется [невозможным](#impossible), то кластер останется в состоянии `Updating`, а статус обновления станет `ImpossibleToStart`. В таком случае можно откатить оператор, тогда обновление отменится и кластер перейдёт в состояние `Running`. Либо можно выставить флаг `enableFullUpdate: false` в спецификации `Ytsaurus`, в таком случае обновление также будет отменено и новый оператор не будет больше пытаться запускать обновление кластера. После этого можно привести кластер в рабочее состояние и повторить попытку обновления, выставив флаг `enableFullUpdate: true`.
-
