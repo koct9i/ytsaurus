@@ -129,12 +129,12 @@ The operator generates static component configs according to the `Ytsaurus` spec
 
 ## Inability to update { #impossible }
 
-There are a number of situations where it may not be safe to run an update. Because of this, the operator performs a number of checks before initiating an update, including checking the health of all tablet cell bundles. If the operator decides the update is impossible based on the check results, it sets the update state to `ImpossibleToStart`.
+There are a number of situations where it may not be safe to run an update. Because of this, the operator performs a number of checks before initiating an update, including checking the health of all tablet cell bundles. If the `UpdateIsPossible` condition is not true, `ImpossibleToStart` is used only as a transition: the operator records the reason in `UpdateStatus` and moves the cluster to `UpdateBlocked`.
 
 ```bash
 $ kubectl get ytsaurus -n <namespace>
 NAME         CLUSTERSTATE   UPDATESTATE           UPDATINGCOMPONENTS
-minisaurus   Updating       ImpossibleToStart
+minisaurus   UpdateBlocked  None
 ```
 
 You can find out why in the `Ytsaurus` status by running `kubectl describe ytsaurus -n<namespace>` and checking `Conditions` in `UpdateStatus`.
@@ -150,12 +150,11 @@ $ kubectl describe ytsaurus -n <namespace>
       Reason:                Update
       Status:                True
       Type:                  NoPossibility
-    State:                   ImpossibleToStart
 ```
 {% endcut %}
 
 
-If that happens, restore the previous specification value to prevent the component images from changing and to ensure that the operator generates the same static configs according to the specification as before. Next, the operator cancels the update and rolls {{product-name}} back to the `Running` state.
+If this happens before the rollout starts, the pending update stays blocked until you either restore the previous specification value or make the cluster healthy again. If the same condition fails during an ongoing update, the operator may cancel that update and move the cluster to `UpdateBlocked`.
 
 ## Manual intervention
 
@@ -219,7 +218,7 @@ You can remove unrecognized master options either manually or by running the scr
 
 Different operator versions may generate different configs for the same components (for example, a new field may be added in the new operator version). In that case, the cluster update is initiated immediately after starting the operator.
 
-If an update is [impossible](#impossible), the cluster remains in the `Updating` state, and the update status is set to `ImpossibleToStart`. If that happens, you can roll back the operator to cancel the update, and the cluster will enter the `Running` state. Alternatively, you can temporarily block updates in the `Ytsaurus` specification:
+If an update becomes [impossible](#impossible), the operator can cancel it and move the cluster to `UpdateBlocked`. If that happens, you can roll back the operator or temporarily block updates in the `Ytsaurus` specification:
 
 ```yaml
 spec:
