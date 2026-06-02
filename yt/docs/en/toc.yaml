@@ -616,3 +616,5 @@ items:
           href: draft/queues-corner-cases-draft-11.md
         - name: YQL agent and administration (draft-12)
           href: draft/yql-agent-administration-draft-12.md
+        - name: YSON formats and SDK guide (draft-13)
+          href: draft/yson-formats-sdk-draft-13.md
