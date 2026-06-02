@@ -12,16 +12,19 @@ Before using the operator, make sure you have the [kubectl](https://kubernetes.i
 
 The {{product-name}} team supports and develops its own K8s operator. The operator code is available on [GitHub](https://github.com/ytsaurus/ytsaurus-k8s-operator).
 
-Operator releases are posted on [Github Packages](https://github.com/ytsaurus/ytsaurus-k8s-operator/pkgs/container/k8s-operator).
+Operator releases are published on [GitHub Releases](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases).
 
-Additionally, [helm charts](https://github.com/ytsaurus/ytsaurus-k8s-operator/pkgs/container/ytop-chart) are laid out so you can install all the components you need.
+The helm chart is published in the [GitHub Container Registry (ghcr.io)](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart).
+
+The current operator release requires Kubernetes 1.29+, Helm 3.18+, and cert-manager installed in the cluster.
 
 ### Installing the operator
 
-1. Install the [helm](https://helm.sh/docs/intro/install/) utility.
-2. Install cert-manager: `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.yaml`
-3. Install the charts `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
-4. Check the result:
+1. Make sure your Kubernetes cluster version is 1.29 or later.
+2. Install [Helm](https://helm.sh/docs/intro/install/) 3.18 or later.
+3. Install cert-manager by following the [official installation guide](https://cert-manager.io/docs/installation/).
+4. Install the chart `helm install ytsaurus oci://ghcr.io/ytsaurus/ytop-chart --version {{k8s-operator-version}}`.
+5. Check the result:
 
 ```bash
 $ kubectl get pod
@@ -293,7 +296,7 @@ Another possible reason is that pods cannot be scheduled due to an insufficient 
 
 ## Installing {{product-name}} UI helm chart
 
-### Using with [ytop-chart](https://github.com/ytsaurus/ytsaurus-k8s-operator/pkgs/container/ytop-chart)
+### Using with [ytop-chart](https://github.com/orgs/ytsaurus/packages/container/package/ytop-chart)
 
 Follow all required steps to [start the {{product-name}} cluster](#starting-cluster). Then install the chart:
 
