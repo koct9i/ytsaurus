@@ -99,8 +99,14 @@ func NewClient(conf *yt.Config) (*client, error) {
 
 	if conf.Credentials != nil {
 		c.credentials = conf.Credentials
-	} else if token := conf.GetToken(); token != "" {
-		c.credentials = &yt.TokenCredentials{Token: token}
+	} else {
+		token, err := conf.GetTokenOrRunCommand(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		if token != "" {
+			c.credentials = &yt.TokenCredentials{Token: token}
+		}
 	}
 
 	c.proxySet = &internal.ProxySet{UpdateFn: c.listRPCProxies}

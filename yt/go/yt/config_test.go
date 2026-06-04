@@ -1,8 +1,10 @@
 package yt
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -191,4 +193,114 @@ func TestClusterURL(t *testing.T) {
 			require.Equal(t, test.expectedURL, url)
 		})
 	}
+}
+
+func TestGetTokenOrRunCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows: shell commands differ")
+	}
+
+	ctx := context.Background()
+
+	t.Run("explicit_token_wins", func(t *testing.T) {
+		c := Config{
+			Token:        "explicit-token",
+			TokenCommand: []string{"sh", "-c", "echo cmd-token"},
+		}
+		token, err := c.GetTokenOrRunCommand(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "explicit-token", token)
+	})
+
+	t.Run("yt_token_env_wins_over_command", func(t *testing.T) {
+		t.Setenv("YT_TOKEN", "env-token")
+		c := Config{
+			TokenCommand: []string{"sh", "-c", "echo cmd-token"},
+		}
+		token, err := c.GetTokenOrRunCommand(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "env-token", token)
+	})
+
+	t.Run("token_command_argv", func(t *testing.T) {
+		c := Config{
+			TokenCommand: []string{"sh", "-c", "echo mytoken"},
+		}
+		token, err := c.GetTokenOrRunCommand(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "mytoken", token)
+	})
+
+	t.Run("yt_token_command_env", func(t *testing.T) {
+		t.Setenv("YT_TOKEN_COMMAND", "echo envtoken")
+		c := Config{}
+		token, err := c.GetTokenOrRunCommand(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "envtoken", token)
+	})
+
+	t.Run("token_command_first_line_only", func(t *testing.T) {
+		c := Config{
+			TokenCommand: []string{"sh", "-c", "printf 'firstline\nsecondline\n'"},
+		}
+		token, err := c.GetTokenOrRunCommand(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "firstline", token)
+	})
+
+	t.Run("token_command_strips_trailing_newline", func(t *testing.T) {
+		c := Config{
+			TokenCommand: []string{"sh", "-c", "printf 'mytoken\n'"},
+		}
+		token, err := c.GetTokenOrRunCommand(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "mytoken", token)
+	})
+
+	t.Run("token_command_nonzero_exit_fails", func(t *testing.T) {
+		c := Config{
+			TokenCommand: []string{"sh", "-c", "echo secret-not-found >&2; exit 1"},
+		}
+		_, err := c.GetTokenOrRunCommand(ctx)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "token_command")
+	})
+
+	t.Run("token_command_empty_output_fails", func(t *testing.T) {
+		c := Config{
+			TokenCommand: []string{"sh", "-c", "true"},
+		}
+		_, err := c.GetTokenOrRunCommand(ctx)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "empty")
+	})
+
+	t.Run("token_command_does_not_leak_yt_token", func(t *testing.T) {
+		// Verify filterTokenEnv removes YT_TOKEN from the child environment.
+		env := []string{"PATH=/usr/bin", "YT_TOKEN=secret", "HOME=/home/user"}
+		filtered := filterTokenEnv(env)
+		require.Equal(t, []string{"PATH=/usr/bin", "HOME=/home/user"}, filtered)
+	})
+
+	t.Run("no_fallback_after_command_failure", func(t *testing.T) {
+		// Create a token file with a valid token.
+		tmpFile, err := os.CreateTemp(t.TempDir(), "yt-token-*")
+		require.NoError(t, err)
+		_, err = tmpFile.WriteString("file-token\n")
+		require.NoError(t, err)
+		require.NoError(t, tmpFile.Close())
+
+		// Even though ReadTokenFromFile is set and a valid token file exists,
+		// a failing token_command must not fall back to the file.
+		c := Config{
+			TokenCommand:      []string{"sh", "-c", "exit 1"},
+			ReadTokenFromFile: true,
+		}
+		// Override the path resolution by setting the env var so it points to our tmpFile.
+		t.Setenv("YT_TOKEN_FILE", tmpFile.Name())
+
+		_, err = c.GetTokenOrRunCommand(ctx)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "token_command")
+	})
 }
