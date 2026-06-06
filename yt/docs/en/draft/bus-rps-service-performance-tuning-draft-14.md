@@ -21,16 +21,127 @@ Do not use this page as a replacement for workload-level design. If rows are too
 
 ## End-to-end request pipeline
 
-For one high-level table read/write, the hot path usually looks like this:
+A single `read_table` or `write_table` call is not a single data-node RPC. The client may read several input tables, several ranges per table, and many chunks per range at the same time. Each logical chunk reader then fetches blocks in bounded groups; each writer keeps several sessions and sends groups of blocks to one or more target data nodes.
 
-1. **Client-side batching and chunk planning.** The C++ reader locates chunks, chooses replicas, batches block requests, and uses a chunk-reader pool. The writer buffers rows into blocks/chunks before opening sessions on target data nodes.
-2. **RPC channel and request construction.** Request/response codecs, retry policy, timeouts, streaming timeouts, and bus client TCP options are applied.
-3. **Bus send path.** Messages and attachments are encoded, checksummed/encrypted if enabled, placed into bus outgoing queues, multiplexed by band, and flushed by bus dispatcher threads.
-4. **Kernel/network/NIC.** TCP pacing, socket buffers, congestion control, IRQ/RSS/RPS/XPS, NIC queues, and packet drops determine whether user-space queues drain smoothly.
-5. **Data-node bus receive path.** Bus dispatcher threads decode packets and hand RPC messages to the RPC server.
-6. **RPC service queueing.** Data node methods enforce per-method queue limits, byte limits, concurrency limits, request-byte throttlers, request-weight throttlers, authentication queues, and per-workload request queues.
-7. **Data-node storage path.** Reads pass through block cache, disk throttlers, memory tracking, and location I/O. Writes pass through session memory, `PutBlocks`/`FlushBlocks`, replication/repair/merge throttlers, location watermarks, and disk writeback.
-8. **Reply path.** Blocks or acknowledgements return through RPC and bus queues, where response attachments can be larger than request bodies for reads.
+### 1. API request, path expansion, and data-slice planning
+
+The client first expands rich YPaths, table indexes, column filters, row/key ranges, transaction/prerequisite options, and workload descriptors into data slices and chunk specs. This stage decides how many chunks can be active at once and whether the next stages see a few large sequential reads or many small random reads.
+
+- **Batching/merging:** adjacent ranges over the same table/chunk should be merged before they become separate block requests; otherwise the bus sees excessive RPS.
+- **Isolation:** set the correct workload category for user-interactive, batch, system replication/repair, tablet, and artifact-cache traffic; data-node request queues and fair throttlers depend on it.
+- **Metrics:** locate/fetch-chunk-spec latency, chunk count per request, unavailable/repairing chunk count, table-range count, reader wait/idle time.
+- **Options to inspect:** `suppress_access_tracking`, `suppress_expiration_timeout_renewal`, `unavailable_chunk_strategy`, `chunk_availability_policy`, `keep_in_memory`, workload descriptor/category.
+
+### 2. Multi-reader scheduling across tables, ranges, and chunks
+
+For multi-table or multi-range reads, the multi-reader manager owns many per-chunk/per-slice reader factories. It can open readers sequentially or in parallel and caps active readers by `max_parallel_readers` (default 512). It also obeys a global multi-reader memory manager, so high `max_parallel_readers` does not guarantee high throughput if memory is exhausted.
+
+- **Concurrency:** increase `max_parallel_readers` only when active readers are below the limit and bus/storage queues have headroom.
+- **Queues/buffers:** `max_buffer_size` bounds buffered data across child readers and must be at least twice `window_size`; with many tables/chunks, memory becomes the real concurrency limit.
+- **Isolation:** parallel reads are useful for batch scans; latency-sensitive point/range reads often need lower fan-out and stricter workload category.
+- **Metrics:** active reader count, reader creation/open latency, multi-reader wait time, buffered bytes, failed chunk IDs, per-reader data/decompression statistics.
+
+### 3. Per-chunk block fetch window and request grouping
+
+A chunk reader hands block descriptors to the block fetcher. The fetcher keeps a byte prefetch **`window_size`** (default 20 MiB) but does not send the whole window as one RPC. It acquires and sends at most **`group_size`** bytes per fetch group (default 15 MiB, and it cannot exceed `window_size`). Thus the effective outstanding read memory is window-sized, while the individual `GetBlockSet`/`GetBlockRange` RPC payloads are group-sized. Duplicate block requests are de-duplicated in the fetch window; out-of-order blocks can optionally be grouped.
+
+- **Batching/merging:** `group_size` is the RPC grouping knob; `group_out_of_order_blocks` may reduce request count for non-sequential reads but can increase latency for the next row batch.
+- **Buffers:** `window_size + group_size` contributes to memory estimates per chunk reader; multiply by active readers, tables, and chunks.
+- **Concurrency:** for high-BDP links, raise `window_size` and possibly `group_size`; for small RAM/1 Gbps hosts, reduce active readers before increasing window.
+- **Cache path:** `use_uncompressed_block_cache`, `use_block_cache`, and `use_async_block_cache` can remove bus traffic but add local CPU/memory pressure.
+- **Metrics:** block count, prefetched block count, max block size, bytes read from cache, block fetch wait time, decompression time, read data size.
+
+### 4. Replica selection, probing, hedging, and read batching
+
+Replication readers locate seeds/replicas, optionally probe peer queue size, choose local data-center/rack/host replicas, and issue block RPCs. Hedging can send backup RPCs after a delay; batching can combine block requests before sending them to data nodes.
+
+- **Batching/merging:** `use_read_blocks_batcher` and `block_set_subrequest_threshold` reduce RPC count for many small block reads.
+- **Concurrency:** hedging increases offered load and may double traffic during tail-latency incidents; enable only when the cluster has spare bandwidth.
+- **Isolation:** `enable_workload_fifo_scheduling` annotates reads so fair scheduling preserves request order within a workload.
+- **Options:** `block_rpc_timeout`, `block_rpc_hedging_delay`, `cancel_primary_block_rpc_request_on_hedging`, `probe_rpc_timeout`, `probe_peer_count`, `pass_count`, `retry_count`, `retry_timeout`, `session_timeout`, `prefer_local_*`, `fetch_from_peers`, `enable_p2p`, `use_proxying_data_node_service`.
+- **Metrics:** probe latency, peer queue size, retry/pass count, hedged request count, banned peers, local-vs-remote replica choice, block RPC latency and failures.
+
+### 5. Writer buffering, chunk sessions, and block formation
+
+The table writer buffers rows into blocks and chunks before remote upload. Small blocks increase RPC RPS and metadata overhead; large blocks reduce RPS but increase write latency, memory, and tail amplification. Replicated writers use a send window; erasure writers have separate erasure and writer windows.
+
+- **Batching/buffers:** table `block_size` and `max_buffer_size` shape block formation; replicated writer `send_window_size` (default 32 MiB) bounds in-flight block data and writer `group_size` (default 10 MiB) bounds one send group.
+- **Concurrency:** keep enough open chunks/sessions to hide RTT, but cap by data-node write memory, target count, and disk queues.
+- **Merging:** larger groups merge more blocks into `PutBlocks`/`SendBlocks`; too large groups can monopolize queue slots and hurt interactive traffic.
+- **Options:** `upload_replication_factor`, `min_upload_replication_factor`, `direct_upload_node_count`, `node_rpc_timeout`, `probe_put_blocks_timeout`, `populate_cache`, `sync_on_close`, `enable_direct_io`, `use_probe_put_blocks`, `preallocate_disk_space`, erasure `writer_window_size`, `writer_group_size`, `erasure_window_size`.
+- **Metrics:** writer buffered bytes, open/close/flush latency, in-flight sessions, blocks per chunk, `PutBlocks`/`FlushBlocks` latency, retry/reallocation count.
+
+### 6. Client RPC channel, codecs, retries, and local queues
+
+The native client serializes request headers and attachments, applies request/response codecs, chooses a channel, and manages retries/timeouts. A single application process can create many channels when reading many tables/chunks or when many user threads share one client.
+
+- **Queues/buffers:** request attachments are queued before bus send; response attachments are buffered until consumed by table reader code.
+- **Concurrency:** client-side request fan-out should be sized from `active_readers * window_size / RTT`, not from CPU count alone.
+- **Isolation:** use different clients or workload descriptors for latency-sensitive and batch flows if they otherwise share channels and retry budgets.
+- **Options:** `rpc_timeout`, `rpc_acknowledgement_timeout`, `default_total_streaming_timeout`, `default_streaming_stall_timeout`, `request_codec`, `response_codec`, `enable_retries`, `retrying_channel`, `bus_client`, `idle_channel_ttl`.
+- **Metrics:** client request count, retries, timeout/cancel count, request/response attachment bytes, channel count, queue wait before send.
+
+### 7. Bus encode, multiplexing, and outgoing packet queues
+
+Bus encodes messages, optionally generates checksums and encryption records, assigns a multiplexing band, and appends packets to per-connection outgoing queues. This stage is the first place where a healthy client can still accumulate bytes because the peer, kernel, or NIC cannot drain fast enough.
+
+- **Batching:** fewer, larger attachments reduce per-packet overhead but can increase head-of-line blocking; `group_size` and writer send group size are the upstream knobs.
+- **Queues:** watch pending out packets/bytes; they should be short-lived. Persistent growth means downstream congestion.
+- **Concurrency:** bus dispatcher `thread_pool_size` should scale with NIC queues/sockets on 25/100 Gbps hosts; the historical default is usually too small for very large nodes.
+- **Isolation/prioritization:** `multiplexing_bands`, `tos_level`, and `network_to_tos_level` only help if the network honors them end-to-end.
+- **Options:** `thread_pool_size`, `thread_pool_polling_period`, dispatcher `network_bandwidth`, `min_multiplexing_parallelism`, `max_multiplexing_parallelism`, `verify_checksums`, `generate_checksums`, encryption and verification mode.
+- **Metrics:** `/bus/out_bytes`, `/bus/out_packets`, `/bus/pending_out_packets`, `/bus/pending_out_bytes`, encoder errors, stalled writes, per-band/per-network counters.
+
+### 8. TCP, kernel, NIC, and fabric
+
+TCP and NIC queues convert bus writes into packets. A misconfigured host can show low data-node CPU and low disk usage while bus pending bytes, retransmits, or softirq backlog grow.
+
+- **Buffers/queues:** socket send/receive buffers, NIC rings, qdisc queues, and `netdev_max_backlog` must fit the bandwidth-delay product and burst size.
+- **Concurrency:** RSS/RPS/XPS and IRQ placement must distribute packet work across enough CPUs, especially on multi-socket 100 Gbps nodes.
+- **Isolation:** DSCP/TOS and qdisc classes must match bus multiplexing bands; otherwise RPC priority is lost below user space.
+- **Options:** bus `enable_no_delay`, `enable_quick_ack`, `min_rto`, `max_rto`, `rto_scale`, `connect_timeout`; Linux TCP buffers, backlog, congestion control, qdisc, MTU, offloads.
+- **Metrics:** `ss -ti`, retransmits, drops, NIC `ethtool -S`, softirq CPU, `/proc/net/softnet_stat`, `nstat`, per-queue interrupt rates.
+
+### 9. Data-node bus receive and RPC dispatch
+
+The data node receives packets, decodes bus messages, authenticates RPCs, accounts request size, and dispatches each method into an RPC request queue. Large read responses stress the reply path; write requests stress incoming attachment buffers.
+
+- **Queues:** authentication queue, pending payloads, method request queue, and byte queue are separate bottlenecks.
+- **Concurrency:** method `concurrency_limit` and `concurrency_byte_limit` govern executing requests; queue limits include waiting and executing requests.
+- **Isolation:** data-node `GetBlockSet` and `GetBlockRange` use per-workload-category request queues, so workload descriptors directly affect fairness.
+- **Options:** service/method `queue_size_limit`, `queue_byte_size_limit`, `concurrency_limit`, `concurrency_byte_limit`, `request_bytes_throttler`, `request_weight_throttler`, `authentication_queue_size_limit`, `pending_payloads_timeout`, `pooled`, `heavy`.
+- **Metrics:** `/rpc/server/.../request_queue_size`, `/request_queue_byte_size`, `/concurrency`, `/concurrency_byte`, `/local_wait_time`, `/remote_wait_time`, `/execution_time`, `/total_time`, request/response body and attachment bytes.
+
+### 10. Data-node read execution and disk/cache queues
+
+Read methods probe chunk availability and throttling, check block cache, acquire read memory, optionally coalesce nearby disk reads, read/decompress blocks, and build response attachments. `ProbeChunkSet` can expose disk and network throttling before heavy block reads are sent.
+
+- **Batching/merging:** `GetBlockSet`/`GetBlockRange` groups block IDs from the client; location `coalesced_read_max_gap_size` can merge nearby disk I/O at the cost of read amplification.
+- **Queues/buffers:** read memory tracker and disk throttler queues gate sessions before disk I/O starts.
+- **Concurrency:** high RPC concurrency without enough disk queues or memory increases wait time; use per-location throttlers and weights.
+- **Isolation:** fair-share workload category weights protect interactive reads from scans, repair, and replication.
+- **Options:** location `throttlers`, `enable_uncategorized_throttler`, `uncategorized_throttler`, `fair_share_workload_category_weights`, `memory_limit_fraction_for_starting_new_sessions`, `coalesced_read_max_gap_size`, block-cache capacities.
+- **Metrics:** `/location/disk_throttler`, `/location/blob_block_read_latency`, `/blob_block_read_time`, `/blob_block_read_size`, `/blob_block_read_bytes`, `/blob_chunk_meta_read_time`, `/throttled_reads`, `/throttled_probing_reads`, block-cache hit bytes.
+
+### 11. Data-node write execution, replication, and flush/merge pressure
+
+Writes open chunk sessions, accept `PutBlocks`, optionally forward `SendBlocks` to other replicas, flush data, close chunks, and update metadata. Replication, repair, merge, tablet flush/compaction, and artifact-cache traffic share node/network/disk throttlers unless isolated.
+
+- **Batching/merging:** writer group size controls how many blocks arrive in one `PutBlocks`; data-node sessions may flush groups and the storage layer may merge writes through disk queues.
+- **Queues/buffers:** session write memory, probe-write queue, disk writeback, trash cleanup, and location watermarks can block new writes before bus/RPC queues look full.
+- **Concurrency:** `SendBlocks`, `FlushBlocks`, and `PutBlocks` have their own method queues; replication factor multiplies downstream bus traffic.
+- **Isolation:** separate user writes from replication/repair/merge/tablet workloads with node in/out throttlers and location fair-share weights.
+- **Options:** data-node `throttlers`, cluster-node `network_bandwidth`, `in_throttler`, `out_throttler`, `in_throttlers`, `out_throttlers`, `throttler_free_bandwidth_ratio`, location watermarks, `io_weight`, `max_write_rate_by_dwpd`.
+- **Metrics:** `/location/put_blocks_wall_time`, `/throttled_writes`, `/throttled_probing_writes`, `/probe_writes/queue_size`, `/probe_writes/requested_memory`, per-location used write memory, disk write latency, replication/repair throttler rates.
+
+### 12. Reply delivery, row materialization, and downstream backpressure
+
+The final reply path can bottleneck even when data-node execution is fast. Read responses contain large attachments that travel through bus queues, client RPC queues, decompression, table-format decoding, and user-code consumption. If user code reads rows slowly, buffers fill and upstream concurrency naturally collapses.
+
+- **Buffers:** response attachments, decompressed blocks, table-reader row buffers, and multi-reader `max_buffer_size` together determine memory pressure.
+- **Concurrency:** increasing data-node or client concurrency cannot help if row materialization or the consumer thread is saturated.
+- **Merging:** larger block groups reduce RPC overhead but delay first rows and cancellation; smaller groups improve streaming latency but raise RPS.
+- **Metrics:** response attachment bytes, client idle/wait/read time, decompression CPU, row decode CPU, application consumption rate, memory tracker usage.
 
 Tune from the outside in: first verify that client concurrency and batching can generate enough load, then check bus/RPC queues, then storage throttlers and disk/NIC/kernel counters.
 
