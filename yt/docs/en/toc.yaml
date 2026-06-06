@@ -618,3 +618,5 @@ items:
           href: draft/yql-agent-administration-draft-12.md
         - name: YSON formats and SDK guide (draft-13)
           href: draft/yson-formats-sdk-draft-13.md
+        - name: Bus RPC service performance tuning (draft-14)
+          href: draft/bus-rps-service-performance-tuning-draft-14.md
