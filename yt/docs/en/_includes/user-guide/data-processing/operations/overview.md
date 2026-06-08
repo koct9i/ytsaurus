@@ -39,6 +39,7 @@ which returns a set of operation attributes, the following being especially usef
 
 By calling list_jobs, you can get the list of the operation's jobs (both running and completed).
 For use cases of Python's `get_operation` and `list_jobs`, see "Python Wrapper".
+For an end-to-end monitoring workflow (running state, final result, archive lookup, metrics, and logs), see [Monitoring operations](../../../../user-guide/data-processing/operations/monitoring.md).
 
 ### Operation statuses { #status }
 

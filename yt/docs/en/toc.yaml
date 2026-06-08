@@ -220,6 +220,8 @@ items:
            items:
              - name: Overview
                href: user-guide/data-processing/operations/overview.md
+             - name: Monitoring operations
+               href: user-guide/data-processing/operations/monitoring.md
              - name: Map
                href: user-guide/data-processing/operations/map.md
              - name: Reduce
