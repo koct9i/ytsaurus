@@ -219,7 +219,7 @@
       "description": "Map of secret values made available to user jobs and hidden from unauthorized users.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
+        "$ref": "#/$defs/ysonLeaf"
       },
       "examples": [
         {
@@ -298,9 +298,7 @@
     "sampling": {
       "description": "Sampling settings for operations that support sampled input processing.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {
           "sampling_rate": 0.01
@@ -343,7 +341,7 @@
       "description": "Structured information about the component or user that started the operation.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
+        "$ref": "#/$defs/ysonLeaf"
       },
       "examples": [
         {
@@ -356,7 +354,7 @@
       "description": "Arbitrary operation annotations stored with the operation and displayed by supporting tooling.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
+        "$ref": "#/$defs/ysonLeaf"
       },
       "examples": [
         {
@@ -421,9 +419,7 @@
     "auto_merge": {
       "description": "Auto-merge settings for output chunks produced by operations that support post-processing merges.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {
           "mode": "relaxed",
@@ -634,7 +630,17 @@
       "description": "Explicit reduce pivot keys.",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/ysonNode"
+        "description": "One pivot key tuple.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ysonLeaf"
+        },
+        "examples": [
+          [
+            "a",
+            1
+          ]
+        ]
       },
       "examples": [
         [
@@ -909,9 +915,7 @@
     "cluster_connection": {
       "description": "Connection configuration for the source cluster in remote_copy.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {
           "proxy": "hahn.yt.yandex.net"
@@ -1125,9 +1129,7 @@
     "job_proxy_memory_digest": {
       "description": "Log digest config for job proxy memory estimation.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {
           "default_value": 1.0,
@@ -1268,9 +1270,7 @@
     "job_cpu_monitor": {
       "description": "Job CPU monitor configuration.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ],
@@ -1294,9 +1294,7 @@
     "job_shells": {
       "description": "Job shell configuration map.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ]
@@ -1304,9 +1302,7 @@
     "job_splitter": {
       "description": "Job splitter configuration.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ],
@@ -1315,9 +1311,7 @@
     "experiment_overrides": {
       "description": "Experiment overrides applied to this operation.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ]
@@ -1369,9 +1363,7 @@
     "job_testing_options": {
       "description": "Testing-only job options.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ]
@@ -1440,9 +1432,7 @@
     "job_experiment": {
       "description": "Job experiment configuration.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ],
@@ -1482,7 +1472,7 @@
       "description": "CUDA profiler environment variables.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
+        "$ref": "#/$defs/ysonLeaf"
       },
       "examples": [
         {
@@ -1773,9 +1763,7 @@
     "testing": {
       "description": "Testing-only operation options.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ],
@@ -2342,9 +2330,7 @@
     "input_query_filter_options": {
       "description": "Options for input-query filtering.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ],
@@ -2353,9 +2339,7 @@
     "input_query_options": {
       "description": "Input query execution options.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "examples": [
         {}
       ],
@@ -2673,21 +2657,6 @@
         }
       ]
     },
-    "format": {
-      "description": "Tabular data format. It may be a simple format name or a YSON/JSON map with format attributes.",
-      "$ref": "#/$defs/ysonNode",
-      "examples": [
-        "json",
-        "yson",
-        {
-          "name": "dsv",
-          "columns": [
-            "key",
-            "value"
-          ]
-        }
-      ]
-    },
     "userJob": {
       "description": "User job section used by mapper, reducer, reduce_combiner, and vanilla tasks.",
       "type": "object",
@@ -2736,21 +2705,21 @@
         },
         "format": {
           "description": "Default tabular data format for the job.",
-          "$ref": "#/$defs/format",
+          "$ref": "#/$defs/data_format",
           "examples": [
             "json"
           ]
         },
         "input_format": {
           "description": "Tabular data format at the job input.",
-          "$ref": "#/$defs/format",
+          "$ref": "#/$defs/data_format",
           "examples": [
             "yson"
           ]
         },
         "output_format": {
           "description": "Tabular data format at the job output.",
-          "$ref": "#/$defs/format",
+          "$ref": "#/$defs/data_format",
           "examples": [
             "json"
           ]
@@ -2939,9 +2908,7 @@
         "disk_request": {
           "description": "Disk request for jobs, including disk_space, medium, and account when needed.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "disk_space": 10737418240,
@@ -2963,9 +2930,7 @@
           "items": {
             "description": "Output stream descriptor.",
             "type": "object",
-            "additionalProperties": {
-              "$ref": "#/$defs/ysonNode"
-            },
+            "additionalProperties": true,
             "examples": [
               {
                 "table_index": 0
@@ -3039,9 +3004,7 @@
         "job_proxy_memory_digest": {
           "description": "Log digest config for job proxy memory estimation.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "default_value": 1.0
@@ -3077,9 +3040,7 @@
           "items": {
             "description": "Deprecated tmpfs volume descriptor.",
             "type": "object",
-            "additionalProperties": {
-              "$ref": "#/$defs/ysonNode"
-            },
+            "additionalProperties": true,
             "examples": [
               {
                 "path": "tmpfs",
@@ -3161,9 +3122,7 @@
         "collective_options": {
           "description": "Collective communication options.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {}
           ]
@@ -3209,9 +3168,7 @@
         "monitoring": {
           "description": "User job monitoring configuration.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {}
           ],
@@ -3291,9 +3248,7 @@
         "extra_environment": {
           "description": "Extra environment variables.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "A": "B"
@@ -3351,9 +3306,7 @@
           "items": {
             "description": "Job volume descriptor.",
             "type": "object",
-            "additionalProperties": {
-              "$ref": "#/$defs/ysonNode"
-            },
+            "additionalProperties": true,
             "examples": [
               {
                 "name": "cache"
@@ -3374,9 +3327,7 @@
           "items": {
             "description": "Job volume mount descriptor.",
             "type": "object",
-            "additionalProperties": {
-              "$ref": "#/$defs/ysonNode"
-            },
+            "additionalProperties": true,
             "examples": [
               {
                 "volume": "cache",
@@ -3480,9 +3431,7 @@
             "gang_options": {
               "description": "Gang scheduling options for this task.",
               "type": "object",
-              "additionalProperties": {
-                "$ref": "#/$defs/ysonNode"
-              },
+              "additionalProperties": true,
               "examples": [
                 {}
               ]
@@ -3490,9 +3439,7 @@
             "gang_manager": {
               "description": "Alias for gang_options.",
               "type": "object",
-              "additionalProperties": {
-                "$ref": "#/$defs/ysonNode"
-              },
+              "additionalProperties": true,
               "examples": [
                 {}
               ]
@@ -3547,7 +3494,7 @@
         },
         "control_attributes": {
           "description": "Control attributes configuration written to job streams.",
-          "$ref": "#/$defs/ysonNode",
+          "$ref": "#/$defs/controlAttributesConfig",
           "examples": [
             {
               "enable_table_index": true,
@@ -3619,9 +3566,7 @@
         "block_cache": {
           "description": "Block cache settings for job I/O.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {}
           ],
@@ -4153,9 +4098,7 @@
     "richYPathAttributes": {
       "description": "Common rich YPath and operation path attributes.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "properties": {
         "columns": {
           "description": "Column filter for an input table.",
@@ -4174,7 +4117,7 @@
           "description": "Input table ranges.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ysonNode"
+            "$ref": "#/$defs/ypathRange"
           },
           "examples": [
             [
@@ -4266,7 +4209,7 @@
         },
         "format": {
           "description": "Format used when a file path points to a table.",
-          "$ref": "#/$defs/format",
+          "$ref": "#/$defs/data_format",
           "examples": [
             "json"
           ]
@@ -4346,9 +4289,7 @@
     "tableReaderConfig": {
       "description": "Table reader configuration, including fields inherited from multi-chunk, erasure, replication, remote-reader, block-fetcher, hunk-reader, fragment-reader, dictionary-compression, and workload configs.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "properties": {
         "suppress_access_tracking": {
           "description": "Suppress access tracking for input chunks.",
@@ -4901,9 +4842,7 @@
         "workload_descriptor": {
           "description": "Workload descriptor for reader scheduling and throttling.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "category": "user_batch"
@@ -5106,9 +5045,7 @@
     "tableWriterConfig": {
       "description": "Table writer configuration, including fields inherited from chunk writer, encoding writer, multi-chunk writer, replication writer, erasure writer, block-reorderer, and workload configs.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "properties": {
         "block_size": {
           "description": "Writer block size in bytes.",
@@ -5206,9 +5143,7 @@
         "testing_options": {
           "description": "Testing-only chunk writer options.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "add_unsupported_feature": false
@@ -5359,9 +5294,7 @@
         "node_channel": {
           "description": "RPC channel configuration for writer node connections.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "retry_attempts": 100
@@ -5610,9 +5543,7 @@
         "workload_descriptor": {
           "description": "Workload descriptor for writer scheduling and throttling.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "category": "user_batch"
@@ -5719,10 +5650,18 @@
         },
         "cast_any_to_composite": {
           "description": "Compatibility option controlling Any-to-composite casting.",
-          "$ref": "#/$defs/ysonNode",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
           "examples": [
             true
-          ]
+          ],
+          "default": false
         },
         "cast_composite_to_any": {
           "description": "Cast composite values to Any.",
@@ -5769,9 +5708,7 @@
         "versioned_write_options": {
           "description": "Versioned write options.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {}
           ]
@@ -5806,9 +5743,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": {
-          "$ref": "#/$defs/ysonNode"
-        },
+        "additionalProperties": true,
         "properties": {
           "name": {
             "description": "Column name.",
@@ -6208,9 +6143,7 @@
     "fileWriterConfig": {
       "description": "File writer configuration used by job error-file writer; includes fields inherited from multi-chunk, replication, erasure, block-reorderer, workload, and file chunk writer configs.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "additionalProperties": true,
       "properties": {
         "block_size": {
           "description": "File writer block size in bytes.",
@@ -6276,9 +6209,7 @@
         "node_channel": {
           "description": "RPC channel configuration for writer node connections.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "retry_attempts": 100
@@ -6527,9 +6458,7 @@
         "workload_descriptor": {
           "description": "Workload descriptor for writer scheduling and throttling.",
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "additionalProperties": true,
           "examples": [
             {
               "category": "user_batch"
@@ -6544,6 +6473,1605 @@
         {
           "block_size": 16777216,
           "upload_replication_factor": 3
+        }
+      ]
+    },
+    "ysonLeaf": {
+      "description": "Scalar YSON value encoded directly in JSON. Use this for leaf-valued maps such as secure_vault; structured YSON nodes are modeled by dedicated schemas.",
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "examples": [
+        "value",
+        42,
+        true,
+        null
+      ]
+    },
+    "ysonFormatAttributes": {
+      "description": "Attributes for yson data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_type_conversion": {
+          "description": "Enable all supported type conversions.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_string_to_all_conversion": {
+          "description": "Enable string-to-any conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_all_to_string_conversion": {
+          "description": "Enable any-to-string conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_integral_type_conversion": {
+          "description": "Enable integral type conversions.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "enable_integral_to_double_conversion": {
+          "description": "Enable integral-to-double conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "format": {
+          "description": "YSON wire format.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text",
+            "pretty"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        },
+        "complex_type_mode": {
+          "description": "Complex type representation mode.",
+          "type": "string",
+          "enum": [
+            "named",
+            "positional"
+          ],
+          "examples": [
+            "named"
+          ],
+          "default": "named"
+        },
+        "string_keyed_dict_mode": {
+          "description": "String-keyed dict representation mode.",
+          "type": "string",
+          "enum": [
+            "named",
+            "positional"
+          ],
+          "examples": [
+            "positional"
+          ],
+          "default": "positional"
+        },
+        "decimal_mode": {
+          "description": "Decimal representation mode.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text",
+            "double"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        },
+        "time_mode": {
+          "description": "Date/time representation mode.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        },
+        "uuid_mode": {
+          "description": "UUID representation mode.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        },
+        "skip_null_values": {
+          "description": "Skip null values while writing tabular data.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "format": "binary",
+          "complex_type_mode": "named"
+        }
+      ]
+    },
+    "dsvFormatAttributes": {
+      "description": "Attributes for dsv data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_type_conversion": {
+          "description": "Enable all supported type conversions.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_string_to_all_conversion": {
+          "description": "Enable string-to-any conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_all_to_string_conversion": {
+          "description": "Enable any-to-string conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_integral_type_conversion": {
+          "description": "Enable integral type conversions.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "enable_integral_to_double_conversion": {
+          "description": "Enable integral-to-double conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "record_separator": {
+          "description": "Record separator character.",
+          "type": "string",
+          "default": "\n",
+          "examples": [
+            "\n"
+          ]
+        },
+        "field_separator": {
+          "description": "Field separator character.",
+          "type": "string",
+          "default": "\t",
+          "examples": [
+            "\t"
+          ]
+        },
+        "enable_escaping": {
+          "description": "Enable DSV/YAMR escaping.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "escaping_symbol": {
+          "description": "Escaping symbol.",
+          "type": "string",
+          "default": "\\",
+          "examples": [
+            "\\"
+          ]
+        },
+        "enable_table_index": {
+          "description": "Emit/read table index.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "key_value_separator": {
+          "description": "Key/value separator character.",
+          "type": "string",
+          "default": "=",
+          "examples": [
+            "="
+          ]
+        },
+        "line_prefix": {
+          "description": "Optional line prefix.",
+          "type": "string",
+          "examples": [
+            "#"
+          ]
+        },
+        "table_index_column": {
+          "description": "Column name used for table index.",
+          "type": "string",
+          "default": "@table_index",
+          "examples": [
+            "@table_index"
+          ]
+        },
+        "skip_unsupported_types": {
+          "description": "Skip unsupported value types.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "field_separator": "\t",
+          "key_value_separator": "="
+        }
+      ]
+    },
+    "yamrFormatAttributes": {
+      "description": "Attributes for yamr data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_type_conversion": {
+          "description": "Enable all supported type conversions.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_string_to_all_conversion": {
+          "description": "Enable string-to-any conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_all_to_string_conversion": {
+          "description": "Enable any-to-string conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_integral_type_conversion": {
+          "description": "Enable integral type conversions.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "enable_integral_to_double_conversion": {
+          "description": "Enable integral-to-double conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "has_subkey": {
+          "description": "Whether records include subkey.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "key": {
+          "description": "Key column name.",
+          "type": "string",
+          "default": "key",
+          "examples": [
+            "key"
+          ]
+        },
+        "subkey": {
+          "description": "Subkey column name.",
+          "type": "string",
+          "default": "subkey",
+          "examples": [
+            "subkey"
+          ]
+        },
+        "value": {
+          "description": "Value column name.",
+          "type": "string",
+          "default": "value",
+          "examples": [
+            "value"
+          ]
+        },
+        "lenval": {
+          "description": "Use lenval mode.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "fs": {
+          "description": "Field separator character.",
+          "type": "string",
+          "default": "\t",
+          "examples": [
+            "\t"
+          ]
+        },
+        "rs": {
+          "description": "Record separator character.",
+          "type": "string",
+          "default": "\n",
+          "examples": [
+            "\n"
+          ]
+        },
+        "enable_table_index": {
+          "description": "Emit/read table index.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_escaping": {
+          "description": "Enable escaping.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "escaping_symbol": {
+          "description": "Escaping symbol.",
+          "type": "string",
+          "default": "\\",
+          "examples": [
+            "\\"
+          ]
+        },
+        "enable_eom": {
+          "description": "Enable end-of-message markers.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "key": "key",
+          "value": "value"
+        }
+      ]
+    },
+    "yamredDsvFormatAttributes": {
+      "description": "Attributes for yamred_dsv data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_type_conversion": {
+          "description": "Enable all supported type conversions.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_string_to_all_conversion": {
+          "description": "Enable string-to-any conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_all_to_string_conversion": {
+          "description": "Enable any-to-string conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_integral_type_conversion": {
+          "description": "Enable integral type conversions.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "enable_integral_to_double_conversion": {
+          "description": "Enable integral-to-double conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "record_separator": {
+          "description": "Record separator character.",
+          "type": "string",
+          "default": "\n",
+          "examples": [
+            "\n"
+          ]
+        },
+        "field_separator": {
+          "description": "Field separator character.",
+          "type": "string",
+          "default": "\t",
+          "examples": [
+            "\t"
+          ]
+        },
+        "enable_escaping": {
+          "description": "Enable DSV/YAMR escaping.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "escaping_symbol": {
+          "description": "Escaping symbol.",
+          "type": "string",
+          "default": "\\",
+          "examples": [
+            "\\"
+          ]
+        },
+        "enable_table_index": {
+          "description": "Emit/read table index.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "key_value_separator": {
+          "description": "Key/value separator character.",
+          "type": "string",
+          "default": "=",
+          "examples": [
+            "="
+          ]
+        },
+        "line_prefix": {
+          "description": "Optional line prefix.",
+          "type": "string",
+          "examples": [
+            "#"
+          ]
+        },
+        "has_subkey": {
+          "description": "Whether records include subkey.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "lenval": {
+          "description": "Use lenval mode.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "key_column_names": {
+          "description": "Key column names.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "key"
+            ]
+          ]
+        },
+        "subkey_column_names": {
+          "description": "Subkey column names.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "subkey"
+            ]
+          ],
+          "default": []
+        },
+        "yamr_keys_separator": {
+          "description": "Separator between YAMR key columns.",
+          "type": "string",
+          "default": " ",
+          "examples": [
+            " "
+          ]
+        },
+        "enable_eom": {
+          "description": "Enable end-of-message markers.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "skip_unsupported_types_in_value": {
+          "description": "Skip unsupported types in value field.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "key_column_names": [
+            "key"
+          ]
+        }
+      ]
+    },
+    "schemafulDsvFormatAttributes": {
+      "description": "Attributes for schemaful_dsv data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_type_conversion": {
+          "description": "Enable all supported type conversions.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_string_to_all_conversion": {
+          "description": "Enable string-to-any conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_all_to_string_conversion": {
+          "description": "Enable any-to-string conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_integral_type_conversion": {
+          "description": "Enable integral type conversions.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "enable_integral_to_double_conversion": {
+          "description": "Enable integral-to-double conversion.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "record_separator": {
+          "description": "Record separator character.",
+          "type": "string",
+          "default": "\n",
+          "examples": [
+            "\n"
+          ]
+        },
+        "field_separator": {
+          "description": "Field separator character.",
+          "type": "string",
+          "default": "\t",
+          "examples": [
+            "\t"
+          ]
+        },
+        "enable_escaping": {
+          "description": "Enable DSV/YAMR escaping.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "escaping_symbol": {
+          "description": "Escaping symbol.",
+          "type": "string",
+          "default": "\\",
+          "examples": [
+            "\\"
+          ]
+        },
+        "enable_table_index": {
+          "description": "Emit/read table index.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "columns": {
+          "description": "Schemaful DSV column order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "key",
+              "value"
+            ]
+          ]
+        },
+        "missing_value_mode": {
+          "description": "Mode for missing schemaful DSV values.",
+          "type": "string",
+          "enum": [
+            "skip_row",
+            "fail",
+            "print_sentinel"
+          ],
+          "examples": [
+            "fail"
+          ],
+          "default": "fail"
+        },
+        "missing_value_sentinel": {
+          "description": "Sentinel printed for missing values.",
+          "type": "string",
+          "default": "#",
+          "examples": [
+            "#"
+          ]
+        },
+        "enable_column_names_header": {
+          "description": "Whether column names header is enabled.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        }
+      },
+      "examples": [
+        {
+          "columns": [
+            "key",
+            "value"
+          ]
+        }
+      ]
+    },
+    "protobufTypeConfig": {
+      "description": "Nested protobuf type configuration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "proto_type": {
+          "description": "Protobuf field type.",
+          "type": "string",
+          "enum": [
+            "double",
+            "float",
+            "int64",
+            "uint64",
+            "sint64",
+            "fixed64",
+            "sfixed64",
+            "int32",
+            "uint32",
+            "sint32",
+            "fixed32",
+            "sfixed32",
+            "bool",
+            "string",
+            "bytes",
+            "message",
+            "enum_int",
+            "enum_string",
+            "other_columns",
+            "any",
+            "oneof"
+          ],
+          "examples": [
+            "string"
+          ]
+        },
+        "fields": {
+          "description": "Nested protobuf fields.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/protobufColumnConfig"
+          },
+          "examples": [
+            [
+              {
+                "name": "x",
+                "field_number": 1,
+                "proto_type": "string"
+              }
+            ]
+          ],
+          "default": []
+        },
+        "enumeration_name": {
+          "description": "Enumeration name for enum fields.",
+          "type": "string",
+          "examples": [
+            "Color"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "proto_type": "string"
+        }
+      ]
+    },
+    "protobufColumnConfig": {
+      "description": "Protobuf column/field mapping.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "YT column or protobuf field name.",
+          "type": "string",
+          "examples": [
+            "key"
+          ]
+        },
+        "field_number": {
+          "description": "Protobuf field number.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "repeated": {
+          "description": "Whether field is repeated.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "packed": {
+          "description": "Whether repeated field is packed.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "type": {
+          "$ref": "#/$defs/protobufTypeConfig"
+        },
+        "proto_type": {
+          "description": "Shortcut protobuf type.",
+          "type": "string",
+          "enum": [
+            "double",
+            "float",
+            "int64",
+            "uint64",
+            "sint64",
+            "fixed64",
+            "sfixed64",
+            "int32",
+            "uint32",
+            "sint32",
+            "fixed32",
+            "sfixed32",
+            "bool",
+            "string",
+            "bytes",
+            "message",
+            "enum_int",
+            "enum_string",
+            "other_columns",
+            "any",
+            "oneof"
+          ],
+          "examples": [
+            "string"
+          ]
+        },
+        "fields": {
+          "description": "Nested protobuf fields.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/protobufColumnConfig"
+          },
+          "examples": [
+            [
+              {
+                "name": "x",
+                "field_number": 1,
+                "proto_type": "string"
+              }
+            ]
+          ],
+          "default": []
+        },
+        "enumeration_name": {
+          "description": "Enumeration name for enum fields.",
+          "type": "string",
+          "examples": [
+            "Color"
+          ]
+        },
+        "enum_writing_mode": {
+          "description": "Enum writing mode.",
+          "type": "string",
+          "enum": [
+            "check_values",
+            "skip_unknown_values"
+          ],
+          "examples": [
+            "check_values"
+          ],
+          "default": "check_values"
+        }
+      },
+      "examples": [
+        {
+          "name": "key",
+          "field_number": 1,
+          "proto_type": "string"
+        }
+      ]
+    },
+    "protobufTableConfig": {
+      "description": "Protobuf table mapping.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "description": "Protobuf column mappings.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/protobufColumnConfig"
+          },
+          "examples": [
+            [
+              {
+                "name": "key",
+                "field_number": 1,
+                "proto_type": "string"
+              }
+            ]
+          ]
+        }
+      },
+      "examples": [
+        {
+          "columns": [
+            {
+              "name": "key",
+              "field_number": 1,
+              "proto_type": "string"
+            }
+          ]
+        }
+      ]
+    },
+    "protobufFormatAttributes": {
+      "description": "Attributes for protobuf data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file_descriptor_set": {
+          "description": "Binary FileDescriptorSet encoded as a string.",
+          "type": "string",
+          "examples": [
+            "..."
+          ]
+        },
+        "file_indices": {
+          "description": "File descriptor indices.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "examples": [
+            [
+              0
+            ]
+          ],
+          "default": []
+        },
+        "message_indices": {
+          "description": "Nested message indices.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "examples": [
+            [
+              0
+            ]
+          ],
+          "default": []
+        },
+        "nested_messages_mode": {
+          "description": "Nested messages representation mode.",
+          "type": "string",
+          "enum": [
+            "protobuf",
+            "dict"
+          ],
+          "examples": [
+            "protobuf"
+          ],
+          "default": "protobuf"
+        },
+        "enums_as_strings": {
+          "description": "Read/write enums as strings.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "tables": {
+          "description": "Table protobuf mappings.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/protobufTableConfig"
+          },
+          "examples": [
+            [
+              {
+                "columns": [
+                  {
+                    "name": "key",
+                    "field_number": 1,
+                    "proto_type": "string"
+                  }
+                ]
+              }
+            ]
+          ],
+          "default": []
+        },
+        "enumerations": {
+          "description": "Enumeration descriptors keyed by name.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {},
+          "examples": [
+            {
+              "Color": [
+                "RED",
+                "GREEN"
+              ]
+            }
+          ],
+          "default": {}
+        },
+        "file_descriptor_set_text": {
+          "description": "Text protobuf FileDescriptorSet.",
+          "type": "string",
+          "examples": [
+            "..."
+          ]
+        },
+        "type_names": {
+          "description": "Top-level protobuf type names.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "TMessage"
+            ]
+          ],
+          "default": []
+        },
+        "complex_type_mode": {
+          "description": "Complex type representation mode.",
+          "type": "string",
+          "enum": [
+            "named",
+            "positional"
+          ],
+          "examples": [
+            "named"
+          ],
+          "default": "named"
+        },
+        "decimal_mode": {
+          "description": "Decimal representation mode.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text",
+            "double"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        },
+        "time_mode": {
+          "description": "Date/time representation mode.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        },
+        "uuid_mode": {
+          "description": "UUID representation mode.",
+          "type": "string",
+          "enum": [
+            "binary",
+            "text"
+          ],
+          "examples": [
+            "binary"
+          ],
+          "default": "binary"
+        }
+      },
+      "examples": [
+        {
+          "type_names": [
+            "TMessage"
+          ]
+        }
+      ]
+    },
+    "webJsonFormatAttributes": {
+      "description": "Attributes for web_json data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_selected_column_count": {
+          "description": "Maximum selected column count.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            50
+          ],
+          "default": 50
+        },
+        "field_weight_limit": {
+          "description": "Field weight limit in bytes.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            1024
+          ],
+          "default": 1024
+        },
+        "string_weight_limit": {
+          "description": "String weight limit in bytes.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            200
+          ],
+          "default": 200
+        },
+        "max_all_column_names_count": {
+          "description": "Maximum number of all column names.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            2000
+          ],
+          "default": 2000
+        },
+        "column_names": {
+          "description": "Column names to include.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "key",
+              "value"
+            ]
+          ],
+          "default": []
+        },
+        "value_format": {
+          "description": "Web JSON value format.",
+          "type": "string",
+          "enum": [
+            "schemaless",
+            "schemaful"
+          ],
+          "examples": [
+            "schemaless"
+          ],
+          "default": "schemaless"
+        }
+      },
+      "examples": [
+        {
+          "value_format": "schemaless"
+        }
+      ]
+    },
+    "skiffFormatAttributes": {
+      "description": "Attributes for skiff data format.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "skiff_schema_registry": {
+          "description": "Skiff schema registry.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {},
+          "examples": [
+            {
+              "schema": "..."
+            }
+          ],
+          "default": {}
+        },
+        "table_skiff_schemas": {
+          "description": "Table Skiff schemas encoded as YSON values.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ysonLeaf"
+          },
+          "examples": [
+            [
+              "..."
+            ]
+          ]
+        },
+        "override_intermediate_table_schema": {
+          "description": "Override intermediate table schema.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        }
+      },
+      "examples": [
+        {
+          "table_skiff_schemas": [
+            "..."
+          ]
+        }
+      ]
+    },
+    "yamlFormatAttributes": {
+      "description": "Attributes for yaml data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "write_uint_tag": {
+          "description": "Write explicit YAML tag for uint values.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "write_uint_tag": false
+        }
+      ]
+    },
+    "arrowFormatAttributes": {
+      "description": "Attributes for arrow data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_tz_index": {
+          "description": "Enable timezone index.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_complex_types": {
+          "description": "Enable complex types.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "enable_complex_types": false
+        }
+      ]
+    },
+    "blobFormatAttributes": {
+      "description": "Attributes for blob data format.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "part_index_column_name": {
+          "description": "Part index column name.",
+          "type": "string",
+          "examples": [
+            "part_index"
+          ]
+        },
+        "data_column_name": {
+          "description": "Data column name.",
+          "type": "string",
+          "examples": [
+            "data"
+          ]
+        },
+        "enable_part_index": {
+          "description": "Enable part index column.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        }
+      },
+      "examples": [
+        {
+          "enable_part_index": true
+        }
+      ]
+    },
+    "dataFormatAttributes": {
+      "description": "Known attributes for YTsaurus data formats. The applicable set depends on the format name in $value.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ysonFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/dsvFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/yamrFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/yamredDsvFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/schemafulDsvFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/protobufFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/webJsonFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/skiffFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/yamlFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/arrowFormatAttributes"
+        },
+        {
+          "$ref": "#/$defs/blobFormatAttributes"
+        }
+      ],
+      "examples": [
+        {
+          "format": "binary"
+        },
+        {
+          "columns": [
+            "key",
+            "value"
+          ]
+        },
+        {
+          "enable_part_index": true
+        }
+      ]
+    },
+    "data_format": {
+      "description": "YTsaurus data format. Plain form is a known format name. Attributed form uses $value for the format name and $attributes for format-specific attributes.",
+      "oneOf": [
+        {
+          "description": "Known YTsaurus data format name.",
+          "type": "string",
+          "enum": [
+            "null",
+            "yson",
+            "json",
+            "dsv",
+            "yamr",
+            "yamred_dsv",
+            "schemaful_dsv",
+            "protobuf",
+            "web_json",
+            "skiff",
+            "arrow",
+            "yaml",
+            "blob"
+          ],
+          "examples": [
+            "yson"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "$value",
+            "$attributes"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "$value": {
+              "description": "Known YTsaurus data format name.",
+              "type": "string",
+              "enum": [
+                "null",
+                "yson",
+                "json",
+                "dsv",
+                "yamr",
+                "yamred_dsv",
+                "schemaful_dsv",
+                "protobuf",
+                "web_json",
+                "skiff",
+                "arrow",
+                "yaml",
+                "blob"
+              ],
+              "examples": [
+                "yson"
+              ]
+            },
+            "$attributes": {
+              "$ref": "#/$defs/dataFormatAttributes"
+            }
+          }
+        }
+      ],
+      "examples": [
+        "yson",
+        {
+          "$value": "dsv",
+          "$attributes": {
+            "field_separator": "\t",
+            "key_value_separator": "="
+          }
+        },
+        {
+          "$value": "schemaful_dsv",
+          "$attributes": {
+            "columns": [
+              "key",
+              "value"
+            ]
+          }
+        }
+      ]
+    },
+    "controlAttributesConfig": {
+      "description": "Control attributes emitted in job streams.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable_table_index": {
+          "description": "Enable table index control attribute.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_range_index": {
+          "description": "Enable range index control attribute.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_row_index": {
+          "description": "Enable row index control attribute.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_tablet_index": {
+          "description": "Enable tablet index control attribute.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "dynamic_table": {
+          "description": "Whether input is a dynamic table.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_key_widening": {
+          "description": "Enable key widening.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_any_unpacking": {
+          "description": "Enable Any unpacking.",
+          "type": "boolean",
+          "examples": [
+            true
+          ],
+          "default": true
+        },
+        "enable_key_switch": {
+          "description": "Enable key switch control attribute.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        },
+        "enable_end_of_stream": {
+          "description": "Enable end-of-stream control attribute.",
+          "type": "boolean",
+          "examples": [
+            false
+          ],
+          "default": false
+        }
+      },
+      "examples": [
+        {
+          "enable_row_index": true
+        }
+      ]
+    },
+    "ypathLimit": {
+      "description": "YPath range limit.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "row_index": {
+          "description": "Row index limit.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "key": {
+          "description": "Key bound values.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ysonLeaf"
+          },
+          "examples": [
+            [
+              "a"
+            ]
+          ]
+        }
+      },
+      "examples": [
+        {
+          "row_index": 0
+        }
+      ]
+    },
+    "ypathRange": {
+      "description": "YPath input range.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lower_limit": {
+          "$ref": "#/$defs/ypathLimit"
+        },
+        "upper_limit": {
+          "$ref": "#/$defs/ypathLimit"
+        },
+        "exact": {
+          "$ref": "#/$defs/ypathLimit"
+        }
+      },
+      "examples": [
+        {
+          "lower_limit": {
+            "row_index": 0
+          },
+          "upper_limit": {
+            "row_index": 100
+          }
         }
       ]
     }
