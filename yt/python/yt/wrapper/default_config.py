@@ -120,6 +120,8 @@ class DefaultConfigType(TypedDict, total=False):
     cache_token: bool
     token: Optional[str]
     token_path: Optional[str]
+    token_command: Optional[Union[str, List[str]]]
+    token_command_timeout: int
     allow_receive_token_by_current_ssh_session: bool
     oauth_client_id: str
     oauth_client_secret: str
@@ -586,6 +588,10 @@ default_config = {
     "token": None,
     # $HOME/.yt/token by default
     "token_path": None,
+    # If specified then token is extracted by running the configured command.
+    "token_command": None,
+    # Timeout for token_command in milliseconds.
+    "token_command_timeout": 10000,
     # This option enables receiving token automatically
     # using current session ssh secret.
     "allow_receive_token_by_current_ssh_session": True,
@@ -1174,6 +1180,7 @@ SHORTCUTS = {
     "YT_RPC_PROXY_ROLE": "proxy/rpc_proxy_role",
 
     "YT_TOKEN": "token",
+    "YT_TOKEN_COMMAND": "token_command",
     "YT_TOKEN_PATH": "token_path",
     "YT_USE_TOKEN": "enable_token",
     "YT_CHECK_TOKEN": "check_token",
