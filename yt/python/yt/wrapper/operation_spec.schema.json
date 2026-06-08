@@ -3320,7 +3320,8 @@
           "$ref": "#/$defs/tableReaderConfig",
           "examples": [
             {
-              "max_buffer_size": 1048576
+              "max_buffer_size": 1048576,
+              "retry_count": 20
             }
           ]
         },
@@ -3329,16 +3330,17 @@
           "$ref": "#/$defs/tableWriterConfig",
           "examples": [
             {
-              "block_size": 67108864
+              "block_size": 67108864,
+              "desired_chunk_size": 2147483648
             }
           ]
         },
         "error_file_writer": {
-          "description": "Stderr file writer configuration.",
-          "$ref": "#/$defs/ysonNode",
+          "description": "Stderr/error file writer configuration.",
+          "$ref": "#/$defs/fileWriterConfig",
           "examples": [
             {
-              "upload_replication_factor": 3
+              "block_size": 16777216
             }
           ]
         },
@@ -3419,12 +3421,11 @@
         },
         "testing_options": {
           "description": "Testing-only job I/O options.",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ysonNode"
-          },
+          "$ref": "#/$defs/jobIOTestingOptions",
           "examples": [
-            {}
+            {
+              "pipe_delay": "100ms"
+            }
           ]
         }
       },
@@ -4123,7 +4124,7 @@
       ]
     },
     "tableReaderConfig": {
-      "description": "Table reader configuration. Includes fields from TTableReaderConfig; inherited chunk-reader fields are accepted for compatibility.",
+      "description": "Table reader configuration, including fields inherited from multi-chunk, erasure, replication, remote-reader, block-fetcher, hunk-reader, fragment-reader, dictionary-compression, and workload configs.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/ysonNode"
@@ -4166,29 +4167,1109 @@
         },
         "dynamic_store_reader": {
           "description": "Dynamic store reader configuration.",
+          "$ref": "#/$defs/remoteDynamicStoreReaderConfig",
+          "examples": [
+            {
+              "retry_count": 10
+            }
+          ]
+        },
+        "max_buffer_size": {
+          "description": "Maximum reader buffer size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1048576
+          ]
+        },
+        "max_parallel_readers": {
+          "description": "Maximum number of parallel chunk readers.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16
+          ]
+        },
+        "enable_auto_repair": {
+          "description": "Whether erasure chunks may be automatically repaired while reading.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "replication_reader_speed_limit_per_sec": {
+          "description": "Speed limit for replication reader in bytes per second.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            104857600
+          ]
+        },
+        "slow_reader_expiration_timeout": {
+          "description": "Expiration timeout for slow replication readers.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "replication_reader_timeout": {
+          "description": "Timeout for replication reader operations.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "replication_reader_failure_timeout": {
+          "description": "Failure timeout for replication reader operations.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "1m"
+          ]
+        },
+        "block_rpc_timeout": {
+          "description": "Timeout for block RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "120s"
+          ]
+        },
+        "block_rpc_hedging_delay": {
+          "description": "Hedging delay for block RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "lookup_rpc_hedging_delay": {
+          "description": "Hedging delay for lookup RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "cancel_primary_block_rpc_request_on_hedging": {
+          "description": "Cancel primary block RPC request when hedging starts.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "cancel_primary_lookup_rpc_request_on_hedging": {
+          "description": "Cancel primary lookup RPC request when hedging starts.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "lookup_rpc_timeout": {
+          "description": "Timeout for lookup RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "meta_rpc_timeout": {
+          "description": "Timeout for chunk meta RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "meta_rpc_hedging_delay": {
+          "description": "Hedging delay for chunk meta RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "probe_rpc_timeout": {
+          "description": "Timeout for probe RPC requests.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "probe_peer_count": {
+          "description": "Number of peers probed for a chunk.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            3
+          ]
+        },
+        "retry_count": {
+          "description": "Reader retry count.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            20
+          ]
+        },
+        "fail_on_no_seeds": {
+          "description": "Fail when no chunk seeds are available.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "min_backoff_time": {
+          "description": "Minimum reader retry backoff.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "3s"
+          ]
+        },
+        "max_backoff_time": {
+          "description": "Maximum reader retry backoff.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "60s"
+          ]
+        },
+        "backoff_time_multiplier": {
+          "description": "Reader retry backoff multiplier.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            1.5
+          ]
+        },
+        "pass_count": {
+          "description": "Number of passes for chunk peer selection.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            500
+          ]
+        },
+        "fetch_from_peers": {
+          "description": "Fetch chunk blocks from peers.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "fetch_node_descriptors": {
+          "description": "Fetch node descriptors while reading.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "peer_expiration_timeout": {
+          "description": "Expiration timeout for cached peer information.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "300s"
+          ]
+        },
+        "populate_cache": {
+          "description": "Populate block cache while reading.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "prefer_local_host": {
+          "description": "Prefer local host when selecting chunk peers.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "prefer_local_rack": {
+          "description": "Prefer local rack when selecting chunk peers.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "prefer_local_data_center": {
+          "description": "Prefer local data center when selecting chunk peers.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "max_ban_count": {
+          "description": "Maximum number of peer bans.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            100
+          ]
+        },
+        "enable_workload_fifo_scheduling": {
+          "description": "Enable FIFO scheduling for reader workload.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "retry_timeout": {
+          "description": "Overall reader retry timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5m"
+          ]
+        },
+        "session_timeout": {
+          "description": "Chunk reader session timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5m"
+          ]
+        },
+        "lookup_request_pass_count": {
+          "description": "Pass count for lookup requests.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            3
+          ]
+        },
+        "lookup_request_retry_count": {
+          "description": "Retry count for lookup requests.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            3
+          ]
+        },
+        "use_async_block_cache": {
+          "description": "Use asynchronous block cache.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_block_cache": {
+          "description": "Use block cache.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "prolonged_discard_seeds_delay": {
+          "description": "Delay before discarding prolonged seeds.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "10s"
+          ]
+        },
+        "enable_chunk_meta_cache": {
+          "description": "Enable chunk meta cache.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "ban_peers_permanently": {
+          "description": "Ban failing peers permanently for this reader.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_local_throttling": {
+          "description": "Enable local reader throttling.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "chunk_meta_cache_failure_probability": {
+          "description": "Testing probability of chunk meta cache failure.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "fail_on_unresolved_node_id": {
+          "description": "Fail on unresolved node id.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_chunk_prober": {
+          "description": "Use chunk prober while reading.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_read_blocks_batcher": {
+          "description": "Use read-blocks batcher.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "block_set_subrequest_threshold": {
+          "description": "Threshold for block-set subrequests.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            100
+          ]
+        },
+        "partial_peer_probing_timeouts": {
+          "description": "Timeouts used for partial peer probing.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/duration"
+          },
+          "examples": [
+            [
+              "1s",
+              "5s"
+            ]
+          ]
+        },
+        "disk_queue_size_factor": {
+          "description": "Disk queue size factor.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            1.0
+          ]
+        },
+        "net_queue_size_factor": {
+          "description": "Network queue size factor.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.5
+          ]
+        },
+        "cached_block_count_factor": {
+          "description": "Cached block count factor.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.0
+          ]
+        },
+        "cached_block_size_factor": {
+          "description": "Cached block size factor.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.0
+          ]
+        },
+        "suspicious_node_grace_period": {
+          "description": "Grace period before treating a node as suspicious.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "use_direct_io": {
+          "description": "Use direct I/O for reads.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "window_size": {
+          "description": "Block fetcher window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "group_size": {
+          "description": "Block fetcher group size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            4194304
+          ]
+        },
+        "use_uncompressed_block_cache": {
+          "description": "Use uncompressed block cache.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "group_out_of_order_blocks": {
+          "description": "Group out-of-order blocks.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "max_chunks_per_fetch": {
+          "description": "Maximum chunks per fetch request.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            100000
+          ]
+        },
+        "max_chunks_per_locate_request": {
+          "description": "Maximum chunks per locate request.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            10000
+          ]
+        },
+        "workload_descriptor": {
+          "description": "Workload descriptor for reader scheduling and throttling.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/ysonNode"
           },
           "examples": [
-            {}
+            {
+              "category": "user_batch"
+            }
+          ]
+        },
+        "sampling_mode": {
+          "description": "Sampling mode for table reads.",
+          "type": "string",
+          "examples": [
+            "row"
+          ]
+        },
+        "sampling_rate": {
+          "description": "Sampling rate for table reads.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.1
+          ]
+        },
+        "sampling_seed": {
+          "description": "Sampling seed.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            42
+          ]
+        },
+        "max_hunk_count_per_read": {
+          "description": "Maximum hunk count per read.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            10000
+          ]
+        },
+        "max_total_hunk_length_per_read": {
+          "description": "Maximum total hunk length per read in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "peer_info_expiration_timeout": {
+          "description": "Expiration timeout for cached peer info.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5m"
+          ]
+        },
+        "seeds_expiration_timeout": {
+          "description": "Expiration timeout for located chunk seeds.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5m"
+          ]
+        },
+        "periodic_update_delay": {
+          "description": "Delay between periodic peer-info updates.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "1s"
+          ]
+        },
+        "probe_chunk_set_rpc_timeout": {
+          "description": "Timeout for probe chunk set RPC.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "get_chunk_fragment_set_rpc_timeout": {
+          "description": "Timeout for get chunk fragment set RPC.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "fragment_read_hedging_delay": {
+          "description": "Hedging delay for fragment reads.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "retry_count_limit": {
+          "description": "Retry count limit for fragment reads.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            20
+          ]
+        },
+        "retry_backoff_time": {
+          "description": "Retry backoff for fragment reads.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "1s"
+          ]
+        },
+        "read_time_limit": {
+          "description": "Read time limit for chunk fragments.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5m"
+          ]
+        },
+        "chunk_info_cache_expiration_timeout": {
+          "description": "Chunk info cache expiration timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5m"
+          ]
+        },
+        "max_inflight_fragment_length": {
+          "description": "Maximum in-flight fragment length in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "max_inflight_fragment_count": {
+          "description": "Maximum in-flight fragment count.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16
+          ]
+        },
+        "prefetch_whole_blocks": {
+          "description": "Prefetch whole blocks while reading fragments.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "read_and_cache_whole_blocks": {
+          "description": "Read and cache whole blocks while reading fragments.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "block_count_to_precache": {
+          "description": "Number of blocks to precache.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "compression_level": {
+          "description": "Dictionary compression level.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "max_decompression_blob_size": {
+          "description": "Maximum decompression blob size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
           ]
         }
       },
       "examples": [
         {
-          "suppress_access_tracking": false,
-          "max_read_duration": "10m"
+          "max_buffer_size": 1048576,
+          "retry_count": 20,
+          "sampling_rate": 0.1
         }
       ]
     },
     "tableWriterConfig": {
-      "description": "Table writer configuration. Includes known chunk-writer option fields; inherited writer fields are accepted for compatibility.",
+      "description": "Table writer configuration, including fields inherited from chunk writer, encoding writer, multi-chunk writer, replication writer, erasure writer, block-reorderer, and workload configs.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/ysonNode"
       },
       "properties": {
+        "block_size": {
+          "description": "Writer block size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "max_segment_value_count": {
+          "description": "Maximum segment value count.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            100000
+          ]
+        },
+        "max_buffer_size": {
+          "description": "Maximum writer buffer size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "max_row_weight": {
+          "description": "Maximum row weight in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "max_key_weight": {
+          "description": "Maximum key weight in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1048576
+          ]
+        },
+        "max_data_weight_between_blocks": {
+          "description": "Maximum data weight between blocks in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            134217728
+          ]
+        },
+        "sample_rate": {
+          "description": "Sample rate for writer sampling.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            1.0
+          ]
+        },
+        "use_original_data_weight_in_samples": {
+          "description": "Use original data weight in writer samples.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "chunk_indexes": {
+          "description": "Chunk index writer configuration.",
+          "$ref": "#/$defs/chunkIndexesWriterConfig",
+          "examples": [
+            {
+              "hash_table": {
+                "load_factor": 0.75
+              }
+            }
+          ]
+        },
+        "slim": {
+          "description": "Slim versioned writer configuration.",
+          "$ref": "#/$defs/slimVersionedWriterConfig",
+          "examples": [
+            {
+              "top_value_quantile": 0.99
+            }
+          ]
+        },
+        "testing_options": {
+          "description": "Testing-only chunk writer options.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "add_unsupported_feature": false
+            }
+          ]
+        },
+        "key_filter": {
+          "description": "Key filter writer configuration.",
+          "$ref": "#/$defs/keyFilterWriterConfig",
+          "examples": [
+            {
+              "enable": true
+            }
+          ]
+        },
+        "key_prefix_filter": {
+          "description": "Key-prefix filter writer configuration.",
+          "$ref": "#/$defs/keyPrefixFilterWriterConfig",
+          "examples": [
+            {
+              "enable": true,
+              "prefix_lengths": [
+                1
+              ]
+            }
+          ]
+        },
+        "enable_large_columnar_statistics": {
+          "description": "Enable large columnar statistics.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_segment_meta_in_blocks": {
+          "description": "Enable segment metadata in blocks.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_column_meta_in_chunk_meta": {
+          "description": "Enable column metadata in chunk metadata.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "encode_window_size": {
+          "description": "Encoding window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "default_compression_ratio": {
+          "description": "Default compression ratio estimate.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.2
+          ]
+        },
+        "verify_compression": {
+          "description": "Verify compression results.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "compute_checksum": {
+          "description": "Compute block checksums.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "compression_concurrency": {
+          "description": "Compression concurrency.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "desired_chunk_size": {
+          "description": "Desired chunk size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            2147483648
+          ]
+        },
+        "desired_chunk_weight": {
+          "description": "Desired chunk weight in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            107374182400
+          ]
+        },
+        "max_meta_size": {
+          "description": "Maximum chunk metadata size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            31457280
+          ]
+        },
+        "testing_delay_before_chunk_close": {
+          "description": "Testing delay before closing a chunk.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "0s"
+          ]
+        },
+        "send_window_size": {
+          "description": "Writer send window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "group_size": {
+          "description": "Writer group size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "node_channel": {
+          "description": "RPC channel configuration for writer node connections.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "retry_attempts": 100
+            }
+          ]
+        },
+        "node_rpc_timeout": {
+          "description": "Timeout for writer node RPCs.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "15s"
+          ]
+        },
+        "probe_put_blocks_timeout": {
+          "description": "Timeout for probe put-blocks RPC.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "upload_replication_factor": {
+          "description": "Upload replication factor.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            3
+          ]
+        },
+        "ban_failed_nodes": {
+          "description": "Ban nodes with failed writes.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "min_upload_replication_factor": {
+          "description": "Minimum upload replication factor.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "direct_upload_node_count": {
+          "description": "Direct upload node count.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            2
+          ]
+        },
+        "prefer_local_host": {
+          "description": "Prefer local host for write targets.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "node_ping_period": {
+          "description": "Writer node ping period.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "10s"
+          ]
+        },
+        "populate_cache": {
+          "description": "Populate caches after writing.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "sync_on_close": {
+          "description": "Synchronize chunks on close.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_direct_io": {
+          "description": "Use direct I/O for writes.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_early_finish": {
+          "description": "Enable early finish for chunk writes.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "allocate_write_targets_backoff_time": {
+          "description": "Backoff between write-target allocation attempts.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "1s"
+          ]
+        },
+        "allocate_write_targets_retry_count": {
+          "description": "Retry count for write-target allocation.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            3
+          ]
+        },
+        "testing_delay": {
+          "description": "Testing delay in writer.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "0s"
+          ]
+        },
+        "enable_local_throttling": {
+          "description": "Enable local writer throttling.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_probe_put_blocks": {
+          "description": "Use probe put-blocks requests.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "preallocate_disk_space": {
+          "description": "Preallocate disk space for writes.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_erasure_target_node_reallocation": {
+          "description": "Enable erasure target node reallocation.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "erasure_window_size": {
+          "description": "Erasure writer window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            8388608
+          ]
+        },
+        "writer_window_size": {
+          "description": "Writer window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "writer_group_size": {
+          "description": "Writer group size for erasure writes in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "desired_segment_part_size": {
+          "description": "Desired segment part size in bytes.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "erasure_store_original_block_checksums": {
+          "description": "Store original block checksums for erasure chunks.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_striped_erasure": {
+          "description": "Enable striped erasure.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "erasure_stripe_size": {
+          "description": "Erasure stripe size.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "use_effective_erasure_codecs": {
+          "description": "Use effective erasure codecs.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_block_reordering": {
+          "description": "Enable block reordering.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "shuffle_blocks": {
+          "description": "Shuffle blocks before writing.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "workload_descriptor": {
+          "description": "Workload descriptor for writer scheduling and throttling.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "category": "user_batch"
+            }
+          ]
+        },
         "validate_sorted": {
           "description": "Validate that written rows are sorted.",
           "type": "boolean",
@@ -4351,14 +5432,6 @@
             0
           ]
         },
-        "block_size": {
-          "description": "Writer block size in bytes.",
-          "type": "integer",
-          "minimum": 1,
-          "examples": [
-            67108864
-          ]
-        },
         "buffer_size": {
           "description": "Writer buffer size in bytes.",
           "type": "integer",
@@ -4371,7 +5444,8 @@
       "examples": [
         {
           "block_size": 67108864,
-          "validate_sorted": true
+          "desired_chunk_size": 2147483648,
+          "upload_replication_factor": 3
         }
       ]
     },
@@ -4433,6 +5507,632 @@
             "sort_order": "ascending"
           }
         ]
+      ]
+    },
+    "remoteDynamicStoreReaderConfig": {
+      "description": "Remote dynamic store reader configuration inherited by dynamic table readers.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "client_read_timeout": {
+          "description": "Client-side read timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "20s"
+          ]
+        },
+        "server_read_timeout": {
+          "description": "Server-side read timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "20s"
+          ]
+        },
+        "client_write_timeout": {
+          "description": "Client-side write timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "20s"
+          ]
+        },
+        "server_write_timeout": {
+          "description": "Server-side write timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "20s"
+          ]
+        },
+        "request_timeout": {
+          "description": "Overall dynamic store request timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "20m"
+          ]
+        },
+        "max_rows_per_server_read": {
+          "description": "Maximum rows returned by one server read.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1024
+          ]
+        },
+        "window_size": {
+          "description": "Streaming reader window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "streaming_subrequest_failure_probability": {
+          "description": "Testing probability for streaming subrequest failure.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "retry_count": {
+          "description": "Retry count for locating/reading remote stores.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            10
+          ]
+        },
+        "locate_request_backoff_time": {
+          "description": "Backoff between locate retries.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "10s"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "retry_count": 10,
+          "request_timeout": "20m"
+        }
+      ]
+    },
+    "hashTableChunkIndexWriterConfig": {
+      "description": "Hash-table chunk index writer configuration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "load_factor": {
+          "description": "Hash table load factor.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.75
+          ]
+        },
+        "rehash_trial_count": {
+          "description": "Number of rehash trials used to pick a seed.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            10
+          ]
+        },
+        "enable_group_reordering": {
+          "description": "Whether group reordering is enabled.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "max_block_size": {
+          "description": "Optional maximum hash-table block size.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1048576
+          ]
+        }
+      },
+      "examples": [
+        {
+          "load_factor": 0.75,
+          "rehash_trial_count": 10
+        }
+      ]
+    },
+    "chunkIndexesWriterConfig": {
+      "description": "Chunk indexes writer configuration inherited by table writers.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hash_table": {
+          "description": "Hash-table index writer configuration.",
+          "$ref": "#/$defs/hashTableChunkIndexWriterConfig",
+          "examples": [
+            {
+              "load_factor": 0.75
+            }
+          ]
+        }
+      },
+      "examples": [
+        {
+          "hash_table": {
+            "load_factor": 0.75
+          }
+        }
+      ]
+    },
+    "slimVersionedWriterConfig": {
+      "description": "Slim versioned chunk writer configuration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "top_value_quantile": {
+          "description": "Top-value quantile used by slim versioned writer.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.99
+          ]
+        },
+        "enable_per_value_dictionary_encoding": {
+          "description": "Whether per-value dictionary encoding is enabled.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        }
+      },
+      "examples": [
+        {
+          "top_value_quantile": 0.99
+        }
+      ]
+    },
+    "keyFilterWriterConfig": {
+      "description": "Key filter writer configuration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "description": "Whether the filter is enabled.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "block_size": {
+          "description": "Filter block size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            65536
+          ]
+        },
+        "trial_count": {
+          "description": "Number of trials when building the filter.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            10
+          ]
+        },
+        "bits_per_key": {
+          "description": "Bits per key in the filter.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            8
+          ]
+        },
+        "false_positive_rate": {
+          "description": "Target false-positive rate.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.01
+          ]
+        }
+      },
+      "examples": [
+        {
+          "enable": true,
+          "bits_per_key": 8
+        }
+      ]
+    },
+    "keyPrefixFilterWriterConfig": {
+      "description": "Key-prefix filter writer configuration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "description": "Whether the filter is enabled.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "block_size": {
+          "description": "Filter block size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            65536
+          ]
+        },
+        "trial_count": {
+          "description": "Number of trials when building the filter.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            10
+          ]
+        },
+        "bits_per_key": {
+          "description": "Bits per key in the filter.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            8
+          ]
+        },
+        "false_positive_rate": {
+          "description": "Target false-positive rate.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.01
+          ]
+        },
+        "prefix_lengths": {
+          "description": "Key prefix lengths for which filters are produced.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "examples": [
+            [
+              1,
+              2
+            ]
+          ]
+        }
+      },
+      "examples": [
+        {
+          "enable": true,
+          "prefix_lengths": [
+            1
+          ]
+        }
+      ]
+    },
+    "jobIOTestingOptions": {
+      "description": "Testing-only job I/O options.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "pipe_delay": {
+          "description": "Artificial delay in job proxy pipes.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "100ms"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "pipe_delay": "100ms"
+        }
+      ]
+    },
+    "fileWriterConfig": {
+      "description": "File writer configuration used by job error-file writer; includes fields inherited from multi-chunk, replication, erasure, block-reorderer, workload, and file chunk writer configs.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "properties": {
+        "block_size": {
+          "description": "File writer block size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "desired_chunk_size": {
+          "description": "Desired chunk size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            2147483648
+          ]
+        },
+        "desired_chunk_weight": {
+          "description": "Desired chunk weight in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            107374182400
+          ]
+        },
+        "max_meta_size": {
+          "description": "Maximum chunk metadata size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            31457280
+          ]
+        },
+        "testing_delay_before_chunk_close": {
+          "description": "Testing delay before closing a chunk.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "0s"
+          ]
+        },
+        "send_window_size": {
+          "description": "Writer send window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "group_size": {
+          "description": "Writer group size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "node_channel": {
+          "description": "RPC channel configuration for writer node connections.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "retry_attempts": 100
+            }
+          ]
+        },
+        "node_rpc_timeout": {
+          "description": "Timeout for writer node RPCs.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "15s"
+          ]
+        },
+        "probe_put_blocks_timeout": {
+          "description": "Timeout for probe put-blocks RPC.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "5s"
+          ]
+        },
+        "upload_replication_factor": {
+          "description": "Upload replication factor.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            3
+          ]
+        },
+        "ban_failed_nodes": {
+          "description": "Ban nodes with failed writes.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "min_upload_replication_factor": {
+          "description": "Minimum upload replication factor.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "direct_upload_node_count": {
+          "description": "Direct upload node count.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            2
+          ]
+        },
+        "prefer_local_host": {
+          "description": "Prefer local host for write targets.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "node_ping_period": {
+          "description": "Writer node ping period.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "10s"
+          ]
+        },
+        "populate_cache": {
+          "description": "Populate caches after writing.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "sync_on_close": {
+          "description": "Synchronize chunks on close.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_direct_io": {
+          "description": "Use direct I/O for writes.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_early_finish": {
+          "description": "Enable early finish for chunk writes.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "allocate_write_targets_backoff_time": {
+          "description": "Backoff between write-target allocation attempts.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "1s"
+          ]
+        },
+        "allocate_write_targets_retry_count": {
+          "description": "Retry count for write-target allocation.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            3
+          ]
+        },
+        "testing_delay": {
+          "description": "Testing delay in writer.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "0s"
+          ]
+        },
+        "enable_local_throttling": {
+          "description": "Enable local writer throttling.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_probe_put_blocks": {
+          "description": "Use probe put-blocks requests.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "preallocate_disk_space": {
+          "description": "Preallocate disk space for writes.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_erasure_target_node_reallocation": {
+          "description": "Enable erasure target node reallocation.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "erasure_window_size": {
+          "description": "Erasure writer window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            8388608
+          ]
+        },
+        "writer_window_size": {
+          "description": "Writer window size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "writer_group_size": {
+          "description": "Writer group size for erasure writes in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16777216
+          ]
+        },
+        "desired_segment_part_size": {
+          "description": "Desired segment part size in bytes.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "erasure_store_original_block_checksums": {
+          "description": "Store original block checksums for erasure chunks.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_striped_erasure": {
+          "description": "Enable striped erasure.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "erasure_stripe_size": {
+          "description": "Erasure stripe size.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "use_effective_erasure_codecs": {
+          "description": "Use effective erasure codecs.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_block_reordering": {
+          "description": "Enable block reordering.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "shuffle_blocks": {
+          "description": "Shuffle blocks before writing.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "workload_descriptor": {
+          "description": "Workload descriptor for writer scheduling and throttling.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "category": "user_batch"
+            }
+          ]
+        }
+      },
+      "examples": [
+        {
+          "block_size": 16777216,
+          "upload_replication_factor": 3
+        }
       ]
     }
   },
