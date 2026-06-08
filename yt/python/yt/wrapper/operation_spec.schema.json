@@ -46,10 +46,7 @@
     },
     "resource_limits": {
       "description": "Aggregate resource limits for all jobs of this operation, for example user_slots, cpu, memory, gpu, or network.",
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ysonNode"
-      },
+      "$ref": "#/$defs/jobResources",
       "examples": [
         {
           "user_slots": 20,
@@ -660,9 +657,9 @@
       ]
     },
     "partition_data_size": {
-      "description": "Approximate data size per partition in bytes.",
+      "description": "Alias for partition_data_weight.",
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "examples": [
         1073741824
       ]
@@ -676,9 +673,9 @@
       ]
     },
     "data_size_per_map_job": {
-      "description": "Approximate input data size per map job in bytes.",
+      "description": "Alias for data_weight_per_map_job. Approximate input data weight per map job in bytes.",
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "examples": [
         268435456
       ]
@@ -757,17 +754,17 @@
       ]
     },
     "data_size_per_sort_job": {
-      "description": "Approximate input data size per sort job in bytes.",
+      "description": "Alias for data_weight_per_sort_job. Approximate input data weight per sort job in bytes.",
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "examples": [
-        536870912
+        2147483648
       ]
     },
     "data_size_per_reduce_job": {
-      "description": "Approximate input data size per reduce job in bytes.",
+      "description": "Alias for data_weight_per_reduce_job. Approximate input data weight per reduce job in bytes.",
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "examples": [
         536870912
       ]
@@ -825,9 +822,9 @@
       ]
     },
     "data_size_per_partition_job": {
-      "description": "Approximate input data size per partition job in bytes.",
+      "description": "Alias for data_weight_per_partition_job. Approximate input data weight per partition job in bytes.",
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "examples": [
         536870912
       ]
@@ -841,9 +838,9 @@
       ]
     },
     "data_size_per_sorted_merge_job": {
-      "description": "Approximate input data size per sorted merge job in bytes.",
+      "description": "Alias for data_weight_per_sorted_merge_job. Approximate input data weight per sorted merge job in bytes.",
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "examples": [
         536870912
       ]
@@ -900,6 +897,1414 @@
           "schema",
           "optimize_for"
         ]
+      ]
+    },
+    "intermediate_direct_upload_node_count": {
+      "description": "Direct upload node count for intermediate data.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        5
+      ]
+    },
+    "min_intermediate_data_replication_factor": {
+      "description": "Minimum intermediate data replication factor.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1
+      ]
+    },
+    "intermediate_min_data_replication_factor": {
+      "description": "Alias for min_intermediate_data_replication_factor.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1
+      ]
+    },
+    "intermediate_data_sync_on_close": {
+      "description": "Whether intermediate data is synchronously closed.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "fast_intermediate_medium_table_writer_config": {
+      "description": "Fast intermediate medium writer configuration.",
+      "$ref": "#/$defs/fastIntermediateMediumTableWriterConfig",
+      "examples": [
+        {
+          "upload_replication_factor": 3
+        }
+      ]
+    },
+    "fast_intermediate_medium_limit": {
+      "description": "Limit for data written to fast intermediate medium in bytes.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        10737418240
+      ]
+    },
+    "debug_artifacts_account": {
+      "description": "Account for debug artifacts such as stderr and input context; alias: job_node_account.",
+      "type": "string",
+      "examples": [
+        "tmp"
+      ]
+    },
+    "max_primary_data_weight_per_job": {
+      "description": "Hard cap on primary input data weight per job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        214748364800
+      ]
+    },
+    "max_compressed_data_size_per_job": {
+      "description": "Hard cap on compressed input data size per job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        214748364800
+      ]
+    },
+    "max_primary_compressed_data_size_per_job": {
+      "description": "Hard cap on primary compressed input data size per job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        214748364800
+      ]
+    },
+    "job_fails_tolerance": {
+      "description": "Detailed job failure tolerance settings.",
+      "$ref": "#/$defs/jobFailsTolerance",
+      "examples": [
+        {
+          "max_fails_unknown_exit_code": 1
+        }
+      ]
+    },
+    "max_core_info_count": {
+      "description": "Maximum number of saved core infos.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        10
+      ]
+    },
+    "job_proxy_memory_overcommit_limit": {
+      "description": "Job proxy memory overcommit limit in bytes.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        1073741824
+      ]
+    },
+    "job_proxy_ref_counted_tracker_log_period": {
+      "description": "Logging period for job proxy ref-counted tracker.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "5s"
+      ]
+    },
+    "time_limit_job_fail_timeout": {
+      "description": "Timeout for failing jobs when operation time limit is hit.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "2m"
+      ]
+    },
+    "aco_name": {
+      "description": "Access control object name used for operation permissions.",
+      "type": "string",
+      "examples": [
+        "operation-aco"
+      ]
+    },
+    "add_authenticated_user_to_acl": {
+      "description": "Whether to add the authenticated user to the operation ACL.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "enable_secure_vault_variables_in_job_shell": {
+      "description": "Expose secure vault variables in job shell.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "issue_temporary_token": {
+      "description": "Whether to issue a temporary token for jobs.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "temporary_token_environment_variable_name": {
+      "description": "Environment variable name for the temporary token.",
+      "type": "string",
+      "examples": [
+        "YT_TOKEN"
+      ]
+    },
+    "suspend_operation_after_materialization": {
+      "description": "Suspend the operation after materialization.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "min_locality_input_data_weight": {
+      "description": "Minimum input data weight for locality-aware scheduling.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        1073741824
+      ]
+    },
+    "job_proxy_memory_digest": {
+      "description": "Log digest config for job proxy memory estimation.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {
+          "default_value": 1.0,
+          "lower_bound": 0.5,
+          "upper_bound": 2.0
+        }
+      ]
+    },
+    "job_proxy_resource_overdraft_memory_multiplier": {
+      "description": "Memory multiplier for job proxy resource overdraft.",
+      "type": "number",
+      "minimum": 1,
+      "maximum": 10,
+      "examples": [
+        2.0
+      ]
+    },
+    "slice_erasure_chunks_by_parts": {
+      "description": "Whether erasure chunks are sliced by parts.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "enable_legacy_live_preview": {
+      "description": "Whether legacy live preview is enabled.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "use_chunk_slice_statistics": {
+      "description": "Whether chunk slice statistics are used.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "enable_read_size_estimation": {
+      "description": "Whether read size estimation is enabled.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "ban_nodes_with_failed_jobs": {
+      "description": "Whether nodes with failed jobs are banned for this operation.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "ignore_job_failures_at_banned_nodes": {
+      "description": "Ignore failures observed at banned nodes.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "fail_on_all_nodes_banned": {
+      "description": "Fail operation if all nodes become banned.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "omit_inaccessible_rows": {
+      "description": "Omit inaccessible rows instead of failing.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "additional_security_tags": {
+      "description": "Additional security tags attached to operation jobs.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "pci",
+          "prod"
+        ]
+      ]
+    },
+    "waiting_job_timeout": {
+      "description": "Timeout for jobs waiting for resources.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "1m"
+      ]
+    },
+    "atomicity": {
+      "description": "Output transaction atomicity mode.",
+      "type": "string",
+      "examples": [
+        "full"
+      ]
+    },
+    "lock_output_dynamic_tables": {
+      "description": "Whether output dynamic tables are locked.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "allow_output_dynamic_tables": {
+      "description": "Whether output dynamic tables are allowed.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "enable_write_buffer_size_estimation": {
+      "description": "Whether write buffer size estimation is enabled.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "job_cpu_monitor": {
+      "description": "Job CPU monitor configuration.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "enable_dynamic_store_read": {
+      "description": "Whether dynamic store reads are enabled.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "controller_agent_tag": {
+      "description": "Controller agent tag requested for this operation.",
+      "type": "string",
+      "examples": [
+        "default"
+      ]
+    },
+    "job_shells": {
+      "description": "Job shell configuration map.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "job_splitter": {
+      "description": "Job splitter configuration.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "experiment_overrides": {
+      "description": "Experiment overrides applied to this operation.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "enable_trace_logging": {
+      "description": "Whether trace logging is enabled for this operation.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "input_table_columnar_statistics": {
+      "description": "Columnar statistics config for input tables.",
+      "$ref": "#/$defs/columnarStatisticsConfig",
+      "examples": [
+        {
+          "enabled": true
+        }
+      ]
+    },
+    "user_file_columnar_statistics": {
+      "description": "Columnar statistics config for user files.",
+      "$ref": "#/$defs/columnarStatisticsConfig",
+      "examples": [
+        {
+          "enabled": false
+        }
+      ]
+    },
+    "force_job_proxy_tracing": {
+      "description": "Force tracing in job proxy.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "suspend_on_job_failure": {
+      "description": "Suspend operation when a job fails.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "job_testing_options": {
+      "description": "Testing-only job options.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "read_via_exec_node": {
+      "description": "Read data via exec node.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "enable_codegen_comparator": {
+      "description": "Whether generated comparators are enabled.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "enable_virtual_sandbox": {
+      "description": "Whether virtual sandbox is enabled.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "enable_root_volume_disk_quota": {
+      "description": "Whether root volume disk quota is enabled.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "sanity_check_delay": {
+      "description": "Delay before operation sanity checks.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "30s"
+      ]
+    },
+    "profilers": {
+      "description": "Job profiler specs.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/jobProfilerSpec"
+      },
+      "examples": [
+        [
+          {
+            "binary": "user_job",
+            "type": "cpu"
+          }
+        ]
+      ]
+    },
+    "default_base_layer_path": {
+      "description": "Default base layer path for user jobs.",
+      "$ref": "#/$defs/ypath",
+      "examples": [
+        "//porto_layers/base"
+      ]
+    },
+    "job_experiment": {
+      "description": "Job experiment configuration.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "adjust_dynamic_table_data_slices": {
+      "description": "Adjust dynamic table data slices.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "batch_row_count": {
+      "description": "Row count per batch for supported operations.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1000
+      ]
+    },
+    "bypass_hunk_remote_copy_prohibition": {
+      "description": "Bypass hunk remote-copy prohibition.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "cuda_profiler_layer_path": {
+      "description": "CUDA profiler layer path.",
+      "$ref": "#/$defs/ypath",
+      "examples": [
+        "//layers/cuda-profiler"
+      ]
+    },
+    "cuda_profiler_environment_variables": {
+      "description": "CUDA profiler environment variables.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {
+          "LD_LIBRARY_PATH": "/opt/cuda/lib64"
+        }
+      ]
+    },
+    "cuda_profiler_environment": {
+      "description": "CUDA profiler environment entries.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/cudaProfilerEnvironment"
+      },
+      "examples": [
+        [
+          {
+            "path_environment_variable_name": "LD_LIBRARY_PATH",
+            "path_environment_variable_value": "/opt/cuda/lib64"
+          }
+        ]
+      ]
+    },
+    "ignore_yt_variables_in_shell_environment": {
+      "description": "Ignore YT_* variables in job shell environment.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "allow_offloading": {
+      "description": "Whether operation offloading is allowed.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "require_specified_pools_existence": {
+      "description": "Require specified pools to exist.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "use_cluster_throttlers": {
+      "description": "Whether cluster throttlers are used.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "enable_multiple_jobs_in_allocation": {
+      "description": "Enable multiple jobs in a single allocation.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "update_secondary_index": {
+      "description": "Whether secondary indexes are updated.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "scheduling_options_per_pool_tree": {
+      "description": "Per-pool-tree scheduling options.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/extendedSchedulableConfig"
+      },
+      "examples": [
+        {
+          "default": {
+            "pool": "research"
+          }
+        }
+      ]
+    },
+    "fair_share_options_per_pool_tree": {
+      "description": "Alias for scheduling_options_per_pool_tree.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/extendedSchedulableConfig"
+      },
+      "examples": [
+        {
+          "default": {
+            "pool": "research"
+          }
+        }
+      ]
+    },
+    "max_concurrent_schedule_allocation_calls": {
+      "description": "Limit on concurrent controller ScheduleAllocation calls.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        10
+      ]
+    },
+    "max_concurrent_schedule_job_calls": {
+      "description": "Deprecated alias for max_concurrent_schedule_allocation_calls.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        10
+      ]
+    },
+    "max_concurrent_controller_schedule_job_calls": {
+      "description": "Deprecated alias for max_concurrent_schedule_allocation_calls.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        10
+      ]
+    },
+    "schedule_in_single_tree": {
+      "description": "Schedule jobs in a single selected regular pool tree.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "consider_guarantees_for_single_tree": {
+      "description": "Consider guarantees when selecting a single tree.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "use_default_tentative_pool_trees": {
+      "description": "Use default tentative pool trees from scheduler config.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "tentative_tree_eligibility": {
+      "description": "Tentative tree eligibility config.",
+      "$ref": "#/$defs/tentativeTreeEligibility",
+      "examples": [
+        {
+          "sample_job_count": 10
+        }
+      ]
+    },
+    "update_preemptible_allocations_list_logging_period": {
+      "description": "Logging period for preemptible allocations list updates.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1000
+      ]
+    },
+    "update_preemptible_jobs_list_logging_period": {
+      "description": "Alias for update_preemptible_allocations_list_logging_period.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1000
+      ]
+    },
+    "custom_profiling_tag": {
+      "description": "Custom profiling tag for scheduler metrics.",
+      "type": "string",
+      "examples": [
+        "daily"
+      ]
+    },
+    "max_unpreemptible_allocation_count": {
+      "description": "Maximum unpreemptible running allocation count.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        100
+      ]
+    },
+    "max_unpreemptible_job_count": {
+      "description": "Deprecated alias for max_unpreemptible_allocation_count.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        100
+      ]
+    },
+    "max_probing_job_count_per_task": {
+      "description": "Maximum probing jobs per task.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        10
+      ]
+    },
+    "probing_ratio": {
+      "description": "Ratio of probing jobs.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "examples": [
+        0.01
+      ]
+    },
+    "probing_pool_tree": {
+      "description": "Pool tree for probing jobs.",
+      "type": "string",
+      "examples": [
+        "default"
+      ]
+    },
+    "preemption_mode": {
+      "description": "Operation preemption mode.",
+      "type": "string",
+      "examples": [
+        "normal"
+      ]
+    },
+    "scheduling_segment": {
+      "description": "Scheduling segment requested for the operation.",
+      "type": "string",
+      "examples": [
+        "default"
+      ]
+    },
+    "scheduling_modules": {
+      "description": "Scheduling modules/segments/data centers requested for the operation.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "default"
+        ]
+      ]
+    },
+    "scheduling_segment_modules": {
+      "description": "Alias for scheduling_modules.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "default"
+        ]
+      ]
+    },
+    "scheduling_segment_data_centers": {
+      "description": "Alias for scheduling_modules.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "sas"
+        ]
+      ]
+    },
+    "enable_limiting_ancestor_check": {
+      "description": "Enable limiting ancestor check.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "is_gang": {
+      "description": "Whether the operation is treated as gang-scheduled.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "testing": {
+      "description": "Testing-only operation options.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "erase_trees_with_pool_limit_violations": {
+      "description": "Erase trees with pool limit violations from scheduling choices.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "apply_specified_resource_limits_to_demand": {
+      "description": "Apply specified resource limits to demand.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "allow_idle_cpu_policy": {
+      "description": "Allow jobs to run with idle CPU policy.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "strong_guarantee_resources": {
+      "description": "Strong resource guarantees for the operation.",
+      "$ref": "#/$defs/jobResources",
+      "examples": [
+        {
+          "cpu": 8
+        }
+      ]
+    },
+    "non_preemptible_resource_usage_threshold": {
+      "description": "Non-preemptible resource usage threshold.",
+      "$ref": "#/$defs/jobResources",
+      "examples": [
+        {
+          "cpu": 4
+        }
+      ]
+    },
+    "fair_share_starvation_timeout": {
+      "description": "Fair-share starvation timeout.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "1m"
+      ]
+    },
+    "fair_share_preemption_timeout": {
+      "description": "Alias for fair_share_starvation_timeout.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "1m"
+      ]
+    },
+    "fair_share_starvation_tolerance": {
+      "description": "Fair-share starvation tolerance.",
+      "type": "number",
+      "minimum": 0,
+      "examples": [
+        0.1
+      ]
+    },
+    "compressed_data_size_per_job": {
+      "description": "Approximate compressed input data size per job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        268435456
+      ]
+    },
+    "max_job_count": {
+      "description": "Hard limit on job count.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1000
+      ]
+    },
+    "max_data_slices_per_job": {
+      "description": "Maximum data slices per job.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1000
+      ]
+    },
+    "force_job_size_adjuster": {
+      "description": "Force job size adjuster.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "force_allow_job_interruption": {
+      "description": "Force allowing job interruption.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "locality_timeout": {
+      "description": "Locality timeout for simple operation jobs.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "5s"
+      ]
+    },
+    "strict_data_weight_per_job_verification": {
+      "description": "Strictly verify data_weight_per_job.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "input_paths": {
+      "description": "Alias for input_table_paths.",
+      "$ref": "#/$defs/ypathList",
+      "examples": [
+        [
+          "//tmp/input"
+        ]
+      ]
+    },
+    "output_paths": {
+      "description": "Alias for output_table_paths or output_table_path depending on operation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ypathList"
+        },
+        {
+          "$ref": "#/$defs/ypath"
+        }
+      ],
+      "examples": [
+        [
+          "//tmp/output"
+        ],
+        "//tmp/output"
+      ]
+    },
+    "output_path": {
+      "description": "Alias for output_table_path.",
+      "$ref": "#/$defs/ypath",
+      "examples": [
+        "//tmp/output"
+      ]
+    },
+    "single_chunk_teleport_strategy": {
+      "description": "Strategy for teleporting a single chunk in unordered merge.",
+      "type": "string",
+      "examples": [
+        "enabled"
+      ]
+    },
+    "use_new_sorted_pool": {
+      "description": "Use the new sorted pool implementation.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "min_maniac_data_weight": {
+      "description": "Minimum data weight for maniac sorted-merge behavior.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        1073741824
+      ]
+    },
+    "validate_key_column_types": {
+      "description": "Validate key column types in reduce.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "slice_foreign_chunks": {
+      "description": "Slice foreign chunks in reduce/join-reduce.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "foreign_table_lookup_keys_threshold": {
+      "description": "Foreign-table lookup key-count threshold.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        100000
+      ]
+    },
+    "foreign_table_lookup_data_weight_threshold": {
+      "description": "Foreign-table lookup data-weight threshold.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        1073741824
+      ]
+    },
+    "max_partition_factor": {
+      "description": "Maximum partition factor for sort/map-reduce.",
+      "type": "number",
+      "exclusiveMinimum": 1,
+      "examples": [
+        10
+      ]
+    },
+    "partition_data_weight": {
+      "description": "Approximate partition data weight in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1073741824
+      ]
+    },
+    "partition_data_weight_for_merging": {
+      "description": "Partition data weight used when final partition merging is enabled.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1073741824
+      ]
+    },
+    "data_weight_per_intermediate_partition_job": {
+      "description": "Data weight per intermediate partition job.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        2147483648
+      ]
+    },
+    "max_chunk_slice_per_shuffle_job": {
+      "description": "Maximum chunk slices per shuffle job.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        8000
+      ]
+    },
+    "max_chunk_slice_per_intermediate_partition_job": {
+      "description": "Maximum chunk slices per intermediate partition job.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        8000
+      ]
+    },
+    "shuffle_start_threshold": {
+      "description": "Threshold for starting shuffle jobs.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "examples": [
+        0.75
+      ]
+    },
+    "merge_start_threshold": {
+      "description": "Threshold for starting merge jobs.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "examples": [
+        0.9
+      ]
+    },
+    "shuffle_network_limit": {
+      "description": "Shuffle network limit.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        0
+      ]
+    },
+    "max_shuffle_data_slice_count": {
+      "description": "Maximum total data slices in shuffle pool.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        10000000
+      ]
+    },
+    "max_shuffle_job_count": {
+      "description": "Maximum number of shuffle jobs.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        200000
+      ]
+    },
+    "max_merge_data_slice_count": {
+      "description": "Maximum total data slices in merge pool.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        10000000
+      ]
+    },
+    "enable_partitioned_data_balancing": {
+      "description": "Balance partition jobs by uncompressed input data size.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "enable_intermediate_output_recalculation": {
+      "description": "Regenerate unavailable intermediate chunks by restarting jobs.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "partition_size_factor": {
+      "description": "Partition size factor.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [
+        1.0
+      ]
+    },
+    "enable_final_partitions_merging": {
+      "description": "Enable final merging of partitions.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "compressed_data_size_per_partition_job": {
+      "description": "Compressed input data size per partition job.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        536870912
+      ]
+    },
+    "simple_sort_locality_timeout": {
+      "description": "Locality timeout for simple sort jobs.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "5s"
+      ]
+    },
+    "simple_merge_locality_timeout": {
+      "description": "Locality timeout for simple merge jobs.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "5s"
+      ]
+    },
+    "partition_locality_timeout": {
+      "description": "Locality timeout for partition jobs.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "5s"
+      ]
+    },
+    "merge_locality_timeout": {
+      "description": "Locality timeout for merge jobs.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "1m"
+      ]
+    },
+    "max_input_data_weight": {
+      "description": "Hard limit on allowed input data weight for sort.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        5629499534213120
+      ]
+    },
+    "compressed_data_size_per_map_job": {
+      "description": "Compressed input data size per map job.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        268435456
+      ]
+    },
+    "map_locality_timeout": {
+      "description": "Locality timeout for map phase.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "5s"
+      ]
+    },
+    "reduce_locality_timeout": {
+      "description": "Locality timeout for reduce phase.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "1m"
+      ]
+    },
+    "enable_table_index_if_has_trivial_mapper": {
+      "description": "Enable table indexes for trivial mapper in map-reduce.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "disable_sorted_input_in_reducer": {
+      "description": "Disable sorted input in reducer.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "compute_pivot_keys_from_samples": {
+      "description": "Compute pivot keys from samples for trivial mapper.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "networks": {
+      "description": "Network preference list for remote_copy.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "net-a",
+          "net-b"
+        ]
+      ]
+    },
+    "network_names": {
+      "description": "Alias for networks.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "net-a"
+        ]
+      ]
+    },
+    "force_copy_system_attributes": {
+      "description": "Force copying system attributes in remote_copy.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "concurrency": {
+      "description": "Number of chunks copied concurrently in remote_copy.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        4
+      ]
+    },
+    "block_buffer_size": {
+      "description": "Block buffer size for remote_copy in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        67108864
+      ]
+    },
+    "delay_in_copy_chunk": {
+      "description": "Testing delay in copy chunk.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "0s"
+      ]
+    },
+    "erasure_chunk_repair_delay": {
+      "description": "Delay before repairing erasure chunks during remote_copy.",
+      "$ref": "#/$defs/duration",
+      "examples": [
+        "15m"
+      ]
+    },
+    "repair_erasure_chunks": {
+      "description": "Repair erasure chunks during remote_copy if parts are missing.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "use_remote_master_caches": {
+      "description": "Use remote master caches in remote_copy jobs.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "allow_cluster_connection": {
+      "description": "Allow cluster_connection in remote_copy.",
+      "type": "boolean",
+      "examples": [
+        true
+      ]
+    },
+    "fail_on_job_restart": {
+      "description": "Fail the operation if a job is restarted.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "input_schema": {
+      "description": "Schema of rows produced by input_query.",
+      "$ref": "#/$defs/tableSchema",
+      "examples": [
+        [
+          {
+            "name": "key",
+            "type": "string"
+          }
+        ]
+      ]
+    },
+    "input_query_filter_options": {
+      "description": "Options for input-query filtering.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "input_query_options": {
+      "description": "Input query execution options.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "examples": [
+        {}
+      ]
+    },
+    "stderr_table_writer": {
+      "description": "Writer configuration for stderr table.",
+      "$ref": "#/$defs/tableWriterConfig",
+      "examples": [
+        {
+          "block_size": 67108864
+        }
+      ]
+    },
+    "stderr_table_writer_config": {
+      "description": "Alias for stderr_table_writer.",
+      "$ref": "#/$defs/tableWriterConfig",
+      "examples": [
+        {
+          "block_size": 67108864
+        }
+      ]
+    },
+    "core_table_writer": {
+      "description": "Writer configuration for core table.",
+      "$ref": "#/$defs/tableWriterConfig",
+      "examples": [
+        {
+          "block_size": 67108864
+        }
+      ]
+    },
+    "core_table_writer_config": {
+      "description": "Alias for core_table_writer.",
+      "$ref": "#/$defs/tableWriterConfig",
+      "examples": [
+        {
+          "block_size": 67108864
+        }
+      ]
+    },
+    "enable_cuda_gpu_core_dump": {
+      "description": "Enable CUDA GPU core dumps.",
+      "type": "boolean",
+      "examples": [
+        false
+      ]
+    },
+    "data_weight_per_sort_job": {
+      "description": "Approximate input data weight per sort job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        2147483648
+      ]
+    },
+    "data_weight_per_partition_job": {
+      "description": "Approximate input data weight per partition job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        536870912
+      ]
+    },
+    "data_weight_per_sorted_merge_job": {
+      "description": "Approximate input data weight per sorted merge job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        536870912
+      ]
+    },
+    "data_weight_per_map_job": {
+      "description": "Approximate input data weight per map job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        268435456
+      ]
+    },
+    "data_weight_per_reduce_job": {
+      "description": "Approximate input data weight per reduce job in bytes.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        536870912
+      ]
+    },
+    "min_share_resources": {
+      "description": "Alias for strong_guarantee_resources.",
+      "$ref": "#/$defs/jobResources",
+      "examples": [
+        {
+          "cpu": 8
+        }
       ]
     }
   },
@@ -1001,13 +2406,30 @@
       ]
     },
     "ypath": {
-      "description": "Cypress path or rich YPath. Plain paths are strings. Rich paths with attributes must use the attributed YSON wrapper.",
+      "description": "Cypress path or rich YPath. Plain paths are strings. Paths with attributes use the $value/$attributes wrapper with rich YPath attributes.",
       "anyOf": [
         {
           "type": "string"
         },
         {
-          "$ref": "#/$defs/attributedYsonNode"
+          "type": "object",
+          "required": [
+            "$value",
+            "$attributes"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "$value": {
+              "description": "Cypress path string.",
+              "type": "string",
+              "examples": [
+                "//tmp/table"
+              ]
+            },
+            "$attributes": {
+              "$ref": "#/$defs/richYPathAttributes"
+            }
+          }
         }
       ],
       "examples": [
@@ -1363,6 +2785,424 @@
               "account": "tmp"
             }
           ]
+        },
+        "task_title": {
+          "description": "Task title displayed for this user job.",
+          "type": "string",
+          "examples": [
+            "Map phase"
+          ]
+        },
+        "output_streams": {
+          "description": "Output stream descriptors.",
+          "type": "array",
+          "items": {
+            "description": "Output stream descriptor.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/ysonNode"
+            },
+            "examples": [
+              {
+                "table_index": 0
+              }
+            ]
+          },
+          "examples": [
+            [
+              {
+                "table_index": 0
+              }
+            ]
+          ]
+        },
+        "prepare_time_limit": {
+          "description": "Preparation time limit for the job.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "45m"
+          ]
+        },
+        "user_job_memory_digest_default_value": {
+          "description": "Default user-job memory digest value.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "examples": [
+            0.5
+          ]
+        },
+        "user_job_memory_digest_lower_bound": {
+          "description": "Lower bound for user-job memory digest.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "examples": [
+            0.05
+          ]
+        },
+        "ignore_memory_reserve_factor_less_than_one": {
+          "description": "Ignore memory reserve factor values less than one.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "user_job_resource_overdraft_memory_multiplier": {
+          "description": "User job overdraft memory multiplier.",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "examples": [
+            2.0
+          ]
+        },
+        "resource_overdraft_memory_reserve_multiplier": {
+          "description": "Alias for user_job_resource_overdraft_memory_multiplier.",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "examples": [
+            2.0
+          ]
+        },
+        "job_proxy_memory_digest": {
+          "description": "Log digest config for job proxy memory estimation.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "default_value": 1.0
+            }
+          ]
+        },
+        "job_proxy_resource_overdraft_memory_multiplier": {
+          "description": "Job proxy overdraft memory multiplier.",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "examples": [
+            2.0
+          ]
+        },
+        "include_memory_mapped_files": {
+          "description": "Include memory-mapped files in memory accounting.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "tmpfs_volumes": {
+          "description": "Deprecated tmpfs volume descriptors.",
+          "type": "array",
+          "items": {
+            "description": "Deprecated tmpfs volume descriptor.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/ysonNode"
+            },
+            "examples": [
+              {
+                "path": "tmpfs",
+                "size": 1073741824
+              }
+            ]
+          },
+          "examples": [
+            [
+              {
+                "path": "tmpfs",
+                "size": 1073741824
+              }
+            ]
+          ]
+        },
+        "deterministic": {
+          "description": "Whether job execution is marked deterministic.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_porto_memory_tracking": {
+          "description": "Use Porto memory tracking.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "force_core_dump": {
+          "description": "Force core dump generation.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "interruption_signal": {
+          "description": "Signal used to interrupt the job.",
+          "type": "string",
+          "examples": [
+            "SIGTERM"
+          ]
+        },
+        "signal_root_process_only": {
+          "description": "Send interruption signal only to the root process.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_gpu_layers": {
+          "description": "Enable GPU layers for the job.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "cuda_toolkit_version": {
+          "description": "CUDA toolkit version requested by the job.",
+          "type": "string",
+          "examples": [
+            "12.2"
+          ]
+        },
+        "enable_gpu_check": {
+          "description": "Run GPU checks for the job.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "collective_options": {
+          "description": "Collective communication options.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {}
+          ]
+        },
+        "job_speculation_timeout": {
+          "description": "User-job speculation timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "1m"
+          ]
+        },
+        "enable_porto": {
+          "description": "Enable Porto containerization for the job.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "fail_job_on_core_dump": {
+          "description": "Fail job when it produces a core dump.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "enable_fuse": {
+          "description": "Enable FUSE in the job sandbox.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "use_smaps_memory_tracker": {
+          "description": "Use smaps memory tracker.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "monitoring": {
+          "description": "User job monitoring configuration.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {}
+          ]
+        },
+        "system_layer_path": {
+          "description": "System layer path.",
+          "$ref": "#/$defs/ypath",
+          "examples": [
+            "//layers/system"
+          ]
+        },
+        "enable_debug_command_line_arguments": {
+          "description": "Enable debug command-line arguments for the job.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "profilers": {
+          "description": "Profilers enabled for this user job.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jobProfilerSpec"
+          },
+          "examples": [
+            [
+              {
+                "binary": "user_job",
+                "type": "cpu"
+              }
+            ]
+          ]
+        },
+        "enable_rpc_proxy_in_job_proxy": {
+          "description": "Enable RPC proxy inside job proxy.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_shuffle_service_in_job_proxy": {
+          "description": "Enable shuffle service inside job proxy.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "rpc_proxy_worker_thread_pool_size": {
+          "description": "RPC proxy worker thread pool size.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "start_queue_consumer_registration_manager": {
+          "description": "Start queue consumer registration manager.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "fail_on_job_restart": {
+          "description": "Fail operation if this job restarts.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "extra_environment": {
+          "description": "Extra environment variables.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {
+              "A": "B"
+            }
+          ]
+        },
+        "archive_ttl": {
+          "description": "TTL for job archives.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "7d"
+          ]
+        },
+        "close_stdout_if_unused": {
+          "description": "Close stdout if it is unused by outputs.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_fixed_user_id": {
+          "description": "Enable fixed user id inside the job.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "restrict_porto_place": {
+          "description": "Restrict Porto place.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "sidecars": {
+          "description": "Sidecar jobs keyed by sidecar name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/sidecarJobSpec"
+          },
+          "examples": [
+            {
+              "metrics": {
+                "command": "./metrics"
+              }
+            }
+          ]
+        },
+        "volumes": {
+          "description": "Job volume descriptors.",
+          "type": "array",
+          "items": {
+            "description": "Job volume descriptor.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/ysonNode"
+            },
+            "examples": [
+              {
+                "name": "cache"
+              }
+            ]
+          },
+          "examples": [
+            [
+              {
+                "name": "cache"
+              }
+            ]
+          ]
+        },
+        "job_volumes_mounts": {
+          "description": "Job volume mount descriptors.",
+          "type": "array",
+          "items": {
+            "description": "Job volume mount descriptor.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/ysonNode"
+            },
+            "examples": [
+              {
+                "volume": "cache",
+                "path": "/cache"
+              }
+            ]
+          },
+          "examples": [
+            [
+              {
+                "volume": "cache",
+                "path": "/cache"
+              }
+            ]
+          ]
+        },
+        "exec_time_limit": {
+          "description": "Alias for job_time_limit.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "10m"
+          ]
         }
       },
       "examples": [
@@ -1394,6 +3234,70 @@
               "examples": [
                 3
               ]
+            },
+            "job_io": {
+              "description": "I/O settings for this vanilla task.",
+              "$ref": "#/$defs/jobIO",
+              "examples": [
+                {
+                  "table_reader": {
+                    "max_buffer_size": 1048576
+                  }
+                }
+              ]
+            },
+            "output_table_paths": {
+              "description": "Output table paths for this vanilla task.",
+              "$ref": "#/$defs/ypathList",
+              "examples": [
+                [
+                  "//tmp/out"
+                ]
+              ]
+            },
+            "output_paths": {
+              "description": "Alias for output_table_paths.",
+              "$ref": "#/$defs/ypathList",
+              "examples": [
+                [
+                  "//tmp/out"
+                ]
+              ]
+            },
+            "restart_exit_code": {
+              "description": "Exit code that requests a task restart.",
+              "type": "integer",
+              "minimum": 0,
+              "examples": [
+                42
+              ]
+            },
+            "restart_completed_jobs": {
+              "description": "Whether completed jobs are restarted when the task restarts.",
+              "type": "boolean",
+              "examples": [
+                false
+              ]
+            },
+            "gang_options": {
+              "description": "Gang scheduling options for this task.",
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/ysonNode"
+              },
+              "examples": [
+                {}
+              ]
+            },
+            "gang_manager": {
+              "description": "Alias for gang_options.",
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/ysonNode"
+              },
+              "examples": [
+                {}
+              ]
             }
           }
         }
@@ -1413,7 +3317,7 @@
       "properties": {
         "table_reader": {
           "description": "Table reader configuration for job input.",
-          "$ref": "#/$defs/ysonNode",
+          "$ref": "#/$defs/tableReaderConfig",
           "examples": [
             {
               "max_buffer_size": 1048576
@@ -1422,7 +3326,7 @@
         },
         "table_writer": {
           "description": "Table writer configuration for job output.",
-          "$ref": "#/$defs/ysonNode",
+          "$ref": "#/$defs/tableWriterConfig",
           "examples": [
             {
               "block_size": 67108864
@@ -1463,6 +3367,65 @@
           "examples": [
             4
           ]
+        },
+        "dynamic_table_writer": {
+          "description": "Dynamic table writer configuration.",
+          "$ref": "#/$defs/tableWriterConfig",
+          "examples": [
+            {
+              "flush_period": "5s"
+            }
+          ]
+        },
+        "use_adaptive_buffer_row_count": {
+          "description": "Whether adaptive job-proxy row buffering is enabled.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "adaptive_row_count_upper_bound": {
+          "description": "Upper bound for adaptive row buffering.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            40000
+          ]
+        },
+        "pipe_capacity": {
+          "description": "Job proxy pipe capacity.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            4096
+          ]
+        },
+        "use_delivery_fenced_pipe_writer": {
+          "description": "Whether delivery-fenced pipe writer is used.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "block_cache": {
+          "description": "Block cache settings for job I/O.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {}
+          ]
+        },
+        "testing_options": {
+          "description": "Testing-only job I/O options.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {}
+          ]
         }
       },
       "examples": [
@@ -1474,6 +3437,1002 @@
             "block_size": 67108864
           }
         }
+      ]
+    },
+    "duration": {
+      "description": "YTsaurus duration value. In operation specs this is commonly supplied as milliseconds, but string forms accepted by YSON duration parsers are allowed for compatibility.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "examples": [
+        60000,
+        "5s",
+        "1m"
+      ]
+    },
+    "jobResources": {
+      "description": "Scheduler job resources object used for resource limits and guarantees.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "user_slots": {
+          "description": "User slot limit or guarantee.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            10
+          ]
+        },
+        "cpu": {
+          "description": "CPU limit or guarantee.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            32
+          ]
+        },
+        "network": {
+          "description": "Network resource limit or guarantee.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            1000000000
+          ]
+        },
+        "memory": {
+          "description": "Memory limit or guarantee in bytes.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            107374182400
+          ]
+        },
+        "gpu": {
+          "description": "GPU limit or guarantee.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            1
+          ]
+        }
+      },
+      "examples": [
+        {
+          "user_slots": 10,
+          "cpu": 32,
+          "memory": 107374182400
+        }
+      ]
+    },
+    "extendedSchedulableConfig": {
+      "description": "Per-pool-tree scheduling override.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "pool": {
+          "description": "Pool override for this pool tree.",
+          "type": "string",
+          "examples": [
+            "research"
+          ]
+        },
+        "weight": {
+          "description": "Weight override for this pool tree.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "examples": [
+            1.0
+          ]
+        },
+        "resource_limits": {
+          "description": "Resource limits for this tree.",
+          "$ref": "#/$defs/jobResources",
+          "examples": [
+            {
+              "cpu": 16
+            }
+          ]
+        },
+        "strong_guarantee_resources": {
+          "description": "Strong-guarantee resources for this tree.",
+          "$ref": "#/$defs/jobResources",
+          "examples": [
+            {
+              "cpu": 8,
+              "memory": 34359738368
+            }
+          ]
+        },
+        "scheduling_tag_filter": {
+          "description": "Node tag filter for this tree.",
+          "type": "string",
+          "examples": [
+            "ssd & !testing"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "pool": "research",
+          "weight": 2,
+          "resource_limits": {
+            "cpu": 16
+          }
+        }
+      ]
+    },
+    "tentativeTreeEligibility": {
+      "description": "Configuration for deciding whether jobs remain eligible for tentative pool trees.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sample_job_count": {
+          "description": "Number of finished jobs sampled before more jobs are started in a tentative tree.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            10
+          ]
+        },
+        "max_tentative_job_duration_ratio": {
+          "description": "Maximum allowed ratio between tentative-tree and regular-tree average job duration.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "examples": [
+            10.0
+          ]
+        },
+        "min_job_duration": {
+          "description": "Job duration threshold below which tentative-tree duration comparisons are ignored.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        },
+        "ignore_missing_pool_trees": {
+          "description": "Whether missing tentative pool trees are ignored.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        }
+      },
+      "examples": [
+        {
+          "sample_job_count": 10,
+          "max_tentative_job_duration_ratio": 10,
+          "min_job_duration": "30s"
+        }
+      ]
+    },
+    "jobFailsTolerance": {
+      "description": "Per-exit-code job failure tolerance settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_fails_unknown_exit_code": {
+          "description": "Maximum failures for jobs with an unknown exit code.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            1
+          ]
+        },
+        "max_fails_no_exit_code": {
+          "description": "Maximum failures for jobs without an exit code.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            100
+          ]
+        },
+        "max_fails_per_known_exit_code": {
+          "description": "Map from known exit code to maximum tolerated failures.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "examples": [
+            {
+              "1": 10,
+              "137": 3
+            }
+          ]
+        }
+      },
+      "examples": [
+        {
+          "max_fails_unknown_exit_code": 1,
+          "max_fails_per_known_exit_code": {
+            "137": 3
+          }
+        }
+      ]
+    },
+    "fastIntermediateMediumTableWriterConfig": {
+      "description": "Writer settings for fast intermediate media.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "upload_replication_factor": {
+          "description": "Upload replication factor.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            3
+          ]
+        },
+        "min_upload_replication_factor": {
+          "description": "Minimum upload replication factor.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1
+          ]
+        },
+        "direct_upload_node_count": {
+          "description": "Direct upload node count.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            5
+          ]
+        },
+        "erasure_codec": {
+          "description": "Erasure codec for intermediate chunks.",
+          "type": "string",
+          "examples": [
+            "none"
+          ]
+        },
+        "enable_striped_erasure": {
+          "description": "Whether striped erasure is enabled.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        }
+      },
+      "examples": [
+        {
+          "upload_replication_factor": 3,
+          "min_upload_replication_factor": 1
+        }
+      ]
+    },
+    "columnarStatisticsConfig": {
+      "description": "Columnar statistics fetching configuration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Whether columnar statistics fetching is enabled.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "mode": {
+          "description": "Columnar statistics fetching mode.",
+          "type": "string",
+          "examples": [
+            "fallback"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "enabled": true,
+          "mode": "fallback"
+        }
+      ]
+    },
+    "cudaProfilerEnvironment": {
+      "description": "Environment variable injected for CUDA profiling.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path_environment_variable_name",
+        "path_environment_variable_value"
+      ],
+      "properties": {
+        "path_environment_variable_name": {
+          "description": "Environment variable name.",
+          "type": "string",
+          "examples": [
+            "LD_LIBRARY_PATH"
+          ]
+        },
+        "path_environment_variable_value": {
+          "description": "Environment variable value.",
+          "type": "string",
+          "examples": [
+            "/opt/cuda/lib64"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "path_environment_variable_name": "LD_LIBRARY_PATH",
+          "path_environment_variable_value": "/opt/cuda/lib64"
+        }
+      ]
+    },
+    "jobProfilerSpec": {
+      "description": "Job profiler specification.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binary",
+        "type"
+      ],
+      "properties": {
+        "binary": {
+          "description": "Binary to profile.",
+          "type": "string",
+          "enum": [
+            "job_proxy",
+            "user_job"
+          ],
+          "examples": [
+            "user_job"
+          ]
+        },
+        "type": {
+          "description": "Profiler type.",
+          "type": "string",
+          "enum": [
+            "cpu",
+            "memory",
+            "peak_memory",
+            "cuda"
+          ],
+          "examples": [
+            "cpu"
+          ]
+        },
+        "profiling_probability": {
+          "description": "Probability that profiling is enabled for a job.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "examples": [
+            0.01
+          ]
+        },
+        "sampling_frequency": {
+          "description": "Samples per second.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            100
+          ]
+        },
+        "run_external_symbolizer": {
+          "description": "Whether to symbolize with an external symbolizer.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        }
+      },
+      "examples": [
+        {
+          "binary": "user_job",
+          "type": "cpu",
+          "profiling_probability": 0.01,
+          "sampling_frequency": 100
+        }
+      ]
+    },
+    "gracefulShutdownSpec": {
+      "description": "Sidecar graceful shutdown settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal"
+      ],
+      "properties": {
+        "signal": {
+          "description": "Signal sent for graceful shutdown.",
+          "type": "string",
+          "examples": [
+            "SIGTERM"
+          ]
+        },
+        "timeout": {
+          "description": "Graceful shutdown timeout.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "30s"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "signal": "SIGTERM",
+          "timeout": "30s"
+        }
+      ]
+    },
+    "sidecarJobSpec": {
+      "description": "Sidecar process specification for a user job.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "description": "Sidecar command.",
+          "type": "string",
+          "examples": [
+            "./sidecar"
+          ]
+        },
+        "cpu_limit": {
+          "description": "Sidecar CPU limit.",
+          "type": "number",
+          "minimum": 0,
+          "examples": [
+            0.5
+          ]
+        },
+        "memory_limit": {
+          "description": "Sidecar memory limit in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            536870912
+          ]
+        },
+        "docker_image": {
+          "description": "Sidecar Docker image.",
+          "type": "string",
+          "examples": [
+            "ubuntu:22.04"
+          ]
+        },
+        "restart_policy": {
+          "description": "Sidecar restart policy.",
+          "type": "string",
+          "examples": [
+            "fail_on_error"
+          ]
+        },
+        "graceful_shutdown": {
+          "description": "Graceful shutdown configuration.",
+          "$ref": "#/$defs/gracefulShutdownSpec",
+          "examples": [
+            {
+              "signal": "SIGTERM"
+            }
+          ]
+        }
+      },
+      "examples": [
+        {
+          "command": "./sidecar",
+          "cpu_limit": 0.5,
+          "memory_limit": 536870912
+        }
+      ]
+    },
+    "richYPathAttributes": {
+      "description": "Common rich YPath and operation path attributes.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "properties": {
+        "columns": {
+          "description": "Column filter for an input table.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "key",
+              "value"
+            ]
+          ]
+        },
+        "ranges": {
+          "description": "Input table ranges.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            [
+              {
+                "lower_limit": {
+                  "row_index": 0
+                },
+                "upper_limit": {
+                  "row_index": 100
+                }
+              }
+            ]
+          ]
+        },
+        "rename_columns": {
+          "description": "Column rename map for input tables.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "examples": [
+            {
+              "old": "new"
+            }
+          ]
+        },
+        "transaction_id": {
+          "description": "Transaction id used to access the path.",
+          "type": "string",
+          "examples": [
+            "1-2-3-4"
+          ]
+        },
+        "timestamp": {
+          "description": "Timestamp used to access a dynamic table snapshot.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            1234567890
+          ]
+        },
+        "append": {
+          "description": "Append to output table instead of overwriting.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "sorted_by": {
+          "description": "Columns by which the output table is sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "key"
+            ]
+          ]
+        },
+        "row_count_limit": {
+          "description": "Stop once an output table reaches this row count.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            1000000
+          ]
+        },
+        "create": {
+          "description": "Create the output table if it does not exist.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "file_name": {
+          "description": "Sandbox file name for a file path.",
+          "type": "string",
+          "examples": [
+            "mapper.py"
+          ]
+        },
+        "executable": {
+          "description": "Whether the file is executable in the sandbox.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "format": {
+          "description": "Format used when a file path points to a table.",
+          "$ref": "#/$defs/format",
+          "examples": [
+            "json"
+          ]
+        },
+        "bypass_artifact_cache": {
+          "description": "Whether to bypass the artifact cache for this file.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        }
+      },
+      "examples": [
+        {
+          "append": true,
+          "sorted_by": [
+            "key"
+          ]
+        },
+        {
+          "columns": [
+            "key"
+          ],
+          "ranges": [
+            {
+              "lower_limit": {
+                "row_index": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "richYPath": {
+      "description": "Cypress path or rich YPath. Plain paths are strings. Paths with attributes use the $value/$attributes wrapper with rich YPath attributes.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "required": [
+            "$value",
+            "$attributes"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "$value": {
+              "description": "Cypress path string.",
+              "type": "string",
+              "examples": [
+                "//tmp/table"
+              ]
+            },
+            "$attributes": {
+              "description": "Rich YPath attributes.",
+              "$ref": "#/$defs/richYPathAttributes",
+              "examples": [
+                {
+                  "append": true
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "examples": [
+        "//tmp/input",
+        {
+          "$value": "//tmp/output",
+          "$attributes": {
+            "append": true
+          }
+        }
+      ]
+    },
+    "tableReaderConfig": {
+      "description": "Table reader configuration. Includes fields from TTableReaderConfig; inherited chunk-reader fields are accepted for compatibility.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "properties": {
+        "suppress_access_tracking": {
+          "description": "Suppress access tracking for input chunks.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "suppress_expiration_timeout_renewal": {
+          "description": "Suppress expiration timeout renewal for read data.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "unavailable_chunk_strategy": {
+          "description": "Strategy for unavailable chunks while reading.",
+          "type": "string",
+          "examples": [
+            "restore"
+          ]
+        },
+        "chunk_availability_policy": {
+          "description": "Chunk availability policy while reading.",
+          "type": "string",
+          "examples": [
+            "repairable"
+          ]
+        },
+        "max_read_duration": {
+          "description": "Maximum read duration.",
+          "$ref": "#/$defs/duration",
+          "examples": [
+            "10m"
+          ]
+        },
+        "dynamic_store_reader": {
+          "description": "Dynamic store reader configuration.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {}
+          ]
+        }
+      },
+      "examples": [
+        {
+          "suppress_access_tracking": false,
+          "max_read_duration": "10m"
+        }
+      ]
+    },
+    "tableWriterConfig": {
+      "description": "Table writer configuration. Includes known chunk-writer option fields; inherited writer fields are accepted for compatibility.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ysonNode"
+      },
+      "properties": {
+        "validate_sorted": {
+          "description": "Validate that written rows are sorted.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "validate_row_weight": {
+          "description": "Validate row weight limits.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "validate_key_weight": {
+          "description": "Validate key weight limits.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "validate_duplicate_ids": {
+          "description": "Validate duplicate ids.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "validate_column_count": {
+          "description": "Validate column counts.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "validate_any_is_valid_yson": {
+          "description": "Validate that Any values contain valid YSON.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "validate_unique_keys": {
+          "description": "Validate unique keys.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "explode_on_validation_error": {
+          "description": "Abort hard on validation error for diagnostics.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "optimize_for": {
+          "description": "Table optimization mode.",
+          "type": "string",
+          "enum": [
+            "lookup",
+            "scan"
+          ],
+          "examples": [
+            "lookup"
+          ]
+        },
+        "chunk_format": {
+          "description": "Table chunk format override.",
+          "type": "string",
+          "examples": [
+            "table_versioned_simple"
+          ]
+        },
+        "evaluate_computed_columns": {
+          "description": "Evaluate computed columns while writing.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "enable_skynet_sharing": {
+          "description": "Enable Skynet sharing for output chunks.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "return_boundary_keys": {
+          "description": "Return chunk boundary keys.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "cast_any_to_composite": {
+          "description": "Compatibility option controlling Any-to-composite casting.",
+          "$ref": "#/$defs/ysonNode",
+          "examples": [
+            true
+          ]
+        },
+        "cast_composite_to_any": {
+          "description": "Cast composite values to Any.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "single_column_group_by_default": {
+          "description": "Put columns into a single column group by default.",
+          "type": "boolean",
+          "examples": [
+            false
+          ]
+        },
+        "enable_columnar_value_statistics": {
+          "description": "Enable columnar value statistics.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "enable_row_count_in_columnar_statistics": {
+          "description": "Include row count in columnar statistics.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "consider_min_row_range_data_weight": {
+          "description": "Consider minimum row range data weight.",
+          "type": "boolean",
+          "examples": [
+            true
+          ]
+        },
+        "schema_modification": {
+          "description": "Schema modification mode.",
+          "type": "string",
+          "examples": [
+            "none"
+          ]
+        },
+        "versioned_write_options": {
+          "description": "Versioned write options.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ysonNode"
+          },
+          "examples": [
+            {}
+          ]
+        },
+        "max_heavy_columns": {
+          "description": "Maximum number of heavy columns.",
+          "type": "integer",
+          "minimum": 0,
+          "examples": [
+            0
+          ]
+        },
+        "block_size": {
+          "description": "Writer block size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        },
+        "buffer_size": {
+          "description": "Writer buffer size in bytes.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            67108864
+          ]
+        }
+      },
+      "examples": [
+        {
+          "block_size": 67108864,
+          "validate_sorted": true
+        }
+      ]
+    },
+    "tableSchema": {
+      "description": "YTsaurus table schema: array of column descriptors. Additional column fields are accepted for compatibility.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/$defs/ysonNode"
+        },
+        "properties": {
+          "name": {
+            "description": "Column name.",
+            "type": "string",
+            "examples": [
+              "key"
+            ]
+          },
+          "type": {
+            "description": "YTsaurus logical type.",
+            "type": "string",
+            "examples": [
+              "string"
+            ]
+          },
+          "sort_order": {
+            "description": "Column sort order.",
+            "type": "string",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "examples": [
+              "ascending"
+            ]
+          },
+          "required": {
+            "description": "Whether the column is required.",
+            "type": "boolean",
+            "examples": [
+              false
+            ]
+          },
+          "expression": {
+            "description": "Computed column expression.",
+            "type": "string",
+            "examples": [
+              "farm_hash(key)"
+            ]
+          }
+        }
+      },
+      "examples": [
+        [
+          {
+            "name": "key",
+            "type": "string",
+            "sort_order": "ascending"
+          }
+        ]
       ]
     }
   },
