@@ -53,7 +53,8 @@
           "cpu": 40,
           "memory": 107374182400
         }
-      ]
+      ],
+      "default": {}
     },
     "max_share_ratio": {
       "type": "number",
@@ -116,7 +117,8 @@
       "examples": [
         10
       ],
-      "minimum": 0
+      "minimum": 0,
+      "default": 10
     },
     "alias": {
       "type": "string",
@@ -131,7 +133,8 @@
       "examples": [
         10
       ],
-      "minimum": 0
+      "minimum": 0,
+      "default": 10
     },
     "unavailable_chunk_strategy": {
       "type": "string",
@@ -143,7 +146,8 @@
         "wait",
         "fail",
         "skip"
-      ]
+      ],
+      "default": "wait"
     },
     "unavailable_chunk_tactics": {
       "type": "string",
@@ -155,7 +159,8 @@
         "wait",
         "fail",
         "skip"
-      ]
+      ],
+      "default": "wait"
     },
     "chunk_availability_policy": {
       "type": "string",
@@ -167,7 +172,8 @@
         "data_parts_available",
         "repairable",
         "all_parts_available"
-      ]
+      ],
+      "default": "data_parts_available"
     },
     "scheduling_tag": {
       "type": "string",
@@ -189,7 +195,8 @@
       "examples": [
         214748364800
       ],
-      "minimum": 0
+      "minimum": 0,
+      "default": 214748364800
     },
     "max_data_weight_per_job": {
       "type": "integer",
@@ -197,7 +204,8 @@
       "examples": [
         214748364800
       ],
-      "minimum": 0
+      "minimum": 0,
+      "default": 214748364800
     },
     "data_weight_per_job": {
       "description": "Recommended input data weight per job in bytes. Composite operations usually use the stage-specific data_weight/data_size options instead.",
@@ -252,35 +260,40 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "job_node_account": {
       "type": "string",
       "description": "Account used for files with job stderr and input context.",
       "examples": [
         "tmp"
-      ]
+      ],
+      "default": "tmp"
     },
     "suspend_operation_if_account_limit_exceeded": {
       "type": "boolean",
       "description": "Whether to suspend the operation instead of failing when an account limit is exceeded.",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "enable_job_splitting": {
       "type": "boolean",
       "description": "Whether adaptive job splitting is enabled.",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "use_columnar_statistics": {
       "type": "boolean",
       "description": "Whether per-column statistics are enabled for operation planning.",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "sampling": {
       "description": "Sampling settings for operations that support sampled input processing.",
@@ -292,7 +305,8 @@
         {
           "sampling_rate": 0.01
         }
-      ]
+      ],
+      "default": {}
     },
     "max_speculative_job_count_per_task": {
       "description": "Maximum number of speculative jobs allowed per task.",
@@ -300,7 +314,8 @@
       "minimum": 0,
       "examples": [
         3
-      ]
+      ],
+      "default": 10
     },
     "job_speculation_timeout": {
       "description": "Timeout in milliseconds before job speculation may be considered.",
@@ -414,7 +429,8 @@
           "mode": "relaxed",
           "max_intermediate_chunk_count": 1000
         }
-      ]
+      ],
+      "default": {}
     },
     "table_path": {
       "description": "Table path used by erase operations; may include ranges using rich YPath attributes.",
@@ -458,7 +474,8 @@
           "command": "python3 reducer.py",
           "memory_limit": 4294967296
         }
-      ]
+      ],
+      "default": {}
     },
     "reduce_combiner": {
       "description": "Reduce-combiner user job specification for map_reduce operations.",
@@ -497,7 +514,8 @@
             "block_size": 67108864
           }
         }
-      ]
+      ],
+      "default": {}
     },
     "map_job_io": {
       "description": "I/O settings of map jobs in map_reduce operations.",
@@ -508,7 +526,8 @@
             "sampling_rate": 0.1
           }
         }
-      ]
+      ],
+      "default": {}
     },
     "sort_job_io": {
       "description": "I/O settings of sort jobs in sort and map_reduce operations.",
@@ -519,7 +538,8 @@
             "desired_chunk_size": 268435456
           }
         }
-      ]
+      ],
+      "default": {}
     },
     "reduce_job_io": {
       "description": "I/O settings of reduce jobs in map_reduce operations.",
@@ -530,7 +550,8 @@
             "enable_row_index": true
           }
         }
-      ]
+      ],
+      "default": {}
     },
     "partition_job_io": {
       "description": "I/O settings of partition jobs in sort operations.",
@@ -541,7 +562,8 @@
             "enable_locality": true
           }
         }
-      ]
+      ],
+      "default": {}
     },
     "merge_job_io": {
       "description": "I/O settings of merge jobs in sort operations.",
@@ -552,7 +574,8 @@
             "upload_replication_factor": 3
           }
         }
-      ]
+      ],
+      "default": {}
     },
     "data_size_per_job": {
       "description": "Approximate input data size per job in bytes for map, reduce, merge, and join_reduce operations.",
@@ -632,7 +655,8 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "enable_key_guarantee": {
       "description": "Whether standard reduce key guarantee is enabled; disabling may help process skewed keys.",
@@ -646,7 +670,8 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "partition_count": {
       "description": "Approximate partition count for sorting.",
@@ -686,7 +711,8 @@
       "minimum": 0,
       "examples": [
         0.25
-      ]
+      ],
+      "default": 1.0
     },
     "mapper_output_table_count": {
       "description": "Number of mapper output tables in addition to the mandatory intermediate output.",
@@ -694,21 +720,24 @@
       "minimum": 0,
       "examples": [
         1
-      ]
+      ],
+      "default": 0
     },
     "intermediate_data_account": {
       "description": "Account used for intermediate data.",
       "type": "string",
       "examples": [
         "tmp"
-      ]
+      ],
+      "default": "intermediate"
     },
     "intermediate_data_medium": {
       "description": "Medium used for intermediate data chunks.",
       "type": "string",
       "examples": [
         "ssd_blobs"
-      ]
+      ],
+      "default": "default"
     },
     "intermediate_data_replication_factor": {
       "description": "Replication factor for intermediate data.",
@@ -716,14 +745,16 @@
       "minimum": 1,
       "examples": [
         3
-      ]
+      ],
+      "default": 3
     },
     "intermediate_compression_codec": {
       "description": "Compression codec for intermediate data.",
       "type": "string",
       "examples": [
         "lz4"
-      ]
+      ],
+      "default": "lz4"
     },
     "intermediate_data_acl": {
       "description": "ACL entries for intermediate data.",
@@ -751,7 +782,8 @@
       "minimum": 0,
       "examples": [
         60000
-      ]
+      ],
+      "default": "5s"
     },
     "data_size_per_sort_job": {
       "description": "Alias for data_weight_per_sort_job. Approximate input data weight per sort job in bytes.",
@@ -759,7 +791,8 @@
       "minimum": 1,
       "examples": [
         2147483648
-      ]
+      ],
+      "default": 2147483648
     },
     "data_size_per_reduce_job": {
       "description": "Alias for data_weight_per_reduce_job. Approximate input data weight per reduce job in bytes.",
@@ -774,7 +807,8 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "mode": {
       "description": "Merge operation mode.",
@@ -786,7 +820,8 @@
       ],
       "examples": [
         "sorted"
-      ]
+      ],
+      "default": "unordered"
     },
     "merge_by": {
       "description": "Columns by which output tables must be sorted for sorted merge mode.",
@@ -805,21 +840,24 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "force_transform": {
       "description": "Whether merge must read and rewrite all input data even if it could otherwise reuse chunks.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "schema_inference_mode": {
       "description": "Schema inference mode for operations that may create or rewrite a table schema.",
       "type": "string",
       "examples": [
         "auto"
-      ]
+      ],
+      "default": "auto"
     },
     "data_size_per_partition_job": {
       "description": "Alias for data_weight_per_partition_job. Approximate input data weight per partition job in bytes.",
@@ -851,7 +889,8 @@
       "minimum": 1,
       "examples": [
         100
-      ]
+      ],
+      "default": 1000
     },
     "cluster_name": {
       "description": "Source cluster name for remote_copy.",
@@ -884,7 +923,8 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": false
     },
     "attribute_keys": {
       "description": "Attribute names copied by remote_copy.",
@@ -913,7 +953,8 @@
       "minimum": 1,
       "examples": [
         1
-      ]
+      ],
+      "default": 1
     },
     "intermediate_min_data_replication_factor": {
       "description": "Alias for min_intermediate_data_replication_factor.",
@@ -921,14 +962,16 @@
       "minimum": 1,
       "examples": [
         1
-      ]
+      ],
+      "default": 1
     },
     "intermediate_data_sync_on_close": {
       "description": "Whether intermediate data is synchronously closed.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "fast_intermediate_medium_table_writer_config": {
       "description": "Fast intermediate medium writer configuration.",
@@ -952,7 +995,8 @@
       "type": "string",
       "examples": [
         "tmp"
-      ]
+      ],
+      "default": "tmp"
     },
     "max_primary_data_weight_per_job": {
       "description": "Hard cap on primary input data weight per job in bytes.",
@@ -960,7 +1004,8 @@
       "minimum": 1,
       "examples": [
         214748364800
-      ]
+      ],
+      "default": 9223372036854775807
     },
     "max_compressed_data_size_per_job": {
       "description": "Hard cap on compressed input data size per job in bytes.",
@@ -968,7 +1013,8 @@
       "minimum": 1,
       "examples": [
         214748364800
-      ]
+      ],
+      "default": 214748364800
     },
     "max_primary_compressed_data_size_per_job": {
       "description": "Hard cap on primary compressed input data size per job in bytes.",
@@ -976,7 +1022,8 @@
       "minimum": 1,
       "examples": [
         214748364800
-      ]
+      ],
+      "default": 9223372036854775807
     },
     "job_fails_tolerance": {
       "description": "Detailed job failure tolerance settings.",
@@ -993,7 +1040,8 @@
       "minimum": 0,
       "examples": [
         10
-      ]
+      ],
+      "default": 10
     },
     "job_proxy_memory_overcommit_limit": {
       "description": "Job proxy memory overcommit limit in bytes.",
@@ -1008,14 +1056,16 @@
       "$ref": "#/$defs/duration",
       "examples": [
         "5s"
-      ]
+      ],
+      "default": "5s"
     },
     "time_limit_job_fail_timeout": {
       "description": "Timeout for failing jobs when operation time limit is hit.",
       "$ref": "#/$defs/duration",
       "examples": [
         "2m"
-      ]
+      ],
+      "default": "2m"
     },
     "aco_name": {
       "description": "Access control object name used for operation permissions.",
@@ -1036,28 +1086,32 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "issue_temporary_token": {
       "description": "Whether to issue a temporary token for jobs.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "temporary_token_environment_variable_name": {
       "description": "Environment variable name for the temporary token.",
       "type": "string",
       "examples": [
         "YT_TOKEN"
-      ]
+      ],
+      "default": "YT_TOKEN"
     },
     "suspend_operation_after_materialization": {
       "description": "Suspend the operation after materialization.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "min_locality_input_data_weight": {
       "description": "Minimum input data weight for locality-aware scheduling.",
@@ -1065,7 +1119,8 @@
       "minimum": 0,
       "examples": [
         1073741824
-      ]
+      ],
+      "default": 1073741824
     },
     "job_proxy_memory_digest": {
       "description": "Log digest config for job proxy memory estimation.",
@@ -1079,7 +1134,12 @@
           "lower_bound": 0.5,
           "upper_bound": 2.0
         }
-      ]
+      ],
+      "default": {
+        "default_value": 1.0,
+        "lower_bound": 0.5,
+        "upper_bound": 2.0
+      }
     },
     "job_proxy_resource_overdraft_memory_multiplier": {
       "description": "Memory multiplier for job proxy resource overdraft.",
@@ -1088,14 +1148,16 @@
       "maximum": 10,
       "examples": [
         2.0
-      ]
+      ],
+      "default": null
     },
     "slice_erasure_chunks_by_parts": {
       "description": "Whether erasure chunks are sliced by parts.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "enable_legacy_live_preview": {
       "description": "Whether legacy live preview is enabled.",
@@ -1109,42 +1171,48 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "enable_read_size_estimation": {
       "description": "Whether read size estimation is enabled.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "ban_nodes_with_failed_jobs": {
       "description": "Whether nodes with failed jobs are banned for this operation.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "ignore_job_failures_at_banned_nodes": {
       "description": "Ignore failures observed at banned nodes.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "fail_on_all_nodes_banned": {
       "description": "Fail operation if all nodes become banned.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "omit_inaccessible_rows": {
       "description": "Omit inaccessible rows instead of failing.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "additional_security_tags": {
       "description": "Additional security tags attached to operation jobs.",
@@ -1164,14 +1232,16 @@
       "$ref": "#/$defs/duration",
       "examples": [
         "1m"
-      ]
+      ],
+      "default": null
     },
     "atomicity": {
       "description": "Output transaction atomicity mode.",
       "type": "string",
       "examples": [
         "full"
-      ]
+      ],
+      "default": "full"
     },
     "lock_output_dynamic_tables": {
       "description": "Whether output dynamic tables are locked.",
@@ -1192,7 +1262,8 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "job_cpu_monitor": {
       "description": "Job CPU monitor configuration.",
@@ -1202,7 +1273,8 @@
       },
       "examples": [
         {}
-      ]
+      ],
+      "default": {}
     },
     "enable_dynamic_store_read": {
       "description": "Whether dynamic store reads are enabled.",
@@ -1216,7 +1288,8 @@
       "type": "string",
       "examples": [
         "default"
-      ]
+      ],
+      "default": "default"
     },
     "job_shells": {
       "description": "Job shell configuration map.",
@@ -1236,7 +1309,8 @@
       },
       "examples": [
         {}
-      ]
+      ],
+      "default": {}
     },
     "experiment_overrides": {
       "description": "Experiment overrides applied to this operation.",
@@ -1253,7 +1327,8 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "input_table_columnar_statistics": {
       "description": "Columnar statistics config for input tables.",
@@ -1262,7 +1337,8 @@
         {
           "enabled": true
         }
-      ]
+      ],
+      "default": {}
     },
     "user_file_columnar_statistics": {
       "description": "Columnar statistics config for user files.",
@@ -1271,21 +1347,24 @@
         {
           "enabled": false
         }
-      ]
+      ],
+      "default": {}
     },
     "force_job_proxy_tracing": {
       "description": "Force tracing in job proxy.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "suspend_on_job_failure": {
       "description": "Suspend operation when a job fails.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "job_testing_options": {
       "description": "Testing-only job options.",
@@ -1302,28 +1381,32 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "enable_codegen_comparator": {
       "description": "Whether generated comparators are enabled.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "enable_virtual_sandbox": {
       "description": "Whether virtual sandbox is enabled.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "enable_root_volume_disk_quota": {
       "description": "Whether root volume disk quota is enabled.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "sanity_check_delay": {
       "description": "Delay before operation sanity checks.",
@@ -1362,14 +1445,16 @@
       },
       "examples": [
         {}
-      ]
+      ],
+      "default": {}
     },
     "adjust_dynamic_table_data_slices": {
       "description": "Adjust dynamic table data slices.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "batch_row_count": {
       "description": "Row count per batch for supported operations.",
@@ -1425,14 +1510,16 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "allow_offloading": {
       "description": "Whether operation offloading is allowed.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "require_specified_pools_existence": {
       "description": "Require specified pools to exist.",
@@ -1446,7 +1533,8 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "enable_multiple_jobs_in_allocation": {
       "description": "Enable multiple jobs in a single allocation.",
@@ -1460,7 +1548,8 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "scheduling_options_per_pool_tree": {
       "description": "Per-pool-tree scheduling options.",
@@ -1519,21 +1608,24 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "consider_guarantees_for_single_tree": {
       "description": "Consider guarantees when selecting a single tree.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "use_default_tentative_pool_trees": {
       "description": "Use default tentative pool trees from scheduler config.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "tentative_tree_eligibility": {
       "description": "Tentative tree eligibility config.",
@@ -1542,7 +1634,8 @@
         {
           "sample_job_count": 10
         }
-      ]
+      ],
+      "default": {}
     },
     "update_preemptible_allocations_list_logging_period": {
       "description": "Logging period for preemptible allocations list updates.",
@@ -1550,7 +1643,8 @@
       "minimum": 1,
       "examples": [
         1000
-      ]
+      ],
+      "default": 1000
     },
     "update_preemptible_jobs_list_logging_period": {
       "description": "Alias for update_preemptible_allocations_list_logging_period.",
@@ -1558,7 +1652,8 @@
       "minimum": 1,
       "examples": [
         1000
-      ]
+      ],
+      "default": 1000
     },
     "custom_profiling_tag": {
       "description": "Custom profiling tag for scheduler metrics.",
@@ -1589,7 +1684,8 @@
       "minimum": 0,
       "examples": [
         10
-      ]
+      ],
+      "default": 10
     },
     "probing_ratio": {
       "description": "Ratio of probing jobs.",
@@ -1612,7 +1708,8 @@
       "type": "string",
       "examples": [
         "normal"
-      ]
+      ],
+      "default": "normal"
     },
     "scheduling_segment": {
       "description": "Scheduling segment requested for the operation.",
@@ -1662,14 +1759,16 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "is_gang": {
       "description": "Whether the operation is treated as gang-scheduled.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "testing": {
       "description": "Testing-only operation options.",
@@ -1679,21 +1778,24 @@
       },
       "examples": [
         {}
-      ]
+      ],
+      "default": {}
     },
     "erase_trees_with_pool_limit_violations": {
       "description": "Erase trees with pool limit violations from scheduling choices.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "apply_specified_resource_limits_to_demand": {
       "description": "Apply specified resource limits to demand.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "allow_idle_cpu_policy": {
       "description": "Allow jobs to run with idle CPU policy.",
@@ -1709,7 +1811,8 @@
         {
           "cpu": 8
         }
-      ]
+      ],
+      "default": {}
     },
     "non_preemptible_resource_usage_threshold": {
       "description": "Non-preemptible resource usage threshold.",
@@ -1718,7 +1821,8 @@
         {
           "cpu": 4
         }
-      ]
+      ],
+      "default": {}
     },
     "fair_share_starvation_timeout": {
       "description": "Fair-share starvation timeout.",
@@ -1771,28 +1875,32 @@
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "force_allow_job_interruption": {
       "description": "Force allowing job interruption.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "locality_timeout": {
       "description": "Locality timeout for simple operation jobs.",
       "$ref": "#/$defs/duration",
       "examples": [
         "5s"
-      ]
+      ],
+      "default": "5s"
     },
     "strict_data_weight_per_job_verification": {
       "description": "Strictly verify data_weight_per_job.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "input_paths": {
       "description": "Alias for input_table_paths.",
@@ -1832,14 +1940,16 @@
       "type": "string",
       "examples": [
         "enabled"
-      ]
+      ],
+      "default": "enabled"
     },
     "use_new_sorted_pool": {
       "description": "Use the new sorted pool implementation.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "min_maniac_data_weight": {
       "description": "Minimum data weight for maniac sorted-merge behavior.",
@@ -1854,14 +1964,16 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "slice_foreign_chunks": {
       "description": "Slice foreign chunks in reduce/join-reduce.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "foreign_table_lookup_keys_threshold": {
       "description": "Foreign-table lookup key-count threshold.",
@@ -1909,7 +2021,8 @@
       "minimum": 1,
       "examples": [
         2147483648
-      ]
+      ],
+      "default": 2147483648
     },
     "max_chunk_slice_per_shuffle_job": {
       "description": "Maximum chunk slices per shuffle job.",
@@ -1917,7 +2030,8 @@
       "minimum": 1,
       "examples": [
         8000
-      ]
+      ],
+      "default": 8000
     },
     "max_chunk_slice_per_intermediate_partition_job": {
       "description": "Maximum chunk slices per intermediate partition job.",
@@ -1925,7 +2039,8 @@
       "minimum": 1,
       "examples": [
         8000
-      ]
+      ],
+      "default": 8000
     },
     "shuffle_start_threshold": {
       "description": "Threshold for starting shuffle jobs.",
@@ -1934,7 +2049,8 @@
       "maximum": 1,
       "examples": [
         0.75
-      ]
+      ],
+      "default": 0.75
     },
     "merge_start_threshold": {
       "description": "Threshold for starting merge jobs.",
@@ -1943,7 +2059,8 @@
       "maximum": 1,
       "examples": [
         0.9
-      ]
+      ],
+      "default": 0.9
     },
     "shuffle_network_limit": {
       "description": "Shuffle network limit.",
@@ -1951,7 +2068,8 @@
       "minimum": 0,
       "examples": [
         0
-      ]
+      ],
+      "default": 0
     },
     "max_shuffle_data_slice_count": {
       "description": "Maximum total data slices in shuffle pool.",
@@ -1959,7 +2077,8 @@
       "minimum": 1,
       "examples": [
         10000000
-      ]
+      ],
+      "default": 10000000
     },
     "max_shuffle_job_count": {
       "description": "Maximum number of shuffle jobs.",
@@ -1967,7 +2086,8 @@
       "minimum": 1,
       "examples": [
         200000
-      ]
+      ],
+      "default": 200000
     },
     "max_merge_data_slice_count": {
       "description": "Maximum total data slices in merge pool.",
@@ -1975,21 +2095,24 @@
       "minimum": 1,
       "examples": [
         10000000
-      ]
+      ],
+      "default": 10000000
     },
     "enable_partitioned_data_balancing": {
       "description": "Balance partition jobs by uncompressed input data size.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "enable_intermediate_output_recalculation": {
       "description": "Regenerate unavailable intermediate chunks by restarting jobs.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "partition_size_factor": {
       "description": "Partition size factor.",
@@ -1997,14 +2120,16 @@
       "exclusiveMinimum": 0,
       "examples": [
         1.0
-      ]
+      ],
+      "default": 0.7
     },
     "enable_final_partitions_merging": {
       "description": "Enable final merging of partitions.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "compressed_data_size_per_partition_job": {
       "description": "Compressed input data size per partition job.",
@@ -2019,28 +2144,32 @@
       "$ref": "#/$defs/duration",
       "examples": [
         "5s"
-      ]
+      ],
+      "default": "5s"
     },
     "simple_merge_locality_timeout": {
       "description": "Locality timeout for simple merge jobs.",
       "$ref": "#/$defs/duration",
       "examples": [
         "5s"
-      ]
+      ],
+      "default": "5s"
     },
     "partition_locality_timeout": {
       "description": "Locality timeout for partition jobs.",
       "$ref": "#/$defs/duration",
       "examples": [
         "5s"
-      ]
+      ],
+      "default": "5s"
     },
     "merge_locality_timeout": {
       "description": "Locality timeout for merge jobs.",
       "$ref": "#/$defs/duration",
       "examples": [
         "1m"
-      ]
+      ],
+      "default": "1m"
     },
     "max_input_data_weight": {
       "description": "Hard limit on allowed input data weight for sort.",
@@ -2048,7 +2177,8 @@
       "minimum": 1,
       "examples": [
         5629499534213120
-      ]
+      ],
+      "default": 5629499534213120
     },
     "compressed_data_size_per_map_job": {
       "description": "Compressed input data size per map job.",
@@ -2063,35 +2193,40 @@
       "$ref": "#/$defs/duration",
       "examples": [
         "5s"
-      ]
+      ],
+      "default": "5s"
     },
     "reduce_locality_timeout": {
       "description": "Locality timeout for reduce phase.",
       "$ref": "#/$defs/duration",
       "examples": [
         "1m"
-      ]
+      ],
+      "default": "1m"
     },
     "enable_table_index_if_has_trivial_mapper": {
       "description": "Enable table indexes for trivial mapper in map-reduce.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "disable_sorted_input_in_reducer": {
       "description": "Disable sorted input in reducer.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "compute_pivot_keys_from_samples": {
       "description": "Compute pivot keys from samples for trivial mapper.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "networks": {
       "description": "Network preference list for remote_copy.",
@@ -2123,7 +2258,8 @@
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "concurrency": {
       "description": "Number of chunks copied concurrently in remote_copy.",
@@ -2131,7 +2267,8 @@
       "minimum": 1,
       "examples": [
         4
-      ]
+      ],
+      "default": 4
     },
     "block_buffer_size": {
       "description": "Block buffer size for remote_copy in bytes.",
@@ -2139,49 +2276,56 @@
       "minimum": 1,
       "examples": [
         67108864
-      ]
+      ],
+      "default": 67108864
     },
     "delay_in_copy_chunk": {
       "description": "Testing delay in copy chunk.",
       "$ref": "#/$defs/duration",
       "examples": [
         "0s"
-      ]
+      ],
+      "default": "0s"
     },
     "erasure_chunk_repair_delay": {
       "description": "Delay before repairing erasure chunks during remote_copy.",
       "$ref": "#/$defs/duration",
       "examples": [
         "15m"
-      ]
+      ],
+      "default": "15m"
     },
     "repair_erasure_chunks": {
       "description": "Repair erasure chunks during remote_copy if parts are missing.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "use_remote_master_caches": {
       "description": "Use remote master caches in remote_copy jobs.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "allow_cluster_connection": {
       "description": "Allow cluster_connection in remote_copy.",
       "type": "boolean",
       "examples": [
         true
-      ]
+      ],
+      "default": true
     },
     "fail_on_job_restart": {
       "description": "Fail the operation if a job is restarted.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "input_schema": {
       "description": "Schema of rows produced by input_query.",
@@ -2203,7 +2347,8 @@
       },
       "examples": [
         {}
-      ]
+      ],
+      "default": {}
     },
     "input_query_options": {
       "description": "Input query execution options.",
@@ -2213,7 +2358,8 @@
       },
       "examples": [
         {}
-      ]
+      ],
+      "default": {}
     },
     "stderr_table_writer": {
       "description": "Writer configuration for stderr table.",
@@ -2222,7 +2368,8 @@
         {
           "block_size": 67108864
         }
-      ]
+      ],
+      "default": {}
     },
     "stderr_table_writer_config": {
       "description": "Alias for stderr_table_writer.",
@@ -2231,7 +2378,8 @@
         {
           "block_size": 67108864
         }
-      ]
+      ],
+      "default": {}
     },
     "core_table_writer": {
       "description": "Writer configuration for core table.",
@@ -2240,7 +2388,8 @@
         {
           "block_size": 67108864
         }
-      ]
+      ],
+      "default": {}
     },
     "core_table_writer_config": {
       "description": "Alias for core_table_writer.",
@@ -2249,14 +2398,16 @@
         {
           "block_size": 67108864
         }
-      ]
+      ],
+      "default": {}
     },
     "enable_cuda_gpu_core_dump": {
       "description": "Enable CUDA GPU core dumps.",
       "type": "boolean",
       "examples": [
         false
-      ]
+      ],
+      "default": false
     },
     "data_weight_per_sort_job": {
       "description": "Approximate input data weight per sort job in bytes.",
@@ -2264,7 +2415,8 @@
       "minimum": 1,
       "examples": [
         2147483648
-      ]
+      ],
+      "default": 2147483648
     },
     "data_weight_per_partition_job": {
       "description": "Approximate input data weight per partition job in bytes.",
@@ -2305,7 +2457,8 @@
         {
           "cpu": 8
         }
-      ]
+      ],
+      "default": {}
     }
   },
   "$defs": {
@@ -2634,7 +2787,8 @@
           "minimum": 0,
           "examples": [
             2
-          ]
+          ],
+          "default": 1
         },
         "gpu_limit": {
           "description": "GPU units mounted into the job container.",
@@ -2642,7 +2796,8 @@
           "minimum": 0,
           "examples": [
             1
-          ]
+          ],
+          "default": 0
         },
         "memory_limit": {
           "description": "Memory limit in bytes.",
@@ -2650,7 +2805,8 @@
           "minimum": 0,
           "examples": [
             4294967296
-          ]
+          ],
+          "default": 536870912
         },
         "memory_reserve_factor": {
           "description": "Memory reserve factor applied to the job memory limit.",
@@ -2681,7 +2837,8 @@
           "minimum": 0,
           "examples": [
             1048576
-          ]
+          ],
+          "default": 5242880
         },
         "custom_statistics_count_limit": {
           "description": "Maximum number of custom statistics written by the job.",
@@ -2689,7 +2846,8 @@
           "minimum": 0,
           "examples": [
             128
-          ]
+          ],
+          "default": 128
         },
         "job_time_limit": {
           "description": "Job execution time limit in milliseconds.",
@@ -2711,28 +2869,32 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "copy_files": {
           "description": "Whether user files are copied to the sandbox.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": false
         },
         "use_yamr_descriptors": {
           "description": "Whether Yamr-style output file descriptor numbering is used.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "check_input_fully_consumed": {
           "description": "Whether the job proxy checks that the user job read all input data.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": false
         },
         "disk_space_limit": {
           "description": "Total sandbox disk-space limit in bytes.",
@@ -2756,14 +2918,16 @@
           "minimum": 0,
           "examples": [
             1
-          ]
+          ],
+          "default": 0
         },
         "set_container_cpu_limit": {
           "description": "Whether to force the container CPU limit; normally not set by users.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": false
         },
         "network_project": {
           "description": "Network project assigned to the user job.",
@@ -2821,7 +2985,8 @@
           "$ref": "#/$defs/duration",
           "examples": [
             "45m"
-          ]
+          ],
+          "default": "45m"
         },
         "user_job_memory_digest_default_value": {
           "description": "Default user-job memory digest value.",
@@ -2830,7 +2995,8 @@
           "maximum": 1,
           "examples": [
             0.5
-          ]
+          ],
+          "default": 0.5
         },
         "user_job_memory_digest_lower_bound": {
           "description": "Lower bound for user-job memory digest.",
@@ -2839,14 +3005,16 @@
           "maximum": 1,
           "examples": [
             0.05
-          ]
+          ],
+          "default": 0.05
         },
         "ignore_memory_reserve_factor_less_than_one": {
           "description": "Ignore memory reserve factor values less than one.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "user_job_resource_overdraft_memory_multiplier": {
           "description": "User job overdraft memory multiplier.",
@@ -2855,7 +3023,8 @@
           "maximum": 10,
           "examples": [
             2.0
-          ]
+          ],
+          "default": null
         },
         "resource_overdraft_memory_reserve_multiplier": {
           "description": "Alias for user_job_resource_overdraft_memory_multiplier.",
@@ -2864,7 +3033,8 @@
           "maximum": 10,
           "examples": [
             2.0
-          ]
+          ],
+          "default": null
         },
         "job_proxy_memory_digest": {
           "description": "Log digest config for job proxy memory estimation.",
@@ -2876,7 +3046,12 @@
             {
               "default_value": 1.0
             }
-          ]
+          ],
+          "default": {
+            "default_value": 1.0,
+            "lower_bound": 0.5,
+            "upper_bound": 2.0
+          }
         },
         "job_proxy_resource_overdraft_memory_multiplier": {
           "description": "Job proxy overdraft memory multiplier.",
@@ -2885,14 +3060,16 @@
           "maximum": 10,
           "examples": [
             2.0
-          ]
+          ],
+          "default": null
         },
         "include_memory_mapped_files": {
           "description": "Include memory-mapped files in memory accounting.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "tmpfs_volumes": {
           "description": "Deprecated tmpfs volume descriptors.",
@@ -2924,21 +3101,24 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_porto_memory_tracking": {
           "description": "Use Porto memory tracking.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "force_core_dump": {
           "description": "Force core dump generation.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "interruption_signal": {
           "description": "Signal used to interrupt the job.",
@@ -2952,14 +3132,16 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_gpu_layers": {
           "description": "Enable GPU layers for the job.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "cuda_toolkit_version": {
           "description": "CUDA toolkit version requested by the job.",
@@ -2973,7 +3155,8 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "collective_options": {
           "description": "Collective communication options.",
@@ -3004,21 +3187,24 @@
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "enable_fuse": {
           "description": "Enable FUSE in the job sandbox.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_smaps_memory_tracker": {
           "description": "Use smaps memory tracker.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "monitoring": {
           "description": "User job monitoring configuration.",
@@ -3028,7 +3214,8 @@
           },
           "examples": [
             {}
-          ]
+          ],
+          "default": {}
         },
         "system_layer_path": {
           "description": "System layer path.",
@@ -3042,7 +3229,8 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "profilers": {
           "description": "Profilers enabled for this user job.",
@@ -3064,14 +3252,16 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_shuffle_service_in_job_proxy": {
           "description": "Enable shuffle service inside job proxy.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "rpc_proxy_worker_thread_pool_size": {
           "description": "RPC proxy worker thread pool size.",
@@ -3079,21 +3269,24 @@
           "minimum": 1,
           "examples": [
             1
-          ]
+          ],
+          "default": 1
         },
         "start_queue_consumer_registration_manager": {
           "description": "Start queue consumer registration manager.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "fail_on_job_restart": {
           "description": "Fail operation if this job restarts.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "extra_environment": {
           "description": "Extra environment variables.",
@@ -3119,21 +3312,24 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_fixed_user_id": {
           "description": "Enable fixed user id inside the job.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "restrict_porto_place": {
           "description": "Restrict Porto place.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "sidecars": {
           "description": "Sidecar jobs keyed by sidecar name.",
@@ -3244,7 +3440,8 @@
                     "max_buffer_size": 1048576
                   }
                 }
-              ]
+              ],
+              "default": {}
             },
             "output_table_paths": {
               "description": "Output table paths for this vanilla task.",
@@ -3277,7 +3474,8 @@
               "type": "boolean",
               "examples": [
                 false
-              ]
+              ],
+              "default": false
             },
             "gang_options": {
               "description": "Gang scheduling options for this task.",
@@ -3323,7 +3521,8 @@
               "max_buffer_size": 1048576,
               "retry_count": 20
             }
-          ]
+          ],
+          "default": {}
         },
         "table_writer": {
           "description": "Table writer configuration for job output.",
@@ -3333,7 +3532,8 @@
               "block_size": 67108864,
               "desired_chunk_size": 2147483648
             }
-          ]
+          ],
+          "default": {}
         },
         "error_file_writer": {
           "description": "Stderr/error file writer configuration.",
@@ -3342,7 +3542,8 @@
             {
               "block_size": 16777216
             }
-          ]
+          ],
+          "default": {}
         },
         "control_attributes": {
           "description": "Control attributes configuration written to job streams.",
@@ -3352,7 +3553,8 @@
               "enable_table_index": true,
               "enable_row_index": true
             }
-          ]
+          ],
+          "default": {}
         },
         "buffer_row_count": {
           "description": "Maximum number of rows buffered in job proxy.",
@@ -3360,7 +3562,8 @@
           "minimum": 0,
           "examples": [
             1000
-          ]
+          ],
+          "default": 10000
         },
         "pipe_io_pool_size": {
           "description": "Size of the job proxy data-processing pool.",
@@ -3368,7 +3571,8 @@
           "minimum": 0,
           "examples": [
             4
-          ]
+          ],
+          "default": 1
         },
         "dynamic_table_writer": {
           "description": "Dynamic table writer configuration.",
@@ -3377,7 +3581,8 @@
             {
               "flush_period": "5s"
             }
-          ]
+          ],
+          "default": {}
         },
         "use_adaptive_buffer_row_count": {
           "description": "Whether adaptive job-proxy row buffering is enabled.",
@@ -3392,7 +3597,8 @@
           "minimum": 1,
           "examples": [
             40000
-          ]
+          ],
+          "default": 40000
         },
         "pipe_capacity": {
           "description": "Job proxy pipe capacity.",
@@ -3407,7 +3613,8 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "block_cache": {
           "description": "Block cache settings for job I/O.",
@@ -3417,7 +3624,8 @@
           },
           "examples": [
             {}
-          ]
+          ],
+          "default": {}
         },
         "testing_options": {
           "description": "Testing-only job I/O options.",
@@ -3426,7 +3634,8 @@
             {
               "pipe_delay": "100ms"
             }
-          ]
+          ],
+          "default": {}
         }
       },
       "examples": [
@@ -3583,7 +3792,8 @@
           "minimum": 1,
           "examples": [
             10
-          ]
+          ],
+          "default": 10
         },
         "max_tentative_job_duration_ratio": {
           "description": "Maximum allowed ratio between tentative-tree and regular-tree average job duration.",
@@ -3591,21 +3801,24 @@
           "exclusiveMinimum": 0,
           "examples": [
             10.0
-          ]
+          ],
+          "default": 10.0
         },
         "min_job_duration": {
           "description": "Job duration threshold below which tentative-tree duration comparisons are ignored.",
           "$ref": "#/$defs/duration",
           "examples": [
             "30s"
-          ]
+          ],
+          "default": "30s"
         },
         "ignore_missing_pool_trees": {
           "description": "Whether missing tentative pool trees are ignored.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         }
       },
       "examples": [
@@ -3627,7 +3840,8 @@
           "minimum": 0,
           "examples": [
             1
-          ]
+          ],
+          "default": 1
         },
         "max_fails_no_exit_code": {
           "description": "Maximum failures for jobs without an exit code.",
@@ -3635,7 +3849,8 @@
           "minimum": 0,
           "examples": [
             100
-          ]
+          ],
+          "default": 2147483647
         },
         "max_fails_per_known_exit_code": {
           "description": "Map from known exit code to maximum tolerated failures.",
@@ -3672,7 +3887,8 @@
           "minimum": 1,
           "examples": [
             3
-          ]
+          ],
+          "default": 3
         },
         "min_upload_replication_factor": {
           "description": "Minimum upload replication factor.",
@@ -3680,7 +3896,8 @@
           "minimum": 1,
           "examples": [
             1
-          ]
+          ],
+          "default": 1
         },
         "direct_upload_node_count": {
           "description": "Direct upload node count.",
@@ -3695,7 +3912,8 @@
           "type": "string",
           "examples": [
             "none"
-          ]
+          ],
+          "default": "none"
         },
         "enable_striped_erasure": {
           "description": "Whether striped erasure is enabled.",
@@ -3818,14 +4036,16 @@
           "minimum": 1,
           "examples": [
             100
-          ]
+          ],
+          "default": 100
         },
         "run_external_symbolizer": {
           "description": "Whether to symbolize with an external symbolizer.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         }
       },
       "examples": [
@@ -4135,28 +4355,32 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "suppress_expiration_timeout_renewal": {
           "description": "Suppress expiration timeout renewal for read data.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "unavailable_chunk_strategy": {
           "description": "Strategy for unavailable chunks while reading.",
           "type": "string",
           "examples": [
             "restore"
-          ]
+          ],
+          "default": "restore"
         },
         "chunk_availability_policy": {
           "description": "Chunk availability policy while reading.",
           "type": "string",
           "examples": [
             "repairable"
-          ]
+          ],
+          "default": "repairable"
         },
         "max_read_duration": {
           "description": "Maximum read duration.",
@@ -4172,7 +4396,8 @@
             {
               "retry_count": 10
             }
-          ]
+          ],
+          "default": {}
         },
         "max_buffer_size": {
           "description": "Maximum reader buffer size in bytes.",
@@ -4180,7 +4405,8 @@
           "minimum": 1,
           "examples": [
             1048576
-          ]
+          ],
+          "default": 104857600
         },
         "max_parallel_readers": {
           "description": "Maximum number of parallel chunk readers.",
@@ -4188,14 +4414,16 @@
           "minimum": 1,
           "examples": [
             16
-          ]
+          ],
+          "default": 512
         },
         "enable_auto_repair": {
           "description": "Whether erasure chunks may be automatically repaired while reading.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "replication_reader_speed_limit_per_sec": {
           "description": "Speed limit for replication reader in bytes per second.",
@@ -4203,35 +4431,40 @@
           "minimum": 0,
           "examples": [
             104857600
-          ]
+          ],
+          "default": 5242880
         },
         "slow_reader_expiration_timeout": {
           "description": "Expiration timeout for slow replication readers.",
           "$ref": "#/$defs/duration",
           "examples": [
             "30s"
-          ]
+          ],
+          "default": "2m"
         },
         "replication_reader_timeout": {
           "description": "Timeout for replication reader operations.",
           "$ref": "#/$defs/duration",
           "examples": [
             "30s"
-          ]
+          ],
+          "default": "300s"
         },
         "replication_reader_failure_timeout": {
           "description": "Failure timeout for replication reader operations.",
           "$ref": "#/$defs/duration",
           "examples": [
             "1m"
-          ]
+          ],
+          "default": "10m"
         },
         "block_rpc_timeout": {
           "description": "Timeout for block RPC requests.",
           "$ref": "#/$defs/duration",
           "examples": [
             "120s"
-          ]
+          ],
+          "default": "120s"
         },
         "block_rpc_hedging_delay": {
           "description": "Hedging delay for block RPC requests.",
@@ -4252,28 +4485,32 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "cancel_primary_lookup_rpc_request_on_hedging": {
           "description": "Cancel primary lookup RPC request when hedging starts.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "lookup_rpc_timeout": {
           "description": "Timeout for lookup RPC requests.",
           "$ref": "#/$defs/duration",
           "examples": [
             "30s"
-          ]
+          ],
+          "default": "30s"
         },
         "meta_rpc_timeout": {
           "description": "Timeout for chunk meta RPC requests.",
           "$ref": "#/$defs/duration",
           "examples": [
             "30s"
-          ]
+          ],
+          "default": "30s"
         },
         "meta_rpc_hedging_delay": {
           "description": "Hedging delay for chunk meta RPC requests.",
@@ -4287,7 +4524,8 @@
           "$ref": "#/$defs/duration",
           "examples": [
             "5s"
-          ]
+          ],
+          "default": "5s"
         },
         "probe_peer_count": {
           "description": "Number of peers probed for a chunk.",
@@ -4295,7 +4533,8 @@
           "minimum": 1,
           "examples": [
             3
-          ]
+          ],
+          "default": 3
         },
         "retry_count": {
           "description": "Reader retry count.",
@@ -4303,28 +4542,32 @@
           "minimum": 0,
           "examples": [
             20
-          ]
+          ],
+          "default": 20
         },
         "fail_on_no_seeds": {
           "description": "Fail when no chunk seeds are available.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "min_backoff_time": {
           "description": "Minimum reader retry backoff.",
           "$ref": "#/$defs/duration",
           "examples": [
             "3s"
-          ]
+          ],
+          "default": "3s"
         },
         "max_backoff_time": {
           "description": "Maximum reader retry backoff.",
           "$ref": "#/$defs/duration",
           "examples": [
             "60s"
-          ]
+          ],
+          "default": "60s"
         },
         "backoff_time_multiplier": {
           "description": "Reader retry backoff multiplier.",
@@ -4332,7 +4575,8 @@
           "minimum": 0,
           "examples": [
             1.5
-          ]
+          ],
+          "default": 1.5
         },
         "pass_count": {
           "description": "Number of passes for chunk peer selection.",
@@ -4340,56 +4584,64 @@
           "minimum": 0,
           "examples": [
             500
-          ]
+          ],
+          "default": 500
         },
         "fetch_from_peers": {
           "description": "Fetch chunk blocks from peers.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "fetch_node_descriptors": {
           "description": "Fetch node descriptors while reading.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "peer_expiration_timeout": {
           "description": "Expiration timeout for cached peer information.",
           "$ref": "#/$defs/duration",
           "examples": [
             "300s"
-          ]
+          ],
+          "default": "300s"
         },
         "populate_cache": {
           "description": "Populate block cache while reading.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "prefer_local_host": {
           "description": "Prefer local host when selecting chunk peers.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "prefer_local_rack": {
           "description": "Prefer local rack when selecting chunk peers.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "prefer_local_data_center": {
           "description": "Prefer local data center when selecting chunk peers.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "max_ban_count": {
           "description": "Maximum number of peer bans.",
@@ -4397,28 +4649,32 @@
           "minimum": 0,
           "examples": [
             100
-          ]
+          ],
+          "default": 5
         },
         "enable_workload_fifo_scheduling": {
           "description": "Enable FIFO scheduling for reader workload.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "retry_timeout": {
           "description": "Overall reader retry timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5m"
-          ]
+          ],
+          "default": "3m"
         },
         "session_timeout": {
           "description": "Chunk reader session timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5m"
-          ]
+          ],
+          "default": "20m"
         },
         "lookup_request_pass_count": {
           "description": "Pass count for lookup requests.",
@@ -4426,7 +4682,8 @@
           "minimum": 0,
           "examples": [
             3
-          ]
+          ],
+          "default": 10
         },
         "lookup_request_retry_count": {
           "description": "Retry count for lookup requests.",
@@ -4434,49 +4691,56 @@
           "minimum": 0,
           "examples": [
             3
-          ]
+          ],
+          "default": 5
         },
         "use_async_block_cache": {
           "description": "Use asynchronous block cache.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_block_cache": {
           "description": "Use block cache.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "prolonged_discard_seeds_delay": {
           "description": "Delay before discarding prolonged seeds.",
           "$ref": "#/$defs/duration",
           "examples": [
             "10s"
-          ]
+          ],
+          "default": "1m"
         },
         "enable_chunk_meta_cache": {
           "description": "Enable chunk meta cache.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "ban_peers_permanently": {
           "description": "Ban failing peers permanently for this reader.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "enable_local_throttling": {
           "description": "Enable local reader throttling.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "chunk_meta_cache_failure_probability": {
           "description": "Testing probability of chunk meta cache failure.",
@@ -4491,21 +4755,24 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_chunk_prober": {
           "description": "Use chunk prober while reading.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_read_blocks_batcher": {
           "description": "Use read-blocks batcher.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "block_set_subrequest_threshold": {
           "description": "Threshold for block-set subrequests.",
@@ -4534,7 +4801,8 @@
           "minimum": 0,
           "examples": [
             1.0
-          ]
+          ],
+          "default": 1.0
         },
         "net_queue_size_factor": {
           "description": "Network queue size factor.",
@@ -4542,7 +4810,8 @@
           "minimum": 0,
           "examples": [
             0.5
-          ]
+          ],
+          "default": 0.5
         },
         "cached_block_count_factor": {
           "description": "Cached block count factor.",
@@ -4550,7 +4819,8 @@
           "minimum": 0,
           "examples": [
             0.0
-          ]
+          ],
+          "default": 0.0
         },
         "cached_block_size_factor": {
           "description": "Cached block size factor.",
@@ -4558,7 +4828,8 @@
           "minimum": 0,
           "examples": [
             0.0
-          ]
+          ],
+          "default": 0.0
         },
         "suspicious_node_grace_period": {
           "description": "Grace period before treating a node as suspicious.",
@@ -4572,7 +4843,8 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "window_size": {
           "description": "Block fetcher window size in bytes.",
@@ -4580,7 +4852,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 20971520
         },
         "group_size": {
           "description": "Block fetcher group size in bytes.",
@@ -4588,21 +4861,24 @@
           "minimum": 1,
           "examples": [
             4194304
-          ]
+          ],
+          "default": 15728640
         },
         "use_uncompressed_block_cache": {
           "description": "Use uncompressed block cache.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "group_out_of_order_blocks": {
           "description": "Group out-of-order blocks.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "max_chunks_per_fetch": {
           "description": "Maximum chunks per fetch request.",
@@ -4610,7 +4886,8 @@
           "minimum": 1,
           "examples": [
             100000
-          ]
+          ],
+          "default": 100000
         },
         "max_chunks_per_locate_request": {
           "description": "Maximum chunks per locate request.",
@@ -4618,7 +4895,8 @@
           "minimum": 1,
           "examples": [
             10000
-          ]
+          ],
+          "default": 10000
         },
         "workload_descriptor": {
           "description": "Workload descriptor for reader scheduling and throttling.",
@@ -4630,7 +4908,10 @@
             {
               "category": "user_batch"
             }
-          ]
+          ],
+          "default": {
+            "category": "user_batch"
+          }
         },
         "sampling_mode": {
           "description": "Sampling mode for table reads.",
@@ -4661,7 +4942,8 @@
           "minimum": 1,
           "examples": [
             10000
-          ]
+          ],
+          "default": 10000
         },
         "max_total_hunk_length_per_read": {
           "description": "Maximum total hunk length per read in bytes.",
@@ -4669,42 +4951,48 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "peer_info_expiration_timeout": {
           "description": "Expiration timeout for cached peer info.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5m"
-          ]
+          ],
+          "default": "30m"
         },
         "seeds_expiration_timeout": {
           "description": "Expiration timeout for located chunk seeds.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5m"
-          ]
+          ],
+          "default": "3s"
         },
         "periodic_update_delay": {
           "description": "Delay between periodic peer-info updates.",
           "$ref": "#/$defs/duration",
           "examples": [
             "1s"
-          ]
+          ],
+          "default": "10s"
         },
         "probe_chunk_set_rpc_timeout": {
           "description": "Timeout for probe chunk set RPC.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5s"
-          ]
+          ],
+          "default": "5s"
         },
         "get_chunk_fragment_set_rpc_timeout": {
           "description": "Timeout for get chunk fragment set RPC.",
           "$ref": "#/$defs/duration",
           "examples": [
             "30s"
-          ]
+          ],
+          "default": "15s"
         },
         "fragment_read_hedging_delay": {
           "description": "Hedging delay for fragment reads.",
@@ -4719,28 +5007,32 @@
           "minimum": 0,
           "examples": [
             20
-          ]
+          ],
+          "default": 10
         },
         "retry_backoff_time": {
           "description": "Retry backoff for fragment reads.",
           "$ref": "#/$defs/duration",
           "examples": [
             "1s"
-          ]
+          ],
+          "default": "10ms"
         },
         "read_time_limit": {
           "description": "Read time limit for chunk fragments.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5m"
-          ]
+          ],
+          "default": "15s"
         },
         "chunk_info_cache_expiration_timeout": {
           "description": "Chunk info cache expiration timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5m"
-          ]
+          ],
+          "default": "30s"
         },
         "max_inflight_fragment_length": {
           "description": "Maximum in-flight fragment length in bytes.",
@@ -4748,7 +5040,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "max_inflight_fragment_count": {
           "description": "Maximum in-flight fragment count.",
@@ -4756,21 +5049,24 @@
           "minimum": 1,
           "examples": [
             16
-          ]
+          ],
+          "default": 8192
         },
         "prefetch_whole_blocks": {
           "description": "Prefetch whole blocks while reading fragments.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "read_and_cache_whole_blocks": {
           "description": "Read and cache whole blocks while reading fragments.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "block_count_to_precache": {
           "description": "Number of blocks to precache.",
@@ -4778,7 +5074,8 @@
           "minimum": 0,
           "examples": [
             0
-          ]
+          ],
+          "default": 0
         },
         "compression_level": {
           "description": "Dictionary compression level.",
@@ -4794,7 +5091,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 67108864
         }
       },
       "examples": [
@@ -4818,7 +5116,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 16777216
         },
         "max_segment_value_count": {
           "description": "Maximum segment value count.",
@@ -4826,7 +5125,8 @@
           "minimum": 1,
           "examples": [
             100000
-          ]
+          ],
+          "default": 131072
         },
         "max_buffer_size": {
           "description": "Maximum writer buffer size in bytes.",
@@ -4834,7 +5134,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 16777216
         },
         "max_row_weight": {
           "description": "Maximum row weight in bytes.",
@@ -4842,7 +5143,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "max_key_weight": {
           "description": "Maximum key weight in bytes.",
@@ -4850,7 +5152,8 @@
           "minimum": 1,
           "examples": [
             1048576
-          ]
+          ],
+          "default": 16384
         },
         "max_data_weight_between_blocks": {
           "description": "Maximum data weight between blocks in bytes.",
@@ -4858,7 +5161,8 @@
           "minimum": 1,
           "examples": [
             134217728
-          ]
+          ],
+          "default": 2147483648
         },
         "sample_rate": {
           "description": "Sample rate for writer sampling.",
@@ -4866,14 +5170,16 @@
           "minimum": 0,
           "examples": [
             1.0
-          ]
+          ],
+          "default": 0.0001
         },
         "use_original_data_weight_in_samples": {
           "description": "Use original data weight in writer samples.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "chunk_indexes": {
           "description": "Chunk index writer configuration.",
@@ -4884,7 +5190,8 @@
                 "load_factor": 0.75
               }
             }
-          ]
+          ],
+          "default": {}
         },
         "slim": {
           "description": "Slim versioned writer configuration.",
@@ -4893,7 +5200,8 @@
             {
               "top_value_quantile": 0.99
             }
-          ]
+          ],
+          "default": {}
         },
         "testing_options": {
           "description": "Testing-only chunk writer options.",
@@ -4905,7 +5213,8 @@
             {
               "add_unsupported_feature": false
             }
-          ]
+          ],
+          "default": {}
         },
         "key_filter": {
           "description": "Key filter writer configuration.",
@@ -4914,7 +5223,8 @@
             {
               "enable": true
             }
-          ]
+          ],
+          "default": {}
         },
         "key_prefix_filter": {
           "description": "Key-prefix filter writer configuration.",
@@ -4926,14 +5236,16 @@
                 1
               ]
             }
-          ]
+          ],
+          "default": {}
         },
         "enable_large_columnar_statistics": {
           "description": "Enable large columnar statistics.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_segment_meta_in_blocks": {
           "description": "Enable segment metadata in blocks.",
@@ -4955,7 +5267,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "default_compression_ratio": {
           "description": "Default compression ratio estimate.",
@@ -4963,21 +5276,24 @@
           "minimum": 0,
           "examples": [
             0.2
-          ]
+          ],
+          "default": 0.2
         },
         "verify_compression": {
           "description": "Verify compression results.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "compute_checksum": {
           "description": "Compute block checksums.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "compression_concurrency": {
           "description": "Compression concurrency.",
@@ -4985,7 +5301,8 @@
           "minimum": 1,
           "examples": [
             1
-          ]
+          ],
+          "default": 1
         },
         "desired_chunk_size": {
           "description": "Desired chunk size in bytes.",
@@ -4993,7 +5310,8 @@
           "minimum": 1,
           "examples": [
             2147483648
-          ]
+          ],
+          "default": 2147483648
         },
         "desired_chunk_weight": {
           "description": "Desired chunk weight in bytes.",
@@ -5001,7 +5319,8 @@
           "minimum": 1,
           "examples": [
             107374182400
-          ]
+          ],
+          "default": 107374182400
         },
         "max_meta_size": {
           "description": "Maximum chunk metadata size in bytes.",
@@ -5009,7 +5328,8 @@
           "minimum": 1,
           "examples": [
             31457280
-          ]
+          ],
+          "default": 31457280
         },
         "testing_delay_before_chunk_close": {
           "description": "Testing delay before closing a chunk.",
@@ -5024,7 +5344,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 33554432
         },
         "group_size": {
           "description": "Writer group size in bytes.",
@@ -5032,7 +5353,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 10485760
         },
         "node_channel": {
           "description": "RPC channel configuration for writer node connections.",
@@ -5044,21 +5366,24 @@
             {
               "retry_attempts": 100
             }
-          ]
+          ],
+          "default": {}
         },
         "node_rpc_timeout": {
           "description": "Timeout for writer node RPCs.",
           "$ref": "#/$defs/duration",
           "examples": [
             "15s"
-          ]
+          ],
+          "default": "300s"
         },
         "probe_put_blocks_timeout": {
           "description": "Timeout for probe put-blocks RPC.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5s"
-          ]
+          ],
+          "default": "60s"
         },
         "upload_replication_factor": {
           "description": "Upload replication factor.",
@@ -5066,14 +5391,16 @@
           "minimum": 1,
           "examples": [
             3
-          ]
+          ],
+          "default": 2
         },
         "ban_failed_nodes": {
           "description": "Ban nodes with failed writes.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "min_upload_replication_factor": {
           "description": "Minimum upload replication factor.",
@@ -5081,7 +5408,8 @@
           "minimum": 1,
           "examples": [
             1
-          ]
+          ],
+          "default": 2
         },
         "direct_upload_node_count": {
           "description": "Direct upload node count.",
@@ -5096,49 +5424,56 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "node_ping_period": {
           "description": "Writer node ping period.",
           "$ref": "#/$defs/duration",
           "examples": [
             "10s"
-          ]
+          ],
+          "default": "10s"
         },
         "populate_cache": {
           "description": "Populate caches after writing.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "sync_on_close": {
           "description": "Synchronize chunks on close.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "enable_direct_io": {
           "description": "Use direct I/O for writes.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_early_finish": {
           "description": "Enable early finish for chunk writes.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "allocate_write_targets_backoff_time": {
           "description": "Backoff between write-target allocation attempts.",
           "$ref": "#/$defs/duration",
           "examples": [
             "1s"
-          ]
+          ],
+          "default": "5s"
         },
         "allocate_write_targets_retry_count": {
           "description": "Retry count for write-target allocation.",
@@ -5146,7 +5481,8 @@
           "minimum": 0,
           "examples": [
             3
-          ]
+          ],
+          "default": 10
         },
         "testing_delay": {
           "description": "Testing delay in writer.",
@@ -5160,28 +5496,32 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_probe_put_blocks": {
           "description": "Use probe put-blocks requests.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "preallocate_disk_space": {
           "description": "Preallocate disk space for writes.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_erasure_target_node_reallocation": {
           "description": "Enable erasure target node reallocation.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "erasure_window_size": {
           "description": "Erasure writer window size in bytes.",
@@ -5189,7 +5529,8 @@
           "minimum": 1,
           "examples": [
             8388608
-          ]
+          ],
+          "default": 8388608
         },
         "writer_window_size": {
           "description": "Writer window size in bytes.",
@@ -5197,7 +5538,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 67108864
         },
         "writer_group_size": {
           "description": "Writer group size for erasure writes in bytes.",
@@ -5205,7 +5547,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "desired_segment_part_size": {
           "description": "Desired segment part size in bytes.",
@@ -5213,21 +5556,24 @@
           "minimum": 0,
           "examples": [
             0
-          ]
+          ],
+          "default": 0
         },
         "erasure_store_original_block_checksums": {
           "description": "Store original block checksums for erasure chunks.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_striped_erasure": {
           "description": "Enable striped erasure.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "erasure_stripe_size": {
           "description": "Erasure stripe size.",
@@ -5242,21 +5588,24 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_block_reordering": {
           "description": "Enable block reordering.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "shuffle_blocks": {
           "description": "Shuffle blocks before writing.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "workload_descriptor": {
           "description": "Workload descriptor for writer scheduling and throttling.",
@@ -5268,7 +5617,10 @@
             {
               "category": "user_batch"
             }
-          ]
+          ],
+          "default": {
+            "category": "user_batch"
+          }
         },
         "validate_sorted": {
           "description": "Validate that written rows are sorted.",
@@ -5519,35 +5871,40 @@
           "$ref": "#/$defs/duration",
           "examples": [
             "20s"
-          ]
+          ],
+          "default": "20s"
         },
         "server_read_timeout": {
           "description": "Server-side read timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "20s"
-          ]
+          ],
+          "default": "20s"
         },
         "client_write_timeout": {
           "description": "Client-side write timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "20s"
-          ]
+          ],
+          "default": "20s"
         },
         "server_write_timeout": {
           "description": "Server-side write timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "20s"
-          ]
+          ],
+          "default": "20s"
         },
         "request_timeout": {
           "description": "Overall dynamic store request timeout.",
           "$ref": "#/$defs/duration",
           "examples": [
             "20m"
-          ]
+          ],
+          "default": "20m"
         },
         "max_rows_per_server_read": {
           "description": "Maximum rows returned by one server read.",
@@ -5555,7 +5912,8 @@
           "minimum": 1,
           "examples": [
             1024
-          ]
+          ],
+          "default": 1024
         },
         "window_size": {
           "description": "Streaming reader window size in bytes.",
@@ -5563,7 +5921,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "streaming_subrequest_failure_probability": {
           "description": "Testing probability for streaming subrequest failure.",
@@ -5571,7 +5930,8 @@
           "minimum": 0,
           "examples": [
             0
-          ]
+          ],
+          "default": 0
         },
         "retry_count": {
           "description": "Retry count for locating/reading remote stores.",
@@ -5579,14 +5939,16 @@
           "minimum": 1,
           "examples": [
             10
-          ]
+          ],
+          "default": 10
         },
         "locate_request_backoff_time": {
           "description": "Backoff between locate retries.",
           "$ref": "#/$defs/duration",
           "examples": [
             "10s"
-          ]
+          ],
+          "default": "10s"
         }
       },
       "examples": [
@@ -5607,7 +5969,8 @@
           "minimum": 0,
           "examples": [
             0.75
-          ]
+          ],
+          "default": 0.5
         },
         "rehash_trial_count": {
           "description": "Number of rehash trials used to pick a seed.",
@@ -5615,14 +5978,16 @@
           "minimum": 0,
           "examples": [
             10
-          ]
+          ],
+          "default": 3
         },
         "enable_group_reordering": {
           "description": "Whether group reordering is enabled.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "max_block_size": {
           "description": "Optional maximum hash-table block size.",
@@ -5630,7 +5995,8 @@
           "minimum": 1,
           "examples": [
             1048576
-          ]
+          ],
+          "default": 131072
         }
       },
       "examples": [
@@ -5652,7 +6018,8 @@
             {
               "load_factor": 0.75
             }
-          ]
+          ],
+          "default": {}
         }
       },
       "examples": [
@@ -5674,14 +6041,16 @@
           "minimum": 0,
           "examples": [
             0.99
-          ]
+          ],
+          "default": 0.1
         },
         "enable_per_value_dictionary_encoding": {
           "description": "Whether per-value dictionary encoding is enabled.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         }
       },
       "examples": [
@@ -5700,7 +6069,8 @@
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": false
         },
         "block_size": {
           "description": "Filter block size in bytes.",
@@ -5708,7 +6078,8 @@
           "minimum": 1,
           "examples": [
             65536
-          ]
+          ],
+          "default": 65536
         },
         "trial_count": {
           "description": "Number of trials when building the filter.",
@@ -5716,7 +6087,8 @@
           "minimum": 1,
           "examples": [
             10
-          ]
+          ],
+          "default": 100
         },
         "bits_per_key": {
           "description": "Bits per key in the filter.",
@@ -5752,7 +6124,8 @@
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": false
         },
         "block_size": {
           "description": "Filter block size in bytes.",
@@ -5760,7 +6133,8 @@
           "minimum": 1,
           "examples": [
             65536
-          ]
+          ],
+          "default": 65536
         },
         "trial_count": {
           "description": "Number of trials when building the filter.",
@@ -5768,7 +6142,8 @@
           "minimum": 1,
           "examples": [
             10
-          ]
+          ],
+          "default": 100
         },
         "bits_per_key": {
           "description": "Bits per key in the filter.",
@@ -5820,7 +6195,8 @@
           "$ref": "#/$defs/duration",
           "examples": [
             "100ms"
-          ]
+          ],
+          "default": "0s"
         }
       },
       "examples": [
@@ -5842,7 +6218,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "desired_chunk_size": {
           "description": "Desired chunk size in bytes.",
@@ -5850,7 +6227,8 @@
           "minimum": 1,
           "examples": [
             2147483648
-          ]
+          ],
+          "default": 2147483648
         },
         "desired_chunk_weight": {
           "description": "Desired chunk weight in bytes.",
@@ -5858,7 +6236,8 @@
           "minimum": 1,
           "examples": [
             107374182400
-          ]
+          ],
+          "default": 107374182400
         },
         "max_meta_size": {
           "description": "Maximum chunk metadata size in bytes.",
@@ -5866,7 +6245,8 @@
           "minimum": 1,
           "examples": [
             31457280
-          ]
+          ],
+          "default": 31457280
         },
         "testing_delay_before_chunk_close": {
           "description": "Testing delay before closing a chunk.",
@@ -5881,7 +6261,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 33554432
         },
         "group_size": {
           "description": "Writer group size in bytes.",
@@ -5889,7 +6270,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 10485760
         },
         "node_channel": {
           "description": "RPC channel configuration for writer node connections.",
@@ -5901,21 +6283,24 @@
             {
               "retry_attempts": 100
             }
-          ]
+          ],
+          "default": {}
         },
         "node_rpc_timeout": {
           "description": "Timeout for writer node RPCs.",
           "$ref": "#/$defs/duration",
           "examples": [
             "15s"
-          ]
+          ],
+          "default": "300s"
         },
         "probe_put_blocks_timeout": {
           "description": "Timeout for probe put-blocks RPC.",
           "$ref": "#/$defs/duration",
           "examples": [
             "5s"
-          ]
+          ],
+          "default": "60s"
         },
         "upload_replication_factor": {
           "description": "Upload replication factor.",
@@ -5923,14 +6308,16 @@
           "minimum": 1,
           "examples": [
             3
-          ]
+          ],
+          "default": 2
         },
         "ban_failed_nodes": {
           "description": "Ban nodes with failed writes.",
           "type": "boolean",
           "examples": [
             true
-          ]
+          ],
+          "default": true
         },
         "min_upload_replication_factor": {
           "description": "Minimum upload replication factor.",
@@ -5938,7 +6325,8 @@
           "minimum": 1,
           "examples": [
             1
-          ]
+          ],
+          "default": 2
         },
         "direct_upload_node_count": {
           "description": "Direct upload node count.",
@@ -5953,49 +6341,56 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "node_ping_period": {
           "description": "Writer node ping period.",
           "$ref": "#/$defs/duration",
           "examples": [
             "10s"
-          ]
+          ],
+          "default": "10s"
         },
         "populate_cache": {
           "description": "Populate caches after writing.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "sync_on_close": {
           "description": "Synchronize chunks on close.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": true
         },
         "enable_direct_io": {
           "description": "Use direct I/O for writes.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_early_finish": {
           "description": "Enable early finish for chunk writes.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "allocate_write_targets_backoff_time": {
           "description": "Backoff between write-target allocation attempts.",
           "$ref": "#/$defs/duration",
           "examples": [
             "1s"
-          ]
+          ],
+          "default": "5s"
         },
         "allocate_write_targets_retry_count": {
           "description": "Retry count for write-target allocation.",
@@ -6003,7 +6398,8 @@
           "minimum": 0,
           "examples": [
             3
-          ]
+          ],
+          "default": 10
         },
         "testing_delay": {
           "description": "Testing delay in writer.",
@@ -6017,28 +6413,32 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "use_probe_put_blocks": {
           "description": "Use probe put-blocks requests.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "preallocate_disk_space": {
           "description": "Preallocate disk space for writes.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_erasure_target_node_reallocation": {
           "description": "Enable erasure target node reallocation.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "erasure_window_size": {
           "description": "Erasure writer window size in bytes.",
@@ -6046,7 +6446,8 @@
           "minimum": 1,
           "examples": [
             8388608
-          ]
+          ],
+          "default": 8388608
         },
         "writer_window_size": {
           "description": "Writer window size in bytes.",
@@ -6054,7 +6455,8 @@
           "minimum": 1,
           "examples": [
             67108864
-          ]
+          ],
+          "default": 67108864
         },
         "writer_group_size": {
           "description": "Writer group size for erasure writes in bytes.",
@@ -6062,7 +6464,8 @@
           "minimum": 1,
           "examples": [
             16777216
-          ]
+          ],
+          "default": 16777216
         },
         "desired_segment_part_size": {
           "description": "Desired segment part size in bytes.",
@@ -6070,21 +6473,24 @@
           "minimum": 0,
           "examples": [
             0
-          ]
+          ],
+          "default": 0
         },
         "erasure_store_original_block_checksums": {
           "description": "Store original block checksums for erasure chunks.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_striped_erasure": {
           "description": "Enable striped erasure.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "erasure_stripe_size": {
           "description": "Erasure stripe size.",
@@ -6099,21 +6505,24 @@
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "enable_block_reordering": {
           "description": "Enable block reordering.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "shuffle_blocks": {
           "description": "Shuffle blocks before writing.",
           "type": "boolean",
           "examples": [
             false
-          ]
+          ],
+          "default": false
         },
         "workload_descriptor": {
           "description": "Workload descriptor for writer scheduling and throttling.",
@@ -6125,7 +6534,10 @@
             {
               "category": "user_batch"
             }
-          ]
+          ],
+          "default": {
+            "category": "user_batch"
+          }
         }
       },
       "examples": [
