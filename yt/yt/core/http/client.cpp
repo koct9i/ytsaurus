@@ -22,6 +22,10 @@ using namespace NNet;
 
 ////////////////////////////////////////////////////////////////////////////////
 
+constinit const auto Logger = HttpLogger;
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TClient
     : public IClient
 {
@@ -295,6 +299,9 @@ private:
         }));
     }
 
+    static constexpr TStringBuf StaleConnectionErrorMessage =
+        "Connection was closed before the first byte of HTTP message";
+
     IResponsePtr DoRequest(
         EMethod method,
         const std::string& url,
@@ -302,29 +309,49 @@ private:
         const THeadersPtr& headers,
         int redirectCount = 0)
     {
-        auto requestData = StartAndWriteHeaders(method, url, headers);
+        while (true) {
+            try {
+                auto requestData = StartAndWriteHeaders(method, url, headers);
 
-        if (body) {
-            WaitFor(requestData.Request->WriteBody(*body))
-                .ThrowOnError();
-        } else {
-            WaitFor(requestData.Request->Close())
-                .ThrowOnError();
-        }
+                if (body) {
+                    WaitFor(requestData.Request->WriteBody(*body))
+                        .ThrowOnError();
+                } else {
+                    WaitFor(requestData.Request->Close())
+                        .ThrowOnError();
+                }
 
-        if (Config_->IgnoreContinueResponses) {
-            while (requestData.Response->GetStatusCode() == EStatusCode::Continue) {
-                requestData.Response->Reset();
+                if (Config_->IgnoreContinueResponses) {
+                    while (requestData.Response->GetStatusCode() == EStatusCode::Continue) {
+                        requestData.Response->Reset();
+                    }
+                }
+
+                // Waits for response headers internally.
+                auto redirectUrl = requestData.Response->TryGetRedirectUrl();
+                if (redirectUrl && redirectCount < Config_->MaxRedirectCount) {
+                    return DoRequest(method, *redirectUrl, body, headers, redirectCount + 1);
+                }
+
+                return requestData.Response;
+            } catch (const std::exception& ex) {
+                // Always retry if a pooled connection was closed by the server
+                // between the pool validation check and the actual request.
+                // This is safe because no response bytes were received.
+                // Multiple pooled connections may be stale, so we must
+                // keep retrying until we get a fresh one.
+                if (Config_->MaxIdleConnections > 0 &&
+                    TError(ex).FindMatching([] (const TError& error) {
+                        return error.GetMessage() == StaleConnectionErrorMessage;
+                    }))
+                {
+                    YT_LOG_DEBUG(ex, "Retrying request due to stale pooled connection (Url: %v)",
+                        SanitizeUrl(url));
+                    continue;
+                }
+                throw;
             }
         }
-
-        // Waits for response headers internally.
-        auto redirectUrl = requestData.Response->TryGetRedirectUrl();
-        if (redirectUrl && redirectCount < Config_->MaxRedirectCount) {
-            return DoRequest(method, *redirectUrl, body, headers, redirectCount + 1);
-        }
-
-        return requestData.Response;
     }
 };
 
