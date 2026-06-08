@@ -18,6 +18,7 @@ from yt.common import _pretty_format_for_logging, get_fqdn as _get_fqdn
 import io
 import os
 import re
+import subprocess
 import sys
 import time
 import types
@@ -699,6 +700,37 @@ def _get_token_from_file(client):
         return token
 
 
+def _get_token_from_command(client):
+    token_command = get_config(client=client)["token_command"]
+    if not token_command:
+        return None
+    try:
+        result = subprocess.run(
+            token_command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "token_command exited with code %d: %s",
+                result.returncode,
+                result.stderr.decode(errors="replace").strip(),
+            )
+            return None
+        token = result.stdout.decode(errors="replace").strip()
+        if token:
+            logger.debug("Token got from token_command")
+        return token or None
+    except subprocess.TimeoutExpired:
+        logger.warning("token_command timed out after 30 seconds")
+        return None
+    except Exception as e:
+        logger.warning("Failed to get token from token_command: %s", e)
+        return None
+
+
 def get_token(token=None, client=None):
     """Extracts token from given `token` and `client` arguments. Also checks token for correctness."""
     if token is not None:
@@ -718,6 +750,8 @@ def get_token(token=None, client=None):
 
     if not token:
         token = _get_token_from_file(client)
+    if not token:
+        token = _get_token_from_command(client)
     if not token:
         receive_token_by_ssh_session = \
             get_config(client)["allow_receive_token_by_current_ssh_session"] and \
