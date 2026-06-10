@@ -620,3 +620,5 @@ items:
           href: draft/yson-formats-sdk-draft-13.md
         - name: Bus RPC service performance tuning (draft-14)
           href: draft/bus-rps-service-performance-tuning-draft-14.md
+        - name: Local filesystem representation of Cypress trees (draft-16)
+          href: draft/cypress-local-filesystem-format-draft-16.md
