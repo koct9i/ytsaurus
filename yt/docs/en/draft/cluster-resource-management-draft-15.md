@@ -16,7 +16,7 @@ Resource management in {{product-name}} is split between several planes:
 2. **Accounts**: control persistent storage and master metadata resources: disk space per medium, Cypress node count, chunk count, master memory, tablets, and tablet static memory. Account state is under `//sys/accounts` and `//sys/account_tree`.
 3. **Tablet cell bundles**: control dynamic-table serving capacity: tablet nodes, tablet count, tablet static memory, CPU, memory, thread pools, and memory categories. Bundle state is under `//sys/tablet_cell_bundles`.
 4. **Masters and proxies**: control request rates, request queues, request complexity, and RPC/service concurrency. User request limits live on `//sys/users/<user>`; master-side global throttlers are configured in master dynamic config.
-5. **Data nodes and exec nodes**: enforce local physical limits such as disk location space, write sessions, read/write buffers, job sandbox disk space, memory cgroups, tmpfs, and per-node network/disk pressure.
+5. **Data nodes and exec nodes**: enforce local physical limits such as disk location space, write sessions, read/write buffers, job sandbox disk space, memory cgroups, tmpfs, per-node job CPU/memory/GPU capacity, and per-node network/disk pressure. In Kubernetes deployments, the exec-node pod specification and the `jobs` sidecar/container resource limits define the physical capacity that the scheduler can expose for user jobs.
 6. **Distributed throttlers**: control cluster-wide bandwidth or RPS for selected traffic classes, especially inter-cluster reads.
 
 A useful operational rule is to classify every symptom by the plane that owns it: a pending operation is usually a scheduler issue; a failed write due to quota is usually an account or bundle issue; a slow `get/list/exists` workload is often a master/proxy request-pressure issue; a mounted dynamic table rejecting writes is usually a tablet-bundle memory or flush-throughput issue.
@@ -25,6 +25,7 @@ A useful operational rule is to classify every symptom by the plane that owns it
 
 | Resource | Primary owner | Main configuration points | Main observability points | Shortage or overcommit behavior |
 |---|---|---|---|---|
+| Exec-node job capacity | Kubernetes/operator spec, exec node, scheduler | Exec-node pod `resources`; CRI `jobResources.limits.cpu`, `jobResources.limits.memory`, GPU limits; slots-location volume/PVC/`emptyDir.sizeLimit`; exec-node `@resource_limits` | Node UI; `//sys/exec_nodes/<node>/@resource_limits`; Kubernetes pod/container resources; slot-location disk metrics | Scheduler cannot run more jobs than node-advertised CPU, memory, GPU, user slots, and disk capacity; jobs may stay pending or fail on node-local exhaustion |
 | Job CPU | Scheduler, exec node | Operation task `cpu_limit`; pool `strong_guarantee_resources` and `resource_limits`; optional container CPU limit | Operation UI, scheduler orchid, job statistics, CPU metrics | Jobs are throttled or scheduled less often; starving operations may trigger preemption |
 | Job memory | Scheduler, exec node | Operation task `memory_limit`; memory reserve settings; pool memory guarantees/limits | Operation UI, job statistics, memory digest, aborted job reasons | Job may be aborted on memory limit or resource overdraft; scheduler reduces concurrency |
 | GPUs | Scheduler, exec node | Operation task `gpu_limit`; GPU pool tree/node tags; pool guarantees/limits | Operation UI, scheduler resource usage, node GPU health | Jobs remain pending; failed GPU jobs may be restarted or operation may fail |
@@ -48,9 +49,50 @@ A useful operational rule is to classify every symptom by the plane that owns it
 | RPC queues and service concurrency | Proxies, masters, nodes | Service configs: request queue size limits, thread pools, timeouts | RPC request queue size/limit metrics, latency histograms | Requests queue, time out, or fail with queue-size errors |
 | Transactions and locks | Masters | Transaction timeouts; application transaction discipline | `@locks`, transaction counts, master memory/CPU, request latency | Lock conflicts, higher master memory usage, failed commits, queue buildup |
 | Caches | Clients, nodes, masters/tablet nodes | Cache sizes and TTLs in component configs; table in-memory mode | Cache hit rate, memory usage, latency | More backend reads, higher disk/network/master load; memory pressure may evict useful data |
+| Job stderr/debug artifacts | Controller agent, exec node, operations archive | Operation `max_stderr_count`; task `max_stderr_size`; `stderr_table_path`; `job_node_account`; task `archive_ttl`; operations-archive retention | Jobs tab, `get_job_stderr`, `stderr_size`, archive tables, account usage for debug artifacts | Stderr is truncated, not collected after count limits, expired from archive, or written to a dedicated stderr table if configured |
 | Logs and tracing buffers | Components | Logging categories, rate limits, log rotation/retention | Disk usage, dropped/rate-limited log counters | Logs may be dropped or disks may fill, causing component instability |
 
 ## Scheduler-managed job resources
+
+### Exec-node job capacity from deployment configuration
+
+Before an operation-level `cpu_limit` or `memory_limit` can be scheduled, the cluster must advertise enough per-node job capacity. In Kubernetes deployments using CRI, the exec-node pod typically contains the main `ytserver` container and a separate `jobs` container. Job containers are launched inside the `jobs` container, so the `jobs` container limits are the hard physical envelope for user jobs on that exec node.
+
+A typical split in the cluster specification is:
+
+```yaml
+execNodes:
+  - resources:
+      limits:
+        cpu: 2
+        memory: 10Gi
+    jobResources:
+      limits:
+        cpu: 8
+        memory: 40Gi
+        nvidia.com/gpu: 1
+```
+
+Control layers:
+
+- **Exec-node pod resources**: reserve CPU and memory for the node process itself, JobProxy overhead, container runtime overhead, log writing, and system work.
+- **`jobResources.limits`**: define the aggregate CPU, memory, and GPU capacity available to user job containers on this exec node. These values are reflected in scheduler-visible node resource limits after the node registers.
+- **Slots location volume**: the volume or PVC mounted as the slots root (for example `/yt/node-data/slots`) defines local disk capacity for job sandboxes, artifacts, temporary files, and job stderr before upload. For `emptyDir`, `sizeLimit` is the local capacity guard; for PVCs, the claim size is the guard.
+- **Exec-node `@resource_limits`**: verify what the scheduler actually sees with `yt get //sys/exec_nodes/<node-address>/@resource_limits`.
+
+Monitoring:
+
+- Kubernetes pod/container requested and limited CPU, memory, and GPU.
+- `//sys/exec_nodes/<node-address>/@resource_limits`, `@state`, and `@alerts`.
+- Slot-location free bytes/inodes and per-node job sandbox usage.
+- Scheduler view of free node resources and unutilized-resource reasons.
+
+Shortage and overcommit:
+
+- If `jobResources` is smaller than expected, the scheduler has less CPU, memory, or GPU capacity to place jobs, even if pool guarantees are larger.
+- If the main exec-node container is underprovisioned, node heartbeats, job setup, layer preparation, and log upload may become bottlenecks although user job limits look healthy.
+- If the slots volume is too small, jobs can fail locally even when account disk quota is available; increase the slots volume/PVC or reduce job concurrency and temporary data.
+- GPU limits in `jobResources` and GPU device discovery must match the physical node; otherwise GPU jobs remain pending or fail during container startup.
 
 ### CPU
 
@@ -189,7 +231,7 @@ Shortage and overcommit:
 
 ### Local job disk and inodes
 
-A job uses local sandbox disk for input artifacts, temporary files, stderr, core files, and user-created files. By default disk space may not be strictly accounted to a user account, but `disk_request` can both reserve and limit sandbox disk resources.
+A job uses local sandbox disk for input artifacts, temporary files, stderr, core files, and user-created files. The aggregate local capacity comes from the exec-node slots-location volume configured in the cluster deployment; per-job reservation and limiting are controlled with `disk_request`. By default disk space may not be strictly accounted to a user account, but `disk_request` can both reserve and limit sandbox disk resources.
 
 Example:
 
@@ -219,7 +261,8 @@ Control layers:
 Monitoring:
 
 - Job statistics and failure reason.
-- Exec-node disk-free and inode-free metrics by location.
+- Exec-node disk-free and inode-free metrics by slots location.
+- Kubernetes volume/PVC usage for the slots location.
 - Node alerts for low disk watermarks.
 
 Shortage and overcommit:
@@ -633,9 +676,31 @@ Shortage and overcommit:
 - Low hit rate increases backend IO and latency.
 - Oversized caches can steal memory from active serving and trigger pressure elsewhere.
 
-## Logs, traces, and diagnostic output
+## Job stderr, logs, traces, and diagnostic output
 
-Logs and traces consume disk, IO bandwidth, CPU, and sometimes network bandwidth. Diagnostic output from jobs can also fill local disks.
+Logs and traces consume disk, IO bandwidth, CPU, and sometimes network bandwidth. Diagnostic output from jobs can also fill local disks and operations-archive tables.
+
+### Job stderr and debug artifacts
+
+User job stderr is a controlled resource in two dimensions: how much is collected from one job, and how many job stderrs are retained for an operation. The operation root option `max_stderr_count` limits the number of saved stderrs per job type; the task-level `max_stderr_size` limits bytes collected from one job, and excess stderr is ignored. If all stderr must be preserved, configure `stderr_table_path` so completed-job stderr is written to a dedicated table. Debug chunks such as stored stderr and failed-job input context are charged to `job_node_account`.
+
+Retention is controlled separately from collection. The operation/job spec can carry `archive_ttl`, and controller-agent configuration can enable applying this TTL to job archive rows. After archive retention expires, `get_job_stderr` may no longer find the data in the operations archive, even if the operation itself is still visible elsewhere.
+
+Monitoring:
+
+- Jobs tab and `get_job_stderr` for sampled retained stderr.
+- Job attributes such as `stderr_size` and filters for jobs with stderr.
+- Operations archive size, cleanup lag, and account usage for `job_node_account`.
+- Dedicated stderr table size when `stderr_table_path` is used.
+
+Shortage and overcommit:
+
+- A noisy job can have stderr truncated at `max_stderr_size`.
+- If more jobs produce stderr than `max_stderr_count`, only a bounded subset is retained in the normal job stderr path.
+- If the operations archive expires rows or cleanup catches up, historical stderr becomes unavailable through archive reads.
+- Excessive stderr writing can slow jobs and consume local slots disk before upload; redirect or rate-limit application logs if stderr becomes a data stream.
+
+### Component logs and traces
 
 Controls:
 
@@ -698,6 +763,10 @@ yt get //sys/accounts/<account>/@violated_resource_limits
 yt get //sys/pool_trees/<tree>/<pool>/@strong_guarantee_resources
 yt get //sys/pool_trees/<tree>/<pool>/@resource_limits
 yt get //sys/pool_trees/<tree>/<pool>/@max_running_operation_count
+
+# Exec-node job capacity
+yt get //sys/exec_nodes/<node-address>/@resource_limits
+yt get //sys/exec_nodes/<node-address>/@alerts
 
 # User request limits
 yt get //sys/users/<user>/@read_request_rate_limit
