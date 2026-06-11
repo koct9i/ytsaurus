@@ -21,6 +21,8 @@ Resource management in {{product-name}} is split between several planes:
 
 A useful operational rule is to classify every symptom by the plane that owns it: a pending operation is usually a scheduler issue; a failed write due to quota is usually an account or bundle issue; a slow `get/list/exists` workload is often a master/proxy request-pressure issue; a mounted dynamic table rejecting writes is usually a tablet-bundle memory or flush-throughput issue.
 
+Capacity and request/limit knobs are different layers. For example, `jobResources.limits.cpu` in the Kubernetes spec defines how much CPU an exec node may offer for user jobs, while `mapper.cpu_limit` defines how much of that capacity one job requests. Increasing a per-job limit cannot create capacity if the exec-node `jobs` container, GPU devices, or slots volume are already the bottleneck.
+
 ## Quick inventory
 
 | Resource | Primary owner | Main configuration points | Main observability points | Shortage or overcommit behavior |
@@ -32,6 +34,7 @@ A useful operational rule is to classify every symptom by the plane that owns it
 | User slots / job count | Scheduler | Pool `resource_limits.user_slots`; operation `resource_limits.user_slots`; tree operation-count limits | Scheduling page, operation progress | New jobs are not scheduled; operations remain pending |
 | Operation count | Scheduler | Pool/tree `max_operation_count`, `max_running_operation_count` | Scheduling page | Operations stay pending in pools |
 | Scheduler network resource | Scheduler | Automatic network resource for shuffle-heavy operations; pool limits where enabled | Operation/scheduler resource usage | Fewer network-heavy jobs are scheduled; preemption may occur |
+| Slots location capacity | Kubernetes/operator spec, exec node | Slots-root volume/PVC or `emptyDir.sizeLimit`; exec-node location configuration; user-slot count | Kubernetes volume usage; exec-node location free space/inodes; node alerts | Jobs fail or cannot start when sandboxes, temporary files, or stderr exhaust the slots location |
 | Job sandbox disk | Scheduler, exec node | Task `disk_request` with `disk_space`, `inode_count`, `account`, `medium_name` | Job statistics; node disk usage; job stderr/errors | Job interruption or failure if disk fills; scheduler avoids overcommitting requested space |
 | Persistent disk space | Accounts, data nodes | Account `resource_limits.disk_space_per_medium`; table `primary_medium`; replication/erasure/compression settings | Account UI; `@resource_usage`; Prometheus account metrics | New writes or creates under the account may be denied; usage may temporarily exceed limits because accounting is asynchronous |
 | Chunk count | Accounts, masters | Account `resource_limits.chunk_count`; writer chunk-size settings; merge/compaction policy | Account UI; `@resource_usage.chunk_count`; `yt_accounts_chunk_count` | New data-producing writes may be denied; masters spend more memory/CPU on metadata |
@@ -78,6 +81,7 @@ Control layers:
 - **Exec-node pod resources**: reserve CPU and memory for the node process itself, JobProxy overhead, container runtime overhead, log writing, and system work.
 - **`jobResources.limits`**: define the aggregate CPU, memory, and GPU capacity available to user job containers on this exec node. These values are reflected in scheduler-visible node resource limits after the node registers.
 - **Slots location volume**: the volume or PVC mounted as the slots root (for example `/yt/node-data/slots`) defines local disk capacity for job sandboxes, artifacts, temporary files, and job stderr before upload. For `emptyDir`, `sizeLimit` is the local capacity guard; for PVCs, the claim size is the guard.
+- **User slots**: the advertised `user_slots` value controls how many allocations can be placed on the node independently of CPU and memory. It must be sized together with `jobResources` and slots disk capacity; many small slots on a small volume can fail through local disk exhaustion.
 - **Exec-node `@resource_limits`**: verify what the scheduler actually sees with `yt get //sys/exec_nodes/<node-address>/@resource_limits`.
 
 Monitoring:
@@ -229,9 +233,9 @@ Shortage and overcommit:
 - The scheduler starts fewer network-heavy jobs per node.
 - If traffic exceeds physical NIC or ToR capacity despite scheduling, operation latency rises and retries/timeouts can appear.
 
-### Local job disk and inodes
+### Slots location and local job disk
 
-A job uses local sandbox disk for input artifacts, temporary files, stderr, core files, and user-created files. The aggregate local capacity comes from the exec-node slots-location volume configured in the cluster deployment; per-job reservation and limiting are controlled with `disk_request`. By default disk space may not be strictly accounted to a user account, but `disk_request` can both reserve and limit sandbox disk resources.
+A job uses local sandbox disk for input artifacts, temporary files, stderr, core files, and user-created files. The aggregate local capacity comes from the exec-node slots-location volume configured in the cluster deployment; per-job reservation and limiting are controlled with `disk_request`. Treat the slots location as a finite per-exec-node resource: its size bounds the total local disk footprint of all concurrent jobs on the node, regardless of persistent account disk quota. By default disk space may not be strictly accounted to a user account, but `disk_request` can both reserve and limit sandbox disk resources.
 
 Example:
 
@@ -682,7 +686,15 @@ Logs and traces consume disk, IO bandwidth, CPU, and sometimes network bandwidth
 
 ### Job stderr and debug artifacts
 
-User job stderr is a controlled resource in two dimensions: how much is collected from one job, and how many job stderrs are retained for an operation. The operation root option `max_stderr_count` limits the number of saved stderrs per job type; the task-level `max_stderr_size` limits bytes collected from one job, and excess stderr is ignored. If all stderr must be preserved, configure `stderr_table_path` so completed-job stderr is written to a dedicated table. Debug chunks such as stored stderr and failed-job input context are charged to `job_node_account`.
+User job stderr is a controlled resource in three dimensions: how much is collected from one job, how many job stderrs are retained for an operation, and how long archive rows remain available. The operation root option `max_stderr_count` limits the number of saved stderrs per job type; the task-level `max_stderr_size` limits bytes collected from one job, and excess stderr is ignored. Debug chunks such as stored stderr and failed-job input context are charged to `job_node_account`.
+
+| Control | Scope | Effect |
+|---|---|---|
+| `max_stderr_size` | Task/user job spec | Limits bytes collected from one job's stderr; the default is 5 MB and the configured value is capped. |
+| `max_stderr_count` | Operation root | Limits how many job stderrs are saved per job type; the usual default is 10 and the maximum accepted value is 150. |
+| `stderr_table_path` | Operation root | Writes complete stderr for completed jobs to a dedicated table created by the user; use this when normal bounded retention is insufficient. |
+| `job_node_account` | Operation root | Account that stores debug chunks such as stderr and failed-job input context. |
+| `archive_ttl` | User job spec / archive path | Controls how long job rows, including stderr references, remain in the operations archive when TTL application is enabled. |
 
 Retention is controlled separately from collection. The operation/job spec can carry `archive_ttl`, and controller-agent configuration can enable applying this TTL to job archive rows. After archive retention expires, `get_job_stderr` may no longer find the data in the operations archive, even if the operation itself is still visible elsewhere.
 
@@ -706,7 +718,7 @@ Controls:
 
 - Logging category levels and category rate limits.
 - Log rotation and retention.
-- Job stderr/core dump limits.
+- Component log disk quotas and retention.
 - Sampling for tracing and profiling.
 
 Monitoring:
@@ -791,3 +803,5 @@ yt get //sys/cluster_throttlers
 - [Input/output settings](../user-guide/storage/io-configuration.md)
 - [Bundle controller](../admin-guide/bundle-controller.md)
 - [Inter-cluster network bandwidth throttling](../admin-guide/cluster-throttlers.md)
+- [CRI for Job Container Runtime](../admin-guide/node-cri.md)
+- [Getting the YTsaurus specification ready](../admin-guide/prepare-spec.md)
