@@ -183,6 +183,40 @@ TEST_F(TStatelessLexerTest, IncorrectFinish)
     TestIncorrectFinish("-"); // numeric not finished
 }
 
+TEST_F(TStatelessLexerTest, SingleLineComments)
+{
+    // Comment before a token
+    TestToken("// comment\n123", ETokenType::Int64, "123");
+
+    // Comment with leading spaces
+    TestToken("  // comment\n  456", ETokenType::Int64, "456");
+
+    // Multiple comments
+    TestToken("// first\n// second\n789", ETokenType::Int64, "789");
+
+    // Comment at end of stream (no newline)
+    {
+        auto token = GetToken("// comment only");
+        EXPECT_EQ(ETokenType::EndOfStream, token.GetType());
+        Reset();
+    }
+
+    // Comment after spaces
+    TestToken("   // comment\nabc", ETokenType::String, "abc");
+
+    // Comment with various content
+    TestToken("// !@#$%^&*(){}[]\n42", ETokenType::Int64, "42");
+
+    // Empty comment
+    TestToken("//\n99", ETokenType::Int64, "99");
+
+    // Comment does not affect string literals (// inside quotes)
+    TestToken("\"hello // world\"", ETokenType::String, "hello // world");
+
+    // Single slash is still a valid Slash token (not a comment)
+    TestSpecialValue("/", ETokenType::Slash);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace

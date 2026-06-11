@@ -802,7 +802,7 @@ public:
     {
         if (!TBaseStream::IsEmpty()) {
             char ch = *TBaseStream::Current();
-            if (!IsSpace(ch)) {
+            if (!IsSpace(ch) && ch != '/') {
                 return ch;
             }
         }
@@ -825,12 +825,45 @@ public:
                 TBaseStream::template Refresh<AllowFinish>();
                 continue;
             }
-            if (!IsSpace(*TBaseStream::Current())) {
-                break;
+            char ch = *TBaseStream::Current();
+            if (IsSpace(ch)) {
+                TBaseStream::Advance(1);
+                continue;
+            }
+            if (ch == '/' &&
+                TBaseStream::Current() + 1 < TBaseStream::End() &&
+                *(TBaseStream::Current() + 1) == '/')
+            {
+                // Note: if '/' is the very last byte of the current buffer
+                // in a streaming parser, the second '/' may reside in the
+                // next chunk and this check will not recognise the comment.
+                // For in-memory parsing (TStringReader) this never happens.
+                TBaseStream::Advance(2);
+                SkipToEndOfLine<AllowFinish>();
+                continue;
+            }
+            break;
+        }
+        return TBaseStream::template GetChar<AllowFinish>();
+    }
+
+    template <bool AllowFinish>
+    void SkipToEndOfLine()
+    {
+        while (true) {
+            if (TBaseStream::IsEmpty()) {
+                if (TBaseStream::IsFinished()) {
+                    return;
+                }
+                TBaseStream::template Refresh<AllowFinish>();
+                continue;
+            }
+            if (*TBaseStream::Current() == '\n') {
+                TBaseStream::Advance(1);
+                return;
             }
             TBaseStream::Advance(1);
         }
-        return TBaseStream::template GetChar<AllowFinish>();
     }
 };
 ////////////////////////////////////////////////////////////////////////////////
