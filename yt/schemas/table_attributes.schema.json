@@ -89,7 +89,7 @@
     },
     "schema": {
       "$ref": "#/$defs/tableSchema",
-      "description": "Declared YTsaurus table schema as an ordered list of column descriptors."
+      "description": "Declared YTsaurus table schema. Use either a plain array of column descriptors or an attributed YSON-as-JSON object with $value and $attributes."
     },
     "schema_mode": {
       "enum": [
@@ -641,11 +641,57 @@
       "description": "Supported YTsaurus erasure codec names."
     },
     "tableSchema": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/tableSchemaValue"
+        },
+        {
+          "$ref": "#/$defs/attributedTableSchema"
+        }
+      ],
+      "description": "Table schema, optionally encoded with list attributes such as strict and unique_keys."
+    },
+    "tableSchemaValue": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/columnSchema"
       },
-      "description": "Ordered list of table column descriptors."
+      "description": "Plain ordered list of table column descriptors."
+    },
+    "tableSchemaAttributes": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "strict": {
+          "type": "boolean",
+          "description": "Whether the table schema is strict and rejects undeclared columns.",
+          "default": true
+        },
+        "unique_keys": {
+          "type": "boolean",
+          "description": "Whether key column values must be unique for sorted tables.",
+          "default": false
+        }
+      },
+      "description": "Attributes attached to a table schema list in YSON-as-JSON form."
+    },
+    "attributedTableSchema": {
+      "type": "object",
+      "required": [
+        "$value"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "$value": {
+          "$ref": "#/$defs/tableSchemaValue",
+          "description": "Schema list value."
+        },
+        "$attributes": {
+          "$ref": "#/$defs/tableSchemaAttributes",
+          "description": "YSON attributes attached to the schema list."
+        }
+      },
+      "description": "YSON-as-JSON representation of an attributed table schema list."
     },
     "columnSchema": {
       "type": "object",
