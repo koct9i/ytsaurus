@@ -1,0 +1,921 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ytsaurus.tech/schemas/table_attributes.schema.json",
+  "title": "YTsaurus table attributes",
+  "description": "JSON Schema for attributes of YTsaurus table-like Cypress nodes. It covers user-settable and readable attributes for static tables, dynamic tables, replicated dynamic tables, and chaos replicated tables. Unknown keys are allowed because Cypress nodes may also carry arbitrary user attributes.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "const": "table",
+      "readOnly": true,
+      "description": "Cypress node type; table nodes report table."
+    },
+    "id": {
+      "$ref": "#/$defs/objectId",
+      "readOnly": true,
+      "description": "Object id of the table node."
+    },
+    "path": {
+      "type": "string",
+      "readOnly": true,
+      "description": "Canonical Cypress path of the table."
+    },
+    "account": {
+      "type": "string",
+      "description": "Account charged for resources consumed by the table."
+    },
+    "acl": {
+      "$ref": "#/$defs/acl",
+      "description": "Access control list entries applied to the table."
+    },
+    "inherit_acl": {
+      "type": "boolean",
+      "description": "Whether ACL entries are inherited from ancestors.",
+      "default": true
+    },
+    "owner": {
+      "type": "string",
+      "readOnly": true,
+      "description": "User that owns the table object."
+    },
+    "external": {
+      "type": "boolean",
+      "description": "Whether the table is stored in an external cell.",
+      "default": false
+    },
+    "external_cell_tag": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Cell tag for an externally stored table."
+    },
+    "opaque": {
+      "type": "boolean",
+      "description": "Whether Cypress path traversal treats this node as an opaque boundary.",
+      "default": false
+    },
+    "annotation": {
+      "type": "string",
+      "description": "Free-form human-readable annotation attached to the table."
+    },
+    "annotation_path": {
+      "type": "string",
+      "readOnly": true,
+      "description": "Path from which the effective annotation is inherited."
+    },
+    "creation_time": {
+      "$ref": "#/$defs/instant",
+      "readOnly": true,
+      "description": "Time when the table object was created."
+    },
+    "modification_time": {
+      "$ref": "#/$defs/instant",
+      "readOnly": true,
+      "description": "Time when the table object or its attributes were last modified."
+    },
+    "access_time": {
+      "$ref": "#/$defs/instant",
+      "readOnly": true,
+      "description": "Time when the table was last accessed."
+    },
+    "expiration_time": {
+      "$ref": "#/$defs/instant",
+      "description": "Absolute time at which the table expires and may be removed."
+    },
+    "expiration_timeout": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Timeout in milliseconds."
+    },
+    "schema": {
+      "$ref": "#/$defs/tableSchema",
+      "description": "Declared YTsaurus table schema as an ordered list of column descriptors."
+    },
+    "schema_mode": {
+      "enum": [
+        "weak",
+        "strong"
+      ],
+      "readOnly": true,
+      "description": "Effective schema mode: weak schemas permit schemaless writes, strong schemas enforce declared columns."
+    },
+    "schema_id": {
+      "$ref": "#/$defs/objectId",
+      "readOnly": true,
+      "description": "Internal id of the registered table schema."
+    },
+    "schema_duplicate_count": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Number of objects currently sharing the same registered schema."
+    },
+    "key_columns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "readOnly": true,
+      "description": "Names of key columns derived from sorted schema columns."
+    },
+    "sorted": {
+      "type": "boolean",
+      "readOnly": true,
+      "description": "Whether the table schema is sorted."
+    },
+    "sorted_by": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "readOnly": true,
+      "description": "Sort key column names for sorted tables."
+    },
+    "dynamic": {
+      "type": "boolean",
+      "description": "Whether the table is a dynamic table.",
+      "default": false
+    },
+    "optimize_for": {
+      "enum": [
+        "lookup",
+        "scan"
+      ],
+      "description": "Storage layout optimization target.",
+      "default": "lookup"
+    },
+    "chunk_format": {
+      "type": "string",
+      "description": "Low-level chunk format used for newly written chunks."
+    },
+    "compression_codec": {
+      "$ref": "#/$defs/compressionCodec",
+      "description": "Compression codec for newly written chunks.",
+      "default": "none"
+    },
+    "erasure_codec": {
+      "$ref": "#/$defs/erasureCodec",
+      "description": "Erasure codec for newly written chunks.",
+      "default": "none"
+    },
+    "replication_factor": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Replication factor for chunks on regular media."
+    },
+    "primary_medium": {
+      "type": "string",
+      "description": "Primary storage medium name for chunks."
+    },
+    "primary_medium_id": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Internal id of the primary storage medium."
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/mediumSettings"
+      },
+      "description": "Per-medium storage settings keyed by medium name."
+    },
+    "hunk_erasure_codec": {
+      "$ref": "#/$defs/erasureCodec",
+      "description": "Erasure codec used for hunk chunks.",
+      "default": "none"
+    },
+    "hunk_storage_id": {
+      "$ref": "#/$defs/objectId",
+      "description": "Object id of the hunk storage associated with the table."
+    },
+    "row_count": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Number of rows visible for static tables."
+    },
+    "chunk_row_count": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Total number of rows stored in chunks."
+    },
+    "unmerged_row_count": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Approximate unmerged row count for sorted dynamic tables."
+    },
+    "data_weight": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Logical data weight in bytes."
+    },
+    "compressed_data_size": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Compressed size of table chunks in bytes."
+    },
+    "uncompressed_data_size": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Uncompressed size of table chunks in bytes."
+    },
+    "chunk_count": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Number of chunks owned by the table."
+    },
+    "last_commit_timestamp": {
+      "$ref": "#/$defs/timestamp",
+      "readOnly": true,
+      "description": "Latest committed timestamp for sorted dynamic tables."
+    },
+    "tablet_cell_bundle": {
+      "type": "string",
+      "description": "Tablet cell bundle used by the dynamic table."
+    },
+    "tablet_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Desired number of tablets at creation time or after resharding."
+    },
+    "pivot_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/row"
+      },
+      "description": "Tablet pivot keys; the first pivot key is normally an empty key."
+    },
+    "tablets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tablet"
+      },
+      "readOnly": true,
+      "description": "Runtime information for individual tablets."
+    },
+    "tablet_state": {
+      "enum": [
+        "unmounted",
+        "mounting",
+        "mounted",
+        "freezing",
+        "frozen",
+        "unfreezing",
+        "unmounting",
+        "transient",
+        "frozen_mounting"
+      ],
+      "readOnly": true,
+      "description": "Aggregate tablet state reported by the master."
+    },
+    "tablet_error_count": {
+      "type": "integer",
+      "minimum": 0,
+      "readOnly": true,
+      "description": "Number of tablets currently reporting errors."
+    },
+    "atomicity": {
+      "enum": [
+        "full",
+        "none"
+      ],
+      "description": "Dynamic table transaction atomicity mode.",
+      "default": "full"
+    },
+    "commit_ordering": {
+      "enum": [
+        "weak",
+        "strong"
+      ],
+      "description": "Commit ordering mode for ordered dynamic tables.",
+      "default": "weak"
+    },
+    "in_memory_mode": {
+      "enum": [
+        "none",
+        "compressed",
+        "uncompressed"
+      ],
+      "description": "Whether and how tablet stores are kept in memory.",
+      "default": "none"
+    },
+    "enable_dynamic_store_read": {
+      "type": "boolean",
+      "description": "Whether reads may observe rows from dynamic stores.",
+      "default": false
+    },
+    "enable_tablet_balancer": {
+      "type": "boolean",
+      "description": "Whether tablet balancing is enabled for this table.",
+      "default": true
+    },
+    "disable_tablet_balancer": {
+      "type": "boolean",
+      "writeOnly": true,
+      "description": "Compatibility write-only inverse of enable_tablet_balancer."
+    },
+    "min_tablet_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Lower tablet size bound used by tablet balancing."
+    },
+    "max_tablet_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Upper tablet size bound used by tablet balancing."
+    },
+    "desired_tablet_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Target tablet size used by tablet balancing."
+    },
+    "desired_tablet_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Target tablet count used by tablet balancing."
+    },
+    "forced_compaction_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Revision marker forcing table compaction."
+    },
+    "forced_store_compaction_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Revision marker forcing store compaction."
+    },
+    "forced_hunk_compaction_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Revision marker forcing hunk compaction."
+    },
+    "forced_chunk_view_compaction_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Revision marker forcing chunk-view compaction."
+    },
+    "tablet_balancer_config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Table-specific tablet balancer configuration patch."
+    },
+    "mount_config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Table-specific mount configuration patch applied on tablet mount/remount."
+    },
+    "chunk_writer": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Tablet store writer configuration override."
+    },
+    "hunk_chunk_writer": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Hunk chunk writer configuration override."
+    },
+    "profiling_mode": {
+      "enum": [
+        "path",
+        "tag",
+        "disabled"
+      ],
+      "description": "How dynamic table profiling sensors are grouped."
+    },
+    "profiling_tag": {
+      "type": "string",
+      "description": "Custom profiling tag used when profiling_mode is tag."
+    },
+    "enable_detailed_profiling": {
+      "type": "boolean",
+      "description": "Whether detailed per-tablet profiling is enabled.",
+      "default": false
+    },
+    "serialization_type": {
+      "enum": [
+        "coarse",
+        "per_row"
+      ],
+      "description": "Transaction serialization granularity for dynamic tables."
+    },
+    "enable_consistent_chunk_replica_placement": {
+      "type": "boolean",
+      "description": "Whether consistent chunk replica placement is enabled.",
+      "default": false
+    },
+    "custom_runtime_data": {
+      "description": "Arbitrary runtime data propagated to tablet nodes."
+    },
+    "replicated": {
+      "type": "boolean",
+      "readOnly": true,
+      "description": "Whether the dynamic table is replicated."
+    },
+    "replicas": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/tableReplica"
+      },
+      "readOnly": true,
+      "description": "Replica descriptors keyed by replica id."
+    },
+    "upstream_replica_id": {
+      "$ref": "#/$defs/objectId",
+      "description": "Replica id from which this table receives replicated writes."
+    },
+    "replication_collocation_id": {
+      "$ref": "#/$defs/objectId",
+      "description": "Id of the replication collocation containing this table."
+    },
+    "replication_card_id": {
+      "$ref": "#/$defs/objectId",
+      "readOnly": true,
+      "description": "Chaos replication card id associated with the table."
+    },
+    "chaos_cell_bundle": {
+      "type": "string",
+      "description": "Chaos cell bundle used for chaos replicated table metadata."
+    },
+    "replication_progress": {
+      "type": "object",
+      "additionalProperties": true,
+      "readOnly": true,
+      "description": "Current replication progress metadata."
+    },
+    "treat_as_queue": {
+      "type": "boolean",
+      "description": "Whether the table should be treated as a queue by queue agents.",
+      "default": false
+    },
+    "treat_as_queue_consumer": {
+      "type": "boolean",
+      "description": "Whether the sorted dynamic table should be tracked as a queue consumer.",
+      "default": false
+    },
+    "vital_queue_consumer": {
+      "type": "boolean",
+      "description": "Whether this queue consumer is vital for queue health.",
+      "default": false
+    },
+    "treat_as_queue_producer": {
+      "type": "boolean",
+      "description": "Whether the sorted dynamic table should be tracked as a queue producer.",
+      "default": false
+    },
+    "queue_agent_stage": {
+      "type": "string",
+      "description": "Queue agent stage responsible for this table."
+    }
+  },
+  "$defs": {
+    "objectId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F-]+$",
+      "description": "YTsaurus object id encoded as a string."
+    },
+    "instant": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp in ISO 8601 date-time format."
+    },
+    "timestamp": {
+      "type": [
+        "integer",
+        "string"
+      ],
+      "description": "YT timestamp; uint64 values may be represented as strings in JSON."
+    },
+    "row": {
+      "type": "array",
+      "items": true,
+      "description": "YTsaurus row or key represented as an ordered list of values."
+    },
+    "acl": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "List of ACL entries."
+    },
+    "mediumSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replication_factor": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Replication factor on this medium."
+        },
+        "data_parts_only": {
+          "type": "boolean",
+          "description": "Whether only data parts are placed on this medium."
+        }
+      },
+      "description": "Storage settings for one medium."
+    },
+    "compressionCodec": {
+      "enum": [
+        "none",
+        "snappy",
+        "lz4",
+        "lz4_high_compression",
+        "brotli_1",
+        "brotli_2",
+        "brotli_3",
+        "brotli_4",
+        "brotli_5",
+        "brotli_6",
+        "brotli_7",
+        "brotli_8",
+        "brotli_9",
+        "brotli_10",
+        "brotli_11",
+        "zlib_1",
+        "zlib_2",
+        "zlib_3",
+        "zlib_4",
+        "zlib_5",
+        "zlib_6",
+        "zlib_7",
+        "zlib_8",
+        "zlib_9",
+        "zstd_1",
+        "zstd_2",
+        "zstd_3",
+        "zstd_4",
+        "zstd_5",
+        "zstd_6",
+        "zstd_7",
+        "zstd_8",
+        "zstd_9",
+        "zstd_10",
+        "zstd_11",
+        "zstd_12",
+        "zstd_13",
+        "zstd_14",
+        "zstd_15",
+        "zstd_16",
+        "zstd_17",
+        "zstd_18",
+        "zstd_19",
+        "zstd_20",
+        "zstd_21",
+        "lzma_0",
+        "lzma_1",
+        "lzma_2",
+        "lzma_3",
+        "lzma_4",
+        "lzma_5",
+        "lzma_6",
+        "lzma_7",
+        "lzma_8",
+        "lzma_9",
+        "bzip2_1",
+        "bzip2_2",
+        "bzip2_3",
+        "bzip2_4",
+        "bzip2_5",
+        "bzip2_6",
+        "bzip2_7",
+        "bzip2_8",
+        "bzip2_9",
+        "zstd_fast_1",
+        "zstd_fast_2",
+        "zstd_fast_3",
+        "zstd_fast_4",
+        "zstd_fast_5",
+        "zstd_fast_6",
+        "zstd_fast_7",
+        "zlib6",
+        "gzip_normal",
+        "zlib9",
+        "gzip_best_compression",
+        "zstd",
+        "brotli3",
+        "brotli5",
+        "brotli8",
+        "quick_lz"
+      ],
+      "description": "Supported YTsaurus compression codec names."
+    },
+    "erasureCodec": {
+      "enum": [
+        "none",
+        "reed_solomon_6_3",
+        "jerasure_reed_solomon_6_3",
+        "isa_reed_solomon_6_3",
+        "reed_solomon_3_3",
+        "isa_reed_solomon_3_3",
+        "lrc_12_2_2",
+        "jerasure_lrc_12_2_2",
+        "isa_lrc_12_2_2"
+      ],
+      "description": "Supported YTsaurus erasure codec names."
+    },
+    "tableSchema": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/columnSchema"
+      },
+      "description": "Ordered list of table column descriptors."
+    },
+    "columnSchema": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Column name."
+        },
+        "type": {
+          "$ref": "#/$defs/simpleType",
+          "description": "Legacy simple column type."
+        },
+        "type_v3": {
+          "$ref": "#/$defs/typeV3",
+          "description": "Structured logical column type."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether column values must be non-null.",
+          "default": false
+        },
+        "sort_order": {
+          "enum": [
+            "ascending",
+            "descending"
+          ],
+          "description": "Sort direction for key columns."
+        },
+        "lock": {
+          "type": "string",
+          "description": "Lock group name for dynamic table writes."
+        },
+        "expression": {
+          "type": "string",
+          "description": "Computed column expression."
+        },
+        "aggregate": {
+          "type": "string",
+          "description": "Aggregate function for aggregate dynamic columns."
+        },
+        "group": {
+          "type": "string",
+          "description": "Column group name."
+        },
+        "stable_name": {
+          "type": "string",
+          "description": "Stable column name used across renames."
+        },
+        "max_inline_hunk_size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum value size stored inline before using hunks."
+        }
+      },
+      "description": "Single table column descriptor."
+    },
+    "simpleType": {
+      "enum": [
+        "int64",
+        "uint64",
+        "double",
+        "boolean",
+        "string",
+        "any",
+        "yson",
+        "int8",
+        "int16",
+        "int32",
+        "uint8",
+        "uint16",
+        "uint32",
+        "float",
+        "utf8",
+        "date",
+        "datetime",
+        "timestamp",
+        "interval",
+        "date32",
+        "datetime64",
+        "timestamp64",
+        "interval64",
+        "json",
+        "uuid",
+        "null",
+        "void"
+      ],
+      "description": "YTsaurus simple logical type name."
+    },
+    "typeV3": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/simpleType"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "type_name": {
+              "type": "string"
+            },
+            "item": {
+              "$ref": "#/$defs/typeV3"
+            },
+            "elements": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/typeV3"
+              }
+            },
+            "members": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "type"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "$ref": "#/$defs/typeV3"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "YTsaurus type_v3 logical type descriptor."
+    },
+    "tablet": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tablet index in the table."
+        },
+        "tablet_id": {
+          "$ref": "#/$defs/objectId",
+          "description": "Tablet object id."
+        },
+        "cell_id": {
+          "$ref": "#/$defs/objectId",
+          "description": "Tablet cell id currently hosting the tablet."
+        },
+        "state": {
+          "type": "string",
+          "description": "Current tablet state."
+        },
+        "pivot_key": {
+          "$ref": "#/$defs/row",
+          "description": "First key belonging to this tablet."
+        },
+        "trimmed_row_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of trimmed rows for ordered tablets."
+        },
+        "flushed_row_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of rows flushed to chunks."
+        },
+        "error_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of tablet errors."
+        },
+        "performance_counters": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Tablet performance counters."
+        }
+      },
+      "description": "Runtime information about one tablet."
+    },
+    "tableReplica": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "cluster_name": {
+          "type": "string",
+          "description": "Cluster hosting the replica."
+        },
+        "replica_path": {
+          "type": "string",
+          "description": "Path to the replica table."
+        },
+        "state": {
+          "type": "string",
+          "description": "Replica state."
+        },
+        "mode": {
+          "enum": [
+            "sync",
+            "async"
+          ],
+          "description": "Replica synchronization mode."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether replication to this replica is enabled."
+        },
+        "atomicity": {
+          "enum": [
+            "full",
+            "none"
+          ],
+          "description": "Replica write atomicity mode."
+        },
+        "preserve_timestamps": {
+          "type": "boolean",
+          "description": "Whether replicated writes preserve original timestamps."
+        },
+        "enable_replicated_table_tracker": {
+          "type": "boolean",
+          "description": "Whether replicated table tracker manages this replica."
+        }
+      },
+      "description": "Replicated table replica descriptor."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dynamic": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dynamic": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "tablet_cell_bundle": {
+            "type": "string"
+          },
+          "atomicity": {
+            "enum": [
+              "full",
+              "none"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
