@@ -28,6 +28,7 @@ Capacity and request/limit knobs are different layers. For example, `jobResource
 | Resource | Primary owner | Main configuration points | Main observability points | Shortage or overcommit behavior |
 |---|---|---|---|---|
 | Exec-node job capacity | Kubernetes/operator spec, exec node, scheduler | Exec-node pod `resources`; CRI `jobResources.limits.cpu`, `jobResources.limits.memory`, GPU limits; slots-location volume/PVC/`emptyDir.sizeLimit`; exec-node `@resource_limits` | Node UI; `//sys/exec_nodes/<node>/@resource_limits`; Kubernetes pod/container resources; slot-location disk metrics | Scheduler cannot run more jobs than node-advertised CPU, memory, GPU, user slots, and disk capacity; jobs may stay pending or fail on node-local exhaustion |
+| Per-exec-node job distribution | Scheduler, exec node, administrators | Node tags and pool-tree `node_tag_filter`; operation `scheduling_tag_filter`; node `resource_limits_overrides`; `disable_scheduler_jobs`; job resource vector and data locality | Scheduler orchid per-node scheduling attributes; node `@resource_usage`; operation job distribution by address; unutilized-resource reasons | Jobs are not round-robin; they are placed where a heartbeat has feasible free resources in the relevant tree, so heterogeneous nodes, tags, locality, and dominant resources shape distribution |
 | Job CPU | Scheduler, exec node | Operation task `cpu_limit`; pool `strong_guarantee_resources` and `resource_limits`; optional container CPU limit | Operation UI, scheduler orchid, job statistics, CPU metrics | Jobs are throttled or scheduled less often; starving operations may trigger preemption |
 | Job memory | Scheduler, exec node | Operation task `memory_limit`; memory reserve settings; pool memory guarantees/limits | Operation UI, job statistics, memory digest, aborted job reasons | Job may be aborted on memory limit or resource overdraft; scheduler reduces concurrency |
 | GPUs | Scheduler, exec node | Operation task `gpu_limit`; GPU pool tree/node tags; pool guarantees/limits | Operation UI, scheduler resource usage, node GPU health | Jobs remain pending; failed GPU jobs may be restarted or operation may fail |
@@ -46,6 +47,7 @@ Capacity and request/limit knobs are different layers. For example, `jobResource
 | Dynamic-table flush/compaction IO | Tablet nodes, data nodes | Bundle resources; table/store/compaction settings; media choice | Tablet errors, store counts, flush/compaction metrics, disk bandwidth | Writes may be rejected due to tablet memory; read amplification and latency grow |
 | Data-node disk IO bandwidth | Data nodes | Location/media configuration; operation IO settings; compaction/repair throttlers where configured | Data-node disk metrics, per-location queues, operation throughput | Read/write latency grows; background jobs slow; write watermarks may disable writes |
 | Intra-cluster network bandwidth | Scheduler, data nodes, RPC | Scheduler network resource; job concurrency; read/write window sizes; RPC limits | Node network metrics, RPC metrics, operation throughput | Jobs slow down; retries/timeouts may rise; scheduler may limit network-heavy jobs |
+| Exec-node network bandwidth | Exec node, scheduler, RPC/bus | Cluster-node `network_bandwidth`; in/out throttlers; scheduler `network` resource for network-heavy jobs; job concurrency and tags | Per-node NIC throughput/drops/retransmits; bus/RPC bytes and queues; scheduler network-resource usage | Network-heavy jobs can concentrate on a node unless constrained by tags/resources; throttlers delay traffic, while scheduler network resource reduces placement density for known network-heavy phases |
 | Inter-cluster network bandwidth and RPS | Distributed throttlers | `//sys/cluster_throttlers` `cluster_limits.<remote>.bandwidth.limit` and `.rps.limit` | Discovery `local_throttlers`, throttler queue size/rate, dashboards | Reads wait for quota; queues grow; remote-copy/remote-read throughput falls |
 | Master read/write request rate | Users, masters, proxies | User `read_request_rate_limit`, `write_request_rate_limit`, `request_queue_size_limit`; global master throttlers | User attributes, request-rate metrics, proxy/master request queues | Requests are throttled or fail with rate/queue-limit errors |
 | Master read complexity | Masters | `enable_read_request_complexity_limits`; default/max node-count and result-size limits | Request errors, master/proxy logs, client errors | Oversized subtree reads fail; batched subrequests can fail independently |
@@ -97,6 +99,31 @@ Shortage and overcommit:
 - If the main exec-node container is underprovisioned, node heartbeats, job setup, layer preparation, and log upload may become bottlenecks although user job limits look healthy.
 - If the slots volume is too small, jobs can fail locally even when account disk quota is available; increase the slots volume/PVC or reduce job concurrency and temporary data.
 - GPU limits in `jobResources` and GPU device discovery must match the physical node; otherwise GPU jobs remain pending or fail during container startup.
+
+### Per-exec-node job distribution and balancing
+
+The scheduler does not distribute jobs by a simple round-robin rule. Scheduling is heartbeat-driven: an exec node reports completed/running jobs and currently available resources, and the scheduler tries to place new allocations that fit this node, the node's pool tree, operation constraints, and the global fair-share state. This means job distribution across nodes is a result of several constraints rather than one balancing switch.
+
+Controls that shape per-node distribution:
+
+- **Advertised node resources**: `//sys/exec_nodes/<node>/@resource_limits` defines the CPU, memory, GPU, and user-slot capacity seen by the scheduler. `resource_limits_overrides` can reduce or override CPU/memory/GPU-style resources for maintenance or heterogeneity tests, but does not change `user_slots`.
+- **Node eligibility**: pool-tree `node_tag_filter` selects which nodes belong to a tree; operation `scheduling_tag_filter` further restricts where one operation may run; node `user_tags` can be used to mark hosts for these filters.
+- **Administrative drain controls**: `disable_scheduler_jobs=%true` stops new jobs from being scheduled on a node and interrupts existing jobs after the configured timeout; banning or taking a node offline removes it from scheduling entirely.
+- **Operation concurrency and size**: operation/pool `resource_limits.user_slots`, task `cpu_limit`, `memory_limit`, `gpu_limit`, and `disk_request` determine how many jobs can fit on one node at the same time.
+- **Data locality and job type**: reads, shuffle/sort phases, GPU jobs, and operations with special tag filters may naturally concentrate on a subset of nodes.
+
+Monitoring:
+
+- Node attributes: `@resource_limits`, `@resource_usage`, `@tags`, `@alerts`, and `@state`.
+- Scheduler orchid/scheduling UI per-node scheduling attributes and unutilized-resource reasons.
+- Operation job list grouped by node address to detect hot nodes or skewed placement.
+- Per-node CPU, memory, GPU, slots-location, and network metrics.
+
+Shortage and overcommit:
+
+- If one resource dimension is exhausted on a node, jobs that need that dimension cannot be placed there even if other dimensions are free; this is the common source of fragmentation.
+- If nodes are heterogeneous but placed in the same tree without tags or adjusted resource limits, large jobs may queue behind a small feasible subset of nodes.
+- If a node is network- or disk-hot but still has CPU and memory, the scheduler may continue placing CPU-fitting jobs unless network/disk pressure is represented by tags, throttlers, the scheduler `network` resource, or administrative drain.
 
 ### CPU
 
@@ -502,17 +529,21 @@ Intra-cluster network is used for table reads from remote nodes, writes/replicat
 
 Configuration and controls:
 
-- Scheduler network resource for shuffle-heavy workloads.
-- Operation job count and partition count.
-- Data locality settings and sorted-operation locality timeouts.
-- RPC concurrency, timeouts, and request queue limits.
+- Scheduler `network` resource for shuffle-heavy workloads. The unit is abstract, but it lowers the density of jobs known to consume significant node network bandwidth.
+- Cluster-node `network_bandwidth` should match usable host bandwidth; stale values make the scheduler and throttlers believe a node is larger or smaller than it is.
+- Node-level `in_throttler`, `out_throttler`, `in_throttlers`, `out_throttlers`, and `throttler_free_bandwidth_ratio` can reserve headroom and split bandwidth between traffic classes where configured.
+- Operation job count, partition count, and `resource_limits.user_slots` control how many jobs can produce network traffic at once.
+- Pool-tree/node tags and operation `scheduling_tag_filter` can isolate network-heavy work on nodes or trees prepared for that traffic.
+- Data locality settings and sorted-operation locality timeouts reduce unnecessary remote reads.
+- RPC concurrency, timeouts, and request queue limits cap request fan-out and queue growth.
 - Network project or network isolation settings where used.
 
 Monitoring:
 
-- NIC throughput and packet errors on exec/data/tablet nodes.
-- RPC latency and retry counters.
-- Operation read locality and remote-read volume.
+- NIC throughput, drops, retransmits, softirq CPU, and packet errors on exec/data/tablet nodes.
+- Bus/RPC bytes, pending bytes, request queues, latency, and retry counters.
+- Scheduler usage of the `network` resource and per-node unutilized resources.
+- Operation read locality, remote-read volume, shuffle bytes, and per-node job distribution.
 - Data-node and tablet-node request queues.
 
 Shortage and overcommit:
@@ -520,6 +551,32 @@ Shortage and overcommit:
 - Network-heavy jobs slow down and may time out.
 - Retries amplify traffic, so reducing concurrency can improve end-to-end throughput.
 - If master/proxy traffic shares the same bottleneck, metadata operations can become slow even when data nodes are healthy.
+- If one exec node is network-hot while CPU/memory still look available, reduce per-operation concurrency, isolate the workload with tags/pool trees, lower advertised bandwidth, or drain the node until traffic normalizes.
+
+### Exec-node network bandwidth
+
+Exec-node network bandwidth is consumed by remote chunk reads, table writes, shuffle, job artifact downloads, RPC proxy-in-job, task services, logs/stderr upload, and container image/layer traffic. It is partly visible to the scheduler through the abstract `network` resource for selected operation phases, but many application-level network calls made by user code are invisible unless you control them with concurrency, tags, or external throttling.
+
+Control patterns:
+
+- **Represent physical capacity**: configure host-level `network_bandwidth` and throttlers so the cluster does not assume every exec node can safely push unlimited traffic.
+- **Limit placement density**: reduce operation or pool `resource_limits.user_slots`, increase job CPU/memory requests if they were under-requested, or use the scheduler `network` resource where the operation type supports it.
+- **Separate noisy traffic**: use node tags, pool-tree `node_tag_filter`, and operation `scheduling_tag_filter` to place heavy shuffle, GPU training, remote-copy, or service jobs on nodes with enough NIC capacity.
+- **Shape job behavior**: tune reader `window_size`, writer chunk sizes, partition counts, application-level parallelism, and client retry/backoff so each job does not open unbounded network concurrency.
+- **Drain or downrate a hot node**: use `disable_scheduler_jobs` for maintenance/drain or `resource_limits_overrides` for scheduler-visible resources when a node must receive less work.
+
+Monitoring:
+
+- Per-exec-node NIC bytes, drops, retransmits, socket queues, and softirq CPU.
+- Job statistics for read/write wait time and job_proxy network/RPC counters.
+- Operation job distribution by node address together with per-node NIC usage.
+- RPC/bus pending bytes and queue sizes on exec nodes and data nodes.
+
+Shortage and overcommit:
+
+- A node can be network-saturated while scheduler CPU and memory still show headroom; in that case adding `cpu_limit` or memory does not help.
+- If network pressure is caused by user code talking to external services, {{product-name}} can mainly limit it indirectly through job count, tags, pools, or container/network policy.
+- If network pressure is caused by storage reads/writes or shuffle, first reduce concurrency or improve locality; then adjust `network_bandwidth` and throttlers if physical capacity allows.
 
 ### Inter-cluster network bandwidth and RPS
 
@@ -776,8 +833,10 @@ yt get //sys/pool_trees/<tree>/<pool>/@strong_guarantee_resources
 yt get //sys/pool_trees/<tree>/<pool>/@resource_limits
 yt get //sys/pool_trees/<tree>/<pool>/@max_running_operation_count
 
-# Exec-node job capacity
+# Exec-node job capacity and distribution
 yt get //sys/exec_nodes/<node-address>/@resource_limits
+yt get //sys/exec_nodes/<node-address>/@resource_usage
+yt get //sys/exec_nodes/<node-address>/@tags
 yt get //sys/exec_nodes/<node-address>/@alerts
 
 # User request limits
