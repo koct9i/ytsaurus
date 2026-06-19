@@ -17,6 +17,7 @@ RECURSE(
     ctxlog
     gotest
     nop
+    slog
     test
     zap
 )
