@@ -622,3 +622,5 @@ items:
           href: draft/bus-rps-service-performance-tuning-draft-14.md
         - name: Local filesystem representation of Cypress trees (draft-16)
           href: draft/cypress-local-filesystem-format-draft-16.md
+        - name: Cluster and node states, locks, and maintenance (draft-17)
+          href: draft/cluster-node-states-maintenance-draft-17.md
