@@ -58,6 +58,18 @@ yt add-maintenance \
   --type pending_restart \
   --comment "rack reboot"
 
+# Ban an HTTP or RPC proxy from service discovery / balancing.
+yt add-maintenance \
+  --component http_proxy \
+  --address my-http-proxy.example.net:80 \
+  --type ban \
+  --comment "proxy restart"
+yt add-maintenance \
+  --component rpc_proxy \
+  --address my-rpc-proxy.example.net:9013 \
+  --type ban \
+  --comment "proxy restart"
+
 # Inspect active requests and effective flags.
 yt get //sys/cluster_nodes/my-node.example.net/@maintenance_requests
 yt get //sys/cluster_nodes/my-node.example.net/@disable_scheduler_jobs
@@ -73,7 +85,7 @@ yt remove-maintenance --component cluster_node --address my-node.example.net --t
 yt remove-maintenance --component cluster_node --address my-node.example.net --all
 ```
 
-Supported components are `cluster_node`, `http_proxy`, `rpc_proxy`, and virtual component `host`. For `cluster_node` and `host`, supported maintenance types are `ban`, `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, and `pending_restart`; `host` expands only to cluster nodes registered on that host. For `http_proxy` and `rpc_proxy`, only `ban` has an operational effect.
+Supported components are `cluster_node`, `http_proxy`, `rpc_proxy`, and virtual component `host`. For `cluster_node` and `host`, supported maintenance types are `ban`, `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, and `pending_restart`; `host` expands only to cluster nodes registered on that host. For `http_proxy` and `rpc_proxy`, use `ban`: proxy maintenance targets expose only `@banned` and `@maintenance_requests`, so drain-style node maintenance types are not meaningful for them.
 
 ## Explanations for non-trivial cases
 
@@ -115,6 +127,26 @@ A safe rolling restart pattern is:
 The boolean attributes (`@banned`, `@decommissioned`, and so on) are effective state. `@maintenance_requests` is the reason ledger. Multiple requests can contribute to the same effective flag. Removing one request clears the flag only if no other active request still requires it.
 
 This is why cleanup should normally remove the exact ids returned by `add-maintenance`. Removing by `--type`, `--mine`, `--user`, or `--all` is useful during recovery, but it is broader and should be used deliberately.
+
+### HTTP and RPC proxy maintenance
+
+HTTP proxies and RPC proxies are registered in Cypress under `//sys/http_proxies/<address>` and `//sys/rpc_proxies/<address>`. These entries are maintenance targets too, but they are lighter-weight than cluster nodes: they store `@banned` and `@maintenance_requests`; they do not have chunk, job, tablet-cell, or node-lease state.
+
+Use `ban` for proxy maintenance. A banned proxy should be excluded from normal proxy selection and balancing, which is the right action for proxy restarts, network isolation, or bad frontend behavior. There is no proxy equivalent of `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, or `pending_restart`; those flags describe cluster-node responsibilities that HTTP/RPC proxies do not own.
+
+Proxy maintenance is addressed by the exact proxy address stored in the corresponding Cypress directory. Inspect and clean it the same way as node maintenance, but under the proxy path:
+
+```bash
+yt list //sys/http_proxies
+yt get //sys/http_proxies/<address>/@banned
+yt get //sys/http_proxies/<address>/@maintenance_requests
+yt remove-maintenance --component http_proxy --address <address> --id '<maintenance-id>'
+
+yt list //sys/rpc_proxies
+yt get //sys/rpc_proxies/<address>/@banned
+yt get //sys/rpc_proxies/<address>/@maintenance_requests
+yt remove-maintenance --component rpc_proxy --address <address> --id '<maintenance-id>'
+```
 
 ### Node registration and unregistration
 
