@@ -588,3 +588,39 @@ items:
      href: user-guide/problems/howtoreport.md
    - name: Event presentations, publications, and workshops
      href: other/video-posts.md
+   - name: Draft
+     items:
+        - name: About drafts (draft-0)
+          href: draft/draft-0.md
+        - name: Master server architecture (draft-1)
+          href: draft/master-architecture-draft-1.md
+        - name: Master server architecture (draft-2)
+          href: draft/master-architecture-draft-2.md
+        - name: Master server architecture (draft-3)
+          href: draft/master-architecture-draft-3.md
+        - name: Master server architecture (draft-4)
+          href: draft/master-architecture-draft-4.md
+        - name: Master server architecture (draft-5)
+          href: draft/master-architecture-draft-5.md
+        - name: Dynamic tables profiling (draft-6)
+          href: draft/dynamic-tables-profiling-draft-6.md
+        - name: Dynamic tables capacity scaling (draft-7)
+          href: draft/dynamic-tables-capacity-scaling-draft-7.md
+        - name: Dynamic tables operations in production (draft-8)
+          href: draft/dynamic-tables-operations-topic-draft-8.md
+        - name: Sorted dynamic tables operations corner cases (draft-9)
+          href: draft/dynamic-tables-sorted-ops-corner-cases-draft-9.md
+        - name: Ordered dynamic tables operations corner cases (draft-10)
+          href: draft/dynamic-tables-ordered-ops-corner-cases-draft-10.md
+        - name: Queues corner cases, performance analysis, and administration (draft-11)
+          href: draft/queues-corner-cases-draft-11.md
+        - name: YQL agent and administration (draft-12)
+          href: draft/yql-agent-administration-draft-12.md
+        - name: YSON formats and SDK guide (draft-13)
+          href: draft/yson-formats-sdk-draft-13.md
+        - name: Bus RPC service performance tuning (draft-14)
+          href: draft/bus-rps-service-performance-tuning-draft-14.md
+        - name: Local filesystem representation of Cypress trees (draft-16)
+          href: draft/cypress-local-filesystem-format-draft-16.md
+        - name: Cluster and node states, locks, and maintenance (draft-17)
+          href: draft/cluster-node-states-maintenance-draft-17.md

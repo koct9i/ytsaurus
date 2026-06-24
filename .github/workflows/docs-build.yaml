@@ -11,10 +11,17 @@ jobs:
     permissions: write-all
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: "yt/docs"
 
       - name: Build
         uses: diplodoc-platform/docs-build-action@v3
         with:
           revision: "pr-${{ github.event.pull_request.number }}"
           src-root: "./yt/docs"
+
+      - name: Report errors and warnings
+        if: always()
+        run: |
+          awk '/^ERR / { print "::error::" $0 } /^WARN / { print "::warning::" $0 }' ./build-html.log

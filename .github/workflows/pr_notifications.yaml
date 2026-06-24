@@ -10,6 +10,7 @@ on:
 
 jobs:
   pr-notifications:
+    if: github.repository == 'ytsaurus/ytsaurus'
     name: Send PR notifications
     runs-on: ubuntu-latest
     steps:
