@@ -194,6 +194,25 @@ These options control how {{product-name}} converts values between types when re
 
 ¹ Go sorts `map` keys lexicographically on output, but struct fields are always written in their declaration order.
 
+### Domain-specific scalar helpers
+
+YSON itself has only the scalar types listed above (`int64`, `uint64`, `double`, `boolean`, `string`, and entity). SDKs additionally provide convenience classes or serializers for values that often appear in {{product-name}} configs, schemas, specs, and API parameters. These helpers do not add new YSON wire types; they define a conventional scalar representation for the host-language type.
+
+| Concept | YSON representation | C++ | Python | Go | Java |
+|---------|---------------------|-----|--------|----|------|
+| Duration / timeout | `int64` milliseconds on write; C++ also accepts `uint64`, `double`, or a duration string on read | `TDuration` | `datetime.timedelta` in structured schema conversion uses YT `Interval` microseconds; wrapper retry/config options also accept `timedelta` and convert to milliseconds where the API expects it | `yson.Duration` (alias of `time.Duration`) serialises as milliseconds | `java.time.Duration` is used in client options/API parameters; convert manually to a YSON integer when writing raw YSON |
+| Data size / byte count | `int64` bytes on write; C++ also accepts `uint64` or a string with suffixes on read | `NYTree::TSize` | no dedicated YSON scalar class; use `int` bytes or a string accepted by the server/config field | no dedicated type in `yt/go/yson`; use `int64`/`uint64` bytes or a field-specific wrapper | `tech.ytsaurus.core.DataSize` for client-side options; write `toBytes()` or a field-specific string in raw YSON |
+| Instant / timestamp | commonly a string in configs or an integer epoch value in schemas/APIs, depending on the field | `TInstant` serialises as an ISO-8601 string in YTree config serialization and accepts numeric epoch values or strings on read | `datetime.datetime` maps to `Datetime`/`Timestamp` in structured schemas; API helpers format datetimes as strings where needed | `yson.Time` serialises as the YT-specific UTC timestamp string (`YYYY-MM-DDTHH:MM:SS.ffffffZ`) | `java.time.Instant` is used by row serializers and client options; some serializers write epoch milliseconds |
+| UUID / GUID | string | `TGuid` | use `str`, `bytes`, or `uuid.UUID` converted by application code | use strings or custom `MarshalYSON` / `UnmarshalYSON` wrappers | `java.util.UUID`/client GUID types are converted outside the low-level `tech.ytsaurus.yson` writer |
+
+Important consequences:
+
+- Low-level writers (`TYsonWriter`, `yt.yson.dumps`, `yson.Writer`, `YsonConsumer`) still write primitive YSON events. For example, a duration helper ultimately writes an integer or a string, not a separate `duration` token.
+- C++ YTree serialization is the most featureful for configuration-style values: `TDuration` serialises as milliseconds but can read human-readable duration strings, and `TSize` serialises as bytes but can read suffixes such as `"8K"`, `"128Mi"`, or `"1G"`.
+- Python's special handling is mostly in the structured-table layer, where `datetime.date`, `datetime.datetime`, and `datetime.timedelta` map to YT logical types (`Date`, `Datetime`/`Timestamp`, and `Interval`). Plain `yt.yson` parsing returns YSON scalar wrapper classes such as `YsonInt64` and `YsonString`.
+- Go's low-level package has explicit helpers for `Time` and `Duration`; sizes and GUIDs should be represented with ordinary integers/strings or with a custom marshaler.
+- Java separates low-level YSON events from higher-level client/core helpers: `DataSize`, `Duration`, and `Instant` are available in the client layers, while the `tech.ytsaurus.yson` writer API only emits primitive YSON values.
+
 ---
 
 ## C++ { #cpp }
