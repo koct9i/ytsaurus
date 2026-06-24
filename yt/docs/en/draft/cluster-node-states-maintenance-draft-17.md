@@ -10,7 +10,7 @@ This page is a compact operator cheat sheet for the most common cluster-wide swi
 | --- | --- | --- | --- | --- | --- |
 | `hydra_read_only` / read-only mode | `//sys/@hydra_read_only`; `yt-admin build-master-snapshots --read-only`; `yt-admin master-exit-read-only` | Master cells | Forbids ordinary mutating requests while allowing reads and special administrative requests. | Master snapshots, emergency write freeze, investigations that need a stable master state. | `yt-admin master-exit-read-only` or `yt-admin exit-read-only --cell-id <cell-id>`. |
 | `enable_safe_mode` | `//sys/@config/enable_safe_mode` | Cluster clients and services that honor safe mode | Rejects non-read-only requests from everyone except super-users; the `replicator` user is excluded from this exception. | Emergency stop of user writes or automated actions without putting Hydra itself into read-only mode. | Set the dynamic config flag back to `false`. |
-| `provision_lock` | Usually a Cypress lock taken by automation on a provisioned entity, host, bundle, or operation-specific path | The entity protected by the lock | Coordination mechanism: prevents concurrent provision/deprovision workflows from changing the same resource at once. | Bundle controller, host provisioning, rolling maintenance automation. | Release the transaction/lock only after the workflow is complete or failed safely. |
+| `provision_lock` | `//sys/@provision_lock` | Cluster node registration | Fresh-master safety attribute: while it is `true`, node registration is refused to prevent accidental startup against incomplete or wrong snapshot/changelog directories. | Initial cluster provisioning or disaster-recovery safety check. | Remove only with `yt remove //sys/@provision_lock` after verifying the master data directories and intended cluster identity. |
 
 ### Per-node operational flags
 
@@ -36,7 +36,7 @@ The node tracker state is exposed as `//sys/cluster_nodes/<address>/@state`.
 | `registered` | Node registered with masters but has not reported all expected heartbeat types yet. | Startup is in progress; wait before declaring it healthy. |
 | `online` | Node registered and has reported every expected heartbeat type at least once. | Normal healthy serving state, subject to flags such as `banned` or `decommissioned`. |
 | `restarted` | Node registered after restart but has not reported all expected heartbeats yet. | Transitional startup state after a known restart. |
-| `unregistered` | Node was explicitly unregistered and queued for disposal. | Removal path, not a transient network issue. |
+| `unregistered` | Node was unregistered and queued for disposal, either explicitly or because its lease transaction finished. | Investigate as a lost node unless you know the unregistration was intentional. |
 | `being_disposed` | Disposal of an unregistered node is in progress. | Master is cleaning persistent node state. |
 | `mixed` | Aggregated state differs between master cells. | Multi-cell convergence issue or propagation delay; inspect per-cell details. |
 | `unknown` | Internal/default state. | Treat as diagnostic-only; do not build operational procedures around it. |
@@ -51,7 +51,7 @@ yt add-maintenance \
   --type disable_scheduler_jobs \
   --comment "drain before kernel upgrade"
 
-# Add host-level maintenance; this expands to all components on the host.
+# Add host-level maintenance; this expands to cluster nodes registered on the host.
 yt add-maintenance \
   --component host \
   --address my-host.example.net \
@@ -73,7 +73,7 @@ yt remove-maintenance --component cluster_node --address my-node.example.net --t
 yt remove-maintenance --component cluster_node --address my-node.example.net --all
 ```
 
-Supported components are `cluster_node`, `http_proxy`, `rpc_proxy`, and virtual component `host`. Supported maintenance types are `ban`, `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, and `pending_restart`.
+Supported components are `cluster_node`, `http_proxy`, `rpc_proxy`, and virtual component `host`. For `cluster_node` and `host`, supported maintenance types are `ban`, `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, and `pending_restart`; `host` expands only to cluster nodes registered on that host. For `http_proxy` and `rpc_proxy`, only `ban` has an operational effect.
 
 ## Explanations for non-trivial cases
 
@@ -107,7 +107,7 @@ A safe rolling restart pattern is:
 1. Add `pending_restart` with a clear comment.
 2. Add role-specific drains if needed, for example `disable_scheduler_jobs` for exec nodes.
 3. Restart only a fault-domain-safe batch, such as one rack at a time when replication policy permits it.
-4. Wait for `@state` to return to `online`.
+4. Wait for reconnection evidence such as fresh heartbeats, updated last-seen/incarnation data, or service-level checks; do not rely on `@state` alone while `pending_restart` keeps the lease alive.
 5. Remove the maintenance request ids that were created for the node or host.
 
 ### Effective flags vs. maintenance requests
@@ -115,6 +115,14 @@ A safe rolling restart pattern is:
 The boolean attributes (`@banned`, `@decommissioned`, and so on) are effective state. `@maintenance_requests` is the reason ledger. Multiple requests can contribute to the same effective flag. Removing one request clears the flag only if no other active request still requires it.
 
 This is why cleanup should normally remove the exact ids returned by `add-maintenance`. Removing by `--type`, `--mine`, `--user`, or `--all` is useful during recovery, but it is broader and should be used deliberately.
+
+### Node registration and unregistration
+
+Registration starts when a cluster node connects to the masters and obtains a lease transaction. The node appears under `//sys/cluster_nodes/<address>` and moves through startup states while it reports the expected heartbeat types. A freshly connected node is typically `registered`; it becomes `online` only after all expected heartbeat types have been observed. After a known restart, the tracker can mark it `restarted` until those heartbeats arrive again.
+
+Unregistration is tied to that lease. If the process is stopped, partitioned, or otherwise loses the lease long enough for the transaction to finish, the node tracker unregisters the node, clears reported heartbeat state, sets `@state` to `unregistered`, and queues disposal. Explicit unregister operations use the same state transition. Therefore, `unregistered` means the node is gone from the tracker's active set; it does not by itself prove an operator intentionally removed it.
+
+During a `pending_restart`, the lease can be extended precisely so short planned restarts do not immediately look like full disappearance. This also means `@state` may remain misleadingly healthy while the process is actually down. For rolling restart automation, combine maintenance ids with heartbeat freshness, incarnation/connection-time changes, logs, and service-level probes before clearing the request or moving to the next batch.
 
 ### Node state is not health by itself
 
@@ -127,6 +135,8 @@ yt get //sys/cluster_nodes/<address>/@decommissioned
 yt get //sys/cluster_nodes/<address>/@maintenance_requests
 ```
 
-### Provision locks
+### Provision lock
 
-A provision lock is not a health or serving flag. It is an automation guard: while a provision/deprovision workflow owns the lock, other workflows should not mutate the same resource. Treat stale provision locks as potentially dangerous. Before removing one manually, identify the owner transaction or automation run, verify that it is no longer active, and check whether partial changes need rollback or completion.
+`//sys/@provision_lock` is not a normal Cypress lock and does not have an owner transaction to release. It is a boolean safety attribute created during cluster world initialization when provision locking is enabled. While it is present and `true`, cluster node registration is blocked so that operators do not accidentally attach nodes to masters whose snapshot/changelog directories still need verification.
+
+Treat this attribute as a fresh-master or recovery guard. Remove it only after confirming that the cluster was intentionally initialized and that the master data directories are correct; the manual cleanup command is `yt remove //sys/@provision_lock`.
