@@ -10,12 +10,10 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: docs-github-pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -37,7 +35,7 @@ jobs:
           revision: "${{ github.sha }}"
           src-root: "${{ env.SRC_ROOT }}"
           lint-root: "${{ env.PAGES_ROOT }}"
-          cli-version: "latest"
+          cli-version: "4"
 
       - name: Report errors and warnings
         if: always()
@@ -72,6 +70,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
