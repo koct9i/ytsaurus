@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: docs-github-pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
