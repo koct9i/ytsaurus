@@ -13,6 +13,8 @@
 
 #include <yt/yt/library/profiling/sensor.h>
 
+#include <tcmalloc/malloc_extension.h>
+
 namespace NYT::NMonitoring {
 
 using namespace NYTree;
@@ -38,12 +40,17 @@ public:
             ActionQueue_->GetInvoker(),
             BIND(&TMonitoringManager::Update, MakeWeak(this)),
             UpdatePeriod))
-    { }
+    {
+        Register("/tcmalloc/stats", BIND([] (IYsonConsumer* consumer) {
+            BuildYsonFluently(consumer)
+                .Value(tcmalloc::MallocExtension::GetStats());
+        }));
+    }
 
     void Register(const TYPath& path, TYsonProducer producer) final
     {
         auto guard = Guard(SpinLock_);
-        YT_VERIFY(PathToProducer_.emplace(path, producer).second);
+        YT_VERIFY(PathToProducer_.emplace(path, std::move(producer)).second);
     }
 
     void Unregister(const TYPath& path) final
