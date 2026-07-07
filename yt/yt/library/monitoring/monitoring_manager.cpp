@@ -13,7 +13,7 @@
 
 #include <yt/yt/library/profiling/sensor.h>
 
-#include <tcmalloc/malloc_extension.h>
+#include <yt/yt/library/tcmalloc/tcmalloc_manager.h>
 
 namespace NYT::NMonitoring {
 
@@ -41,10 +41,7 @@ public:
             BIND(&TMonitoringManager::Update, MakeWeak(this)),
             UpdatePeriod))
     {
-        Register("/tcmalloc/stats", BIND([] (IYsonConsumer* consumer) {
-            BuildYsonFluently(consumer)
-                .Value(tcmalloc::MallocExtension::GetStats());
-        }));
+        Register("/tcmalloc/stats", NTCMalloc::GetTCMallocStatisticsProducer());
     }
 
     void Register(const TYPath& path, TYsonProducer producer) final
