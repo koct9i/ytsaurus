@@ -109,6 +109,19 @@ yt get //path/to/document/@value | wc -c
 
 Interpret `detailed_master_memory` as a direction for remediation rather than as an exact replacement for RSS. RSS also includes allocator fragmentation, caches, transient queues, RPC buffers, Hydra mutation backlog, and other process overheads that are not charged to a Cypress object. Document node contents are another important caveat: a document's `@value` is stored in master memory and in snapshots as a YSON tree, but it is not exposed as a separate `detailed_master_memory` category. Estimate it by finding large `document` nodes and inspecting the size of `@value`; treat document payload as master memory even when the charged breakdown points only to the node itself or its attributes. In a multicell cluster, inspect the same attributes on the native cell that owns the object and remember that globally replicated objects are copied to every master cell.
 
+Use the master Orchid ref-counted tracker when the RSS gap is large or when you suspect memory is held by C++ ref-counted objects rather than by account-charged Cypress resources. It is available under the master monitoring Orchid at `/orchid/monitoring/ref_counted` and reports both totals and per-type rows with `objects_alive`, `objects_allocated`, `bytes_alive`, and `bytes_allocated`:
+
+```bash
+# Total tracked ref-counted objects in one master process.
+curl -s 'http://<master-host>:<monitoring-port>/orchid/monitoring/ref_counted/total'
+
+# Per-type rows; sort locally by bytes_alive to find the largest holders.
+curl -s 'http://<master-host>:<monitoring-port>/orchid/monitoring/ref_counted/statistics' \
+  | jq 'sort_by(.bytes_alive) | reverse | .[:30]'
+```
+
+These Orchid stats are process-local, so query the leader and followers of each master cell when comparing peers or cells. They are not account resource usage and should not be added to `@resource_usage/master_memory`; use them to explain the uncharged part of RSS and to identify broad implementation-level holders such as YSON trees, protobufs, RPC buffers, caches, or other ref-counted helper objects. If the total ref-counted `bytes_alive` grows together with RSS while account `master_memory` stays flat, investigate the largest per-type rows and the corresponding subsystem before looking for user-owned Cypress objects.
+
 The fields usually point to the following causes:
 
 | Dominant field | Common cause | How to reduce it |
