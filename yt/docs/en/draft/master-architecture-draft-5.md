@@ -64,15 +64,59 @@ When a follower's in-flight limits are hit, the leader skips sending new mutatio
 
 A follower in slow mode (after an RPC error or rejection) is sent only one request at a time. If that follower is needed for quorum, every commit waits for a full round-trip to that follower. Watch for log lines `Accept mutations mode is set to slow` — they indicate a follower recovery or network issue.
 
-### Memory
+### Memory { #memory }
 
 The master keeps the entire Cypress tree, all chunk metadata, and all replicated global objects in RAM. Memory usage grows with:
 
 - Number of nodes in Cypress.
 - Number of chunks and replicas.
 - Number of globally replicated objects (accounts, media, etc.) × number of cells.
+- Size of per-object metadata: user attributes, ACLs, schemas, table settings, tablet metadata, locks, and active transaction state.
 
 Monitor `yt_resource_tracker_memory_usage_rss{service="yt-master"}`. Because snapshot creation uses `fork`, the master process must have at least **double** its working-set memory available on the host.
+
+#### Estimating memory by object kind { #memory-by-object-kind }
+
+Use the master RSS metric for the process-level total, then use resource accounting attributes to find which user-visible objects contribute most of the persistent automaton state. The most useful attributes are:
+
+- `@resource_usage/master_memory` — memory charged directly to one object.
+- `@resource_usage/detailed_master_memory` — direct memory split by object kind, for example `nodes`, `chunks`, `attributes`, `tablets`, and `schemas`.
+- `@resource_usage/chunk_host_cell_master_memory` — memory charged on chunk-host cells rather than on the cell that owns the Cypress node.
+- `@recursive_resource_usage` — subtree total, useful for directories and account subtrees.
+- `//sys/accounts/<account>/@recursive_resource_usage` and `//sys/accounts/<account>/@recursive_committed_resource_usage` — totals by account; the committed variant excludes active transactions.
+
+Typical drill-down workflow:
+
+```bash
+# Cluster/process total. Use this for host sizing and snapshot fork headroom.
+yt_resource_tracker_memory_usage_rss{service="yt-master"}
+
+# Account-level ranking.
+yt get //sys/accounts/<account>/@recursive_resource_usage
+yt get //sys/accounts/<account>/@recursive_committed_resource_usage
+
+# Subtree-level ranking.
+yt get //path/to/subtree/@recursive_resource_usage
+
+# Per-object breakdown.
+yt get //path/to/object/@resource_usage
+yt get //path/to/object/@resource_usage/detailed_master_memory
+```
+
+Interpret `detailed_master_memory` as a direction for remediation rather than as an exact replacement for RSS. RSS also includes allocator fragmentation, caches, transient queues, RPC buffers, Hydra mutation backlog, and other process overheads that are not charged to a Cypress object. In a multicell cluster, inspect the same attributes on the native cell that owns the object and remember that globally replicated objects are copied to every master cell.
+
+The fields usually point to the following causes:
+
+| Dominant field | Common cause | How to reduce it |
+|----------------|--------------|------------------|
+| `nodes` | Too many Cypress nodes: tiny files, temporary directories, operation artifacts, many map nodes, many links. | Delete unused subtrees; add TTL/cleanup for `//tmp`-like areas; pack many small items into tables instead of separate Cypress nodes; avoid creating one object per event/job when a table row is enough. |
+| `chunks` or `chunk_host_cell_master_memory` | Too many chunks or replicas: small output chunks, append-heavy tables, unmerged intermediate data, excessive replication factor. | Run merge/auto-merge or rewrite tables with larger chunks; tune writers to produce larger chunks; remove obsolete data; avoid unnecessarily high replication factors; add secondary chunk-host cells when per-cell chunk metadata is the bottleneck. |
+| `attributes` | Large or numerous user attributes, ACLs, annotations, or metadata blobs on many objects. | Move large metadata into table rows or files; keep Cypress attributes small and structured; remove stale custom attributes; avoid storing large opaque JSON/YSON blobs as attributes. |
+| `schemas` | Many distinct large table schemas or repeated schema-like metadata. | Reuse schemas where possible; avoid excessive column counts; remove obsolete tables; avoid duplicating large schema metadata in custom attributes. |
+| `tablets` | Many mounted dynamic-table tablets, especially with rich tablet metadata. | Merge small tablets, reduce tablet count where load allows, unmount or remove unused dynamic tables, and size tablet bundles so tablet metadata growth is intentional. |
+| transaction-related attributes (`locked_node_ids`, `branched_node_ids`, `staged_object_ids`) | Long-lived or very large transactions. | Abort stale transactions; shorten transaction lifetimes; split very large transactions; avoid keeping many locks or staged objects open. |
+
+When shrinking master memory, first remove or merge objects on the heaviest accounts/subtrees, then verify both the charged resources and the process RSS. Charged resources should drop immediately after the corresponding mutations are applied; RSS may decrease more slowly because of allocator behavior and because snapshots, mutation queues, and caches may still hold memory temporarily. Always keep enough free host memory for the next snapshot fork while the cleanup is running.
 
 ### Node registration and disposal
 
