@@ -13,8 +13,6 @@
 
 #include <yt/yt/library/profiling/sensor.h>
 
-#include <yt/yt/library/tcmalloc/tcmalloc_manager.h>
-
 namespace NYT::NMonitoring {
 
 using namespace NYTree;
@@ -40,9 +38,7 @@ public:
             ActionQueue_->GetInvoker(),
             BIND(&TMonitoringManager::Update, MakeWeak(this)),
             UpdatePeriod))
-    {
-        Register("/tcmalloc/stats", NTCMalloc::GetTCMallocStatisticsProducer());
-    }
+    { }
 
     void Register(const TYPath& path, TYsonProducer producer) final
     {
