@@ -637,3 +637,5 @@ items:
           href: draft/cypress-local-filesystem-format-draft-16.md
         - name: Cluster and node states, locks, and maintenance (draft-17)
           href: draft/cluster-node-states-maintenance-draft-17.md
+        - name: Setting up and using ytprof to debug ytserver processes (draft-18)
+          href: draft/ytprof-ytserver-debugging-draft-18.md
