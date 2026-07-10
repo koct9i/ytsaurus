@@ -186,6 +186,16 @@ yt set //sys/@config/multicell_manager/cell_descriptors/<cell_tag>/roles '[chunk
 
 If no explicit roles are assigned, a secondary cell may still receive the default `cypress_node_host | chunk_host` roles unless `remove_secondary_cell_default_roles` is enabled or the cell is dynamically propagated. Assign roles explicitly to control what work the new cell serves after addition.
 
+After adding cells or changing roles, remember that non-master components learn
+the master cell directory through cached `GetClusterMeta` responses. Proxies,
+nodes, schedulers, and master-cache processes may keep an older view until their
+master-cell-directory synchronizer refreshes it (60-minute default sync period,
+20-minute default successful-update TTL). For traffic-critical role changes,
+wait for directory synchronization or temporarily shorten these intervals before
+expecting all clients to route to the new roles. See
+[Master cache and cached cluster metadata](./master-architecture-draft-4.md#master-cache)
+for the cache and validation details.
+
 ### Scaling recommendations
 
 A single-cell master setup is sufficient for most clusters. Consider adding secondary chunk-host cells when:

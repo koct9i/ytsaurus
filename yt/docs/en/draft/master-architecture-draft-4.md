@@ -36,6 +36,121 @@ sub-request is classified independently:
 | **Remote** | Target path belongs to another cell (cross-cell). | Forwarded via RPC to the target cell's object service. |
 | **Cache** | Non-mutating, response found in the two-level master cache. | Answered immediately without touching the automaton. |
 
+## Master cache and cached cluster metadata { #master-cache }
+
+The master cache is a separate server role that fronts the master's
+`ObjectService` for cacheable, non-mutating reads. It is not a Hydra peer and it
+does not own durable master state. Instead, each master-cache process registers
+itself in Cypress under `//sys/master_caches/<address>` and exposes a caching
+`ObjectService` for every known master cell. Clients discover these addresses
+through `GetClusterMeta(populate_master_cache_node_addresses=true)`.
+
+Internally the master cache maintains an in-memory SLRU object-service cache
+(default capacity: **1 GB**) keyed by:
+
+- master cell tag;
+- authenticated user, unless the request disables the per-user cache;
+- target path;
+- service and method;
+- request body;
+- the `suppress_upstream_sync` and
+  `suppress_transaction_coordinator_sync` flags.
+
+Only non-mutating sub-requests without additional attachments are accepted for
+caching. A mutating request, a request without a caching header, or a request
+with unsupported attachments is rejected by the caching service rather than
+being cached accidentally. On a cache miss, the master cache forwards exactly one
+sub-request to the upstream master over a follower channel, stores the response
+together with the response revision and success flag, and then serves waiting
+callers from the stored entry. On a hit, the response is returned directly from
+the master-cache process and the master automaton, local-read executor, and
+`SyncWithUpstream` path are not touched.
+
+### TTL splitting and stale serving { #master-cache-ttl }
+
+The request's caching header carries separate TTLs for successful and failed
+updates (`expire_after_successful_update_time` and
+`expire_after_failed_update_time`) plus an optional
+`success_staleness_bound`.
+
+When a master-cache process is used as a second-level cache, it consumes only a
+fraction of the requested TTL locally. The dynamic option
+`//sys/master_caches/@config/caching_object_service/cache_ttl_ratio` defaults to
+`0.5`. For example, with a 20-minute successful-update TTL, the master-cache
+entry is considered fresh for 10 minutes; the forwarded request leaves the
+remaining 10 minutes for the upstream/client-side cache layer. If second-level
+caching is disabled for a request, the local master-cache process uses the full
+TTL.
+
+Expired successful entries may still be returned while a refresh is in flight,
+but only within `success_staleness_bound`. Returning such a stale successful
+entry also forces the upper cache layer's staleness bound to zero, so stale data
+is not compounded across multiple cache levels. Failed entries are not served as
+stale entries after expiration. A caller can also request a
+`refresh_revision`; an entry with a revision not newer than this value is
+evicted and refreshed.
+
+This means cache validation is time/revision based, not invalidation-message
+based: the master cache does not subscribe to every master mutation. A metadata
+change becomes visible through the cache after the relevant cached entry expires,
+after a revision refresh is requested, or after the caller bypasses/suppresses
+the cache according to its read options.
+
+### Serving cluster metadata and cell directories { #master-cache-cluster-meta }
+
+Several components periodically call `GetClusterMeta` through the cache path to
+populate process-local cluster metadata:
+
+- node, cluster, medium, user, and feature directories;
+- timestamp-provider and master-cache node addresses;
+- the **master cell directory**, including primary and secondary master
+  connection configs and per-cell roles.
+
+For the master cell directory specifically, the native connection owns a master
+cell directory synchronizer. It periodically sends
+`GetClusterMeta(populate_cell_directory=true)` through a cache channel to the
+primary master. Defaults are:
+
+- sync period: **60 minutes**;
+- retry period after a failed sync: **15 seconds**;
+- cache TTL for a successful update: **20 minutes**;
+- cache TTL for a failed update: **15 seconds**.
+
+The primary master builds the cell directory from the multicell manager's master
+cell connection configs and current roles. Each master-cache process subscribes
+to directory changes in its own native connection; when a new secondary master
+cell appears in that directory, it registers an additional caching
+`ObjectService` for the new cell. Disappearing cells are treated as an alert,
+not as an ordinary cache eviction path.
+
+### Operational effect on adding cells and changing roles { #master-cache-cell-changes }
+
+Adding a secondary master cell or changing a cell's roles is committed on the
+masters first, but proxies, nodes, schedulers, master caches, and other native
+clients can continue using their cached master cell directory until their
+synchronizer refreshes it or an explicit sync is forced. The visible effects are:
+
+- A newly added master cell is not routable through a given component until that
+  component has learned the new cell directory entry.
+- New roles such as `chunk_host`, `cypress_node_host`, or
+  `transaction_coordinator` are not used for automatic placement or coordinator
+  selection by a component that still holds an older cell directory.
+- If roles are changed and the old cached directory says a cell is eligible for
+  some role, clients may continue trying that role until their directory cache
+  expires or synchronizes.
+- Master-cache processes that have not yet synchronized the new directory do not
+  expose a caching service realm for the new cell, so requests that rely on
+  master-cache routing to that cell can miss the new cache layer or fail over to
+  another route depending on the caller's channel policy.
+
+For planned cell addition or role changes, treat the master cell directory cache
+as part of the rollout. After committing the topology or role change, wait for
+`GetClusterMeta`/master-cell-directory synchronizers to complete on the affected
+components, or temporarily reduce the synchronizer period and successful-update
+TTL before the change. Avoid assigning traffic-critical roles and immediately
+assuming every component will route to them; propagation is bounded by the
+synchronizer period plus cache TTL and by retry behavior during failures.
+
 ### Freshness synchronization (SyncWithUpstream)
 
 Before any local sub-request is executed, the peer must guarantee that it is not
