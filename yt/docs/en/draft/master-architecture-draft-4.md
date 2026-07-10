@@ -151,6 +151,84 @@ TTL before the change. Avoid assigning traffic-critical roles and immediately
 assuming every component will route to them; propagation is bounded by the
 synchronizer period plus cache TTL and by retry behavior during failures.
 
+### Related dynamic configs and cluster connection { #master-cache-configs }
+
+There are three different configuration planes involved in this path. They are
+easy to confuse during incidents:
+
+| Plane | Cypress path / source | Main effect | Propagation model |
+|-------|-----------------------|-------------|-------------------|
+| **Master server dynamic config** | `//sys/@config` | Changes behavior of master peers themselves, including multicell role descriptors at `multicell_manager/cell_descriptors/<cell_tag>/roles` and master-side object-service cache behavior. | Applied by master dynamic-config managers; mutations to this document are durable master state, but each option still has its own reconfiguration semantics. |
+| **Master-cache dynamic config** | `//sys/master_caches/@config` | Reconfigures master-cache processes, including `caching_object_service`, `cache_ttl_ratio`, request throttling, cache capacity, and the master-cache process's own `master_cell_directory_synchronizer` override. | Read by master-cache dynamic-config managers; affects master-cache processes, not master peers. |
+| **Cluster connection** | `//sys/@cluster_connection` plus the static cluster connection shipped in component configs | Describes how native clients connect to masters and auxiliary services. Its `secondary_masters` list is the persistent client-side source for master cell addresses; the connection also has dynamic sections for directory synchronizers and other client caches. | Native components consume it through their cluster-directory / connection update policy and through cached `GetClusterMeta` directory refreshes. Some fields are only read when a connection object is created. |
+
+The word "dynamic" in `//sys/@cluster_connection` means "stored in a dynamic
+source" rather than "every field is hot-reloadable". Existing native connection
+objects reconfigure only the fields that have explicit reconfiguration code.
+For example, changing cache sizes, retry periods, and directory-synchronizer
+intervals is generally safe and is expected to take effect after the owning
+component reloads dynamic config. Changing structural connection data such as
+master cell IDs, master addresses, or the `secondary_masters` list should be
+treated as a topology rollout: components must learn the new directory and, for
+some services, may need restart with updated static config.
+
+Safe-to-change examples:
+
+- Lower `master_cell_directory_synchronizer/sync_period` and
+  `expire_after_successful_update_time` before a planned role change, then
+  restore them after all components learn the change.
+- Tune `//sys/master_caches/@config/caching_object_service/cache_ttl_ratio` or
+  cache capacity to trade freshness and memory for upstream master load.
+- Change secondary-cell roles in
+  `//sys/@config/multicell_manager/cell_descriptors/<cell_tag>/roles`, provided
+  you understand that clients with an older cached cell directory may keep using
+  old role information until refresh.
+
+Not safe as an isolated live tweak:
+
+- Removing or reusing a master cell tag/cell ID. Cell tags are embedded in
+  object IDs and must be globally unique.
+- Removing a secondary master from `//sys/@cluster_connection/secondary_masters`
+  while objects, chunks, transactions, portals, or clients can still reference
+  it.
+- Editing an existing table's `external_cell_tag` to move data. Existing chunk
+  trees are not rebalanced by changing this attribute.
+- Relying on a role removal to stop all traffic immediately. Cached directories
+  and already-open channels may keep sending requests until refresh or restart.
+
+Corner cases to account for:
+
+- If a component lowers its synchronizer period but keeps a long successful
+  cache TTL, `GetClusterMeta` may still be served from cache and return the old
+  directory until the TTL expires.
+- If a master-cache process has stale cell-directory metadata, it may not have
+  registered a caching service for a newly added cell yet. Direct master routing
+  can work while master-cache routing for the same cell is still unavailable.
+- Failed `GetClusterMeta` refreshes use the shorter failed-update TTL and retry
+  period, but they do not make an old successful directory magically fresh; a
+  component either keeps its last good directory or fails requests that require a
+  missing cell, depending on the caller and channel policy.
+- During read-only master maintenance, requests that require cross-cell
+  synchronization can fail; avoid combining topology changes with read-only
+  windows unless the procedure explicitly requires it.
+
+To wait for a change to take effect, verify both master state and client-side
+observation:
+
+1. Check the authoritative state on masters, for example
+   `yt get //sys/@registered_master_cell_tags`,
+   `yt get //sys/@dynamically_propagated_masters_cell_tags`, and
+   `yt get //sys/@config/multicell_manager/cell_descriptors/<cell_tag>/roles`.
+2. Force or wait for the master cell directory synchronizer on affected
+   components. Operationally this usually means waiting at least one successful
+   synchronizer cycle after the relevant cache TTL, or temporarily lowering the
+   period/TTL before the rollout.
+3. Confirm that a fresh `GetClusterMeta(populate_cell_directory=true)` from the
+   same route the component uses contains the new cell and roles.
+4. For master-cache routing, also verify that `//sys/master_caches` contains live
+   master-cache instances and use the same master-cache route to perform a
+   cacheable read against the relevant cell.
+
 ### Freshness synchronization (SyncWithUpstream)
 
 Before any local sub-request is executed, the peer must guarantee that it is not

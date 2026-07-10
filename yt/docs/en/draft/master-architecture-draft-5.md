@@ -196,6 +196,14 @@ expecting all clients to route to the new roles. See
 [Master cache and cached cluster metadata](./master-architecture-draft-4.md#master-cache)
 for the cache and validation details.
 
+Treat `//sys/@cluster_connection/secondary_masters` and master static configs as
+the topology source for clients, not as a low-risk runtime tuning knob. Adding
+cells must append new entries; do not remove or rewrite existing cell IDs/tags
+unless you are following a dedicated recovery procedure. Before relying on a
+newly assigned role, check the authoritative master-side role descriptor and then
+verify the same role through a fresh `GetClusterMeta(populate_cell_directory=true)`
+request from the route used by the affected components.
+
 ### Scaling recommendations
 
 A single-cell master setup is sufficient for most clusters. Consider adding secondary chunk-host cells when:
