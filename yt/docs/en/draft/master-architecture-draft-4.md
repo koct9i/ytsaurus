@@ -45,8 +45,29 @@ itself in Cypress under `//sys/master_caches/<address>` and exposes a caching
 `ObjectService` for every known master cell. Clients discover these addresses
 through `GetClusterMeta(populate_master_cache_node_addresses=true)`.
 
-Internally the master cache maintains an in-memory SLRU object-service cache
-(default capacity: **1 GB**) keyed by:
+There are two object-service cache levels that use the same cache entry format:
+
+1. **Master-internal cache.** Every master peer owns an in-memory
+   `ObjectService` cache (`/object_service_cache` in master profiling/Orchid)
+   configured by the master's static `object_service/master_cache` section and
+   guarded by the dynamic flag
+   `//sys/@config/object_service/enable_two_level_cache` (default **true**).
+   This level is inside the master process. A request still reaches the master
+   service and performs the normal request-level synchronization, but cache-hit
+   sub-requests are completed from the stored response instead of entering the
+   local-read executor and instead of acquiring an automaton block for reading
+   Cypress state.
+2. **External master-cache process.** A separate `master_cache` server role owns
+   another in-memory `ObjectService` cache and forwards misses to the upstream
+   master. A hit at this level does not contact any master peer at all.
+
+Both levels are important. The master-internal level protects the automaton and
+local-read threads from repeated cacheable reads even when clients talk directly
+to masters. The external level additionally absorbs RPC traffic and
+`SyncWithUpstream` work before it reaches master peers.
+
+Internally each level maintains an in-memory SLRU object-service cache (default
+capacity: **1 GB**) keyed by:
 
 - master cell tag;
 - authenticated user, unless the request disables the per-user cache;
@@ -56,15 +77,16 @@ Internally the master cache maintains an in-memory SLRU object-service cache
 - the `suppress_upstream_sync` and
   `suppress_transaction_coordinator_sync` flags.
 
-Only non-mutating sub-requests without additional attachments are accepted for
-caching. A mutating request, a request without a caching header, or a request
-with unsupported attachments is rejected by the caching service rather than
-being cached accidentally. On a cache miss, the master cache forwards exactly one
-sub-request to the upstream master over a follower channel, stores the response
-together with the response revision and success flag, and then serves waiting
-callers from the stored entry. On a hit, the response is returned directly from
-the master-cache process and the master automaton, local-read executor, and
-`SyncWithUpstream` path are not touched.
+Only non-mutating sub-requests with a caching header are eligible for these
+caches. The external master-cache service additionally rejects requests with
+unsupported attachments rather than caching them accidentally. Mutating requests
+with a caching header fail with a "cannot cache mutating request" error. On a
+cache miss, the master cache forwards exactly one
+sub-request to the upstream master over a follower channel; on a master-internal
+miss, the sub-request continues through the ordinary local-read path. The level
+that executed the miss stores the response together with the response revision
+and success flag, and then serves waiting callers from the stored entry. On a
+hit, the response is returned directly from the cache level that was hit.
 
 ### TTL splitting and stale serving { #master-cache-ttl }
 
@@ -77,10 +99,11 @@ When a master-cache process is used as a second-level cache, it consumes only a
 fraction of the requested TTL locally. The dynamic option
 `//sys/master_caches/@config/caching_object_service/cache_ttl_ratio` defaults to
 `0.5`. For example, with a 20-minute successful-update TTL, the master-cache
-entry is considered fresh for 10 minutes; the forwarded request leaves the
-remaining 10 minutes for the upstream/client-side cache layer. If second-level
-caching is disabled for a request, the local master-cache process uses the full
-TTL.
+entry is considered fresh for 10 minutes; the forwarded request header is
+rewritten with the remaining 10 minutes so the master-internal cache can own the
+rest of the freshness budget. If second-level caching is disabled for a request,
+the local master-cache process uses the full TTL and does not split it with the
+upstream master level.
 
 Expired successful entries may still be returned while a refresh is in flight,
 but only within `success_staleness_bound`. Returning such a stale successful
@@ -91,10 +114,11 @@ stale entries after expiration. A caller can also request a
 evicted and refreshed.
 
 This means cache validation is time/revision based, not invalidation-message
-based: the master cache does not subscribe to every master mutation. A metadata
-change becomes visible through the cache after the relevant cached entry expires,
-after a revision refresh is requested, or after the caller bypasses/suppresses
-the cache according to its read options.
+based: neither the external master-cache process nor the master-internal
+object-service cache subscribes to every master mutation. A metadata change
+becomes visible through the cache after the relevant cached entry expires, after
+a revision refresh is requested, or after the caller bypasses/suppresses the
+cache according to its read options.
 
 ### Serving cluster metadata and cell directories { #master-cache-cluster-meta }
 
@@ -204,6 +228,10 @@ Corner cases to account for:
 - If a master-cache process has stale cell-directory metadata, it may not have
   registered a caching service for a newly added cell yet. Direct master routing
   can work while master-cache routing for the same cell is still unavailable.
+- Disabling or bypassing the external master-cache process does not necessarily
+  disable the master-internal object-service cache. Use
+  `//sys/@config/object_service/enable_two_level_cache` when the goal is to make
+  cacheable requests execute through the ordinary master local-read path.
 - Failed `GetClusterMeta` refreshes use the shorter failed-update TTL and retry
   period, but they do not make an old successful directory magically fresh; a
   component either keeps its last good directory or fails requests that require a
