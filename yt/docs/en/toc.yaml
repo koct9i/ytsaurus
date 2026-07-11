@@ -553,6 +553,8 @@ items:
          when: audience == "public"
        - name: Monitoring
          href: admin-guide/monitoring.md
+       - name: Data storage failure handling and recovery
+         href: admin-guide/storage-failure-recovery.md
        - name: Updating YTsaurus server components
          href: admin-guide/update-ytsaurus.md
        - name: Updating volumes
