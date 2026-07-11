@@ -674,3 +674,5 @@ items:
           href: draft/cypress-local-filesystem-format-draft-16.md
         - name: Cluster and node states, locks, and maintenance (draft-17)
           href: draft/cluster-node-states-maintenance-draft-17.md
+        - name: Data storage failure handling and recovery (draft-18)
+          href: draft/data-storage-failure-recovery-draft-18.md
