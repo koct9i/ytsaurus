@@ -69,9 +69,12 @@ Chunk location statistics fields are:
 * `full`: whether the location is considered full for new placement.
 * `enabled`: whether the location is enabled from the data node's point of view.
 * `throttling_reads` and `throttling_writes`: whether local throttlers are currently limiting read or write traffic.
-* `sick`: whether the location is unhealthy but not necessarily fully disabled.
+* `sick`: whether the location's I/O engine has observed sustained slow reads or writes. The flag is raised when read or write wait times stay above the configured `sick_read_time_threshold` or `sick_write_time_threshold` for the corresponding `sick_*_time_window`; it expires after `sickness_expiration_timeout`. A sick location is still present, but new/active write sessions are asked to close and operators should treat it as a degraded disk signal before full disablement.
 * `disk_family`: disk family reported by the node, for example an HDD/SSD/NVMe class used by medium rules.
-* `io_statistics`: nested I/O rates and capacities: `filesystem_read_rate`, `filesystem_write_rate`, `disk_read_rate`, `disk_write_rate`, `disk_read_capacity`, and `disk_write_capacity`.
+* `io_statistics`: nested I/O rates and capacities. Rates are byte-per-second deltas between counter samples; the data node refreshes them lazily no more often than `io_statistics_update_timeout`, which defaults to 10 seconds. The fields are:
+  * `filesystem_read_rate` and `filesystem_write_rate`: logical bytes per second read/written through the location I/O engine.
+  * `disk_read_rate` and `disk_write_rate`: physical block-device bytes per second from OS disk counters for the location device.
+  * `disk_read_capacity` and `disk_write_capacity`: measured read/write throughput capacity from the data node I/O throughput meter. These are not current utilization; they are probe results used to estimate how much the disk can sustain.
 
 ### Media
 
@@ -161,6 +164,19 @@ Possible chunk states include:
 * **Inconsistently placed**: the chunk has enough replicas or parts, but they violate placement rules such as rack or medium constraints.
 
 For erasure-coded chunks, the flow is similar to replication, but repair reads surviving parts, reconstructs the missing data or parity part, and writes it to a new target location.
+
+### Repair priority and queue ordering { #repair-priority }
+
+The master does not repair chunks in a single unordered list. It uses several queues and resource checks:
+
+* **Replicated chunks** enter per-node push or pull replication queues when they are underreplicated, unsafely placed, or inconsistently placed. Queues are split by priority and scanned from the smallest priority number first. The priority is derived from the number of remaining replicas: chunks with fewer available replicas get lower priority numbers and are scheduled before chunks that still have more redundancy.
+* **Erasure-coded chunks with missing parts** enter the `Missing` repair queue. This covers data-missing and parity-missing chunks where a part must be reconstructed from surviving parts.
+* **Erasure-coded chunks with decommissioned parts** enter the `Decommissioned` repair queue. These are less urgent because the part still exists on a node being drained.
+* The `Missing` queue is always considered before the `Decommissioned` queue, so real part loss is repaired before decommission-driven movement.
+* Inside each repair-queue kind, work is split per medium. A decaying max-min balancer chooses the next medium so one medium cannot permanently starve others; scheduled repair data size is added as balancer weight and decays over time.
+* A node receives repair jobs only while it has spare `repair_slots` and `repair_data_size` resources. Replication jobs similarly respect replication slots, replication data-size limits, pull-replication per-target limits, and misschedule limits.
+
+This means the most urgent recovery path is: chunks with real missing data/parity and the least remaining redundancy first, then placement/decommission cleanup, all constrained by node resources, medium availability, and throttlers.
 
 ### Chunk object state attributes { #chunk-state-attributes }
 
