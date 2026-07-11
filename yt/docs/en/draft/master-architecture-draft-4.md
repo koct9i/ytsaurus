@@ -45,9 +45,23 @@ itself in Cypress under `//sys/master_caches/<address>` and exposes a caching
 `ObjectService` for every known master cell. Clients discover these addresses
 through `GetClusterMeta(populate_master_cache_node_addresses=true)`.
 
-There are two object-service cache levels that use the same cache entry format:
+There are several object-read cache layers that can participate in one native
+read:
 
-1. **Master-internal cache.** Every master peer owns an in-memory
+1. **Native-client object-service cache.** A native connection may create a
+   local `CachingObjectService` and route reads through
+   `EMasterChannelKind::ClientSideCache` (enabled by
+   `TConnectionOptions::EnableClientSideCache`, default **true**). This cache is
+   process-local to the client, proxy, node, scheduler, or other component that
+   owns the connection. It uses the cluster connection's
+   `caching_object_service` settings and forwards misses to the ordinary
+   `Cache` channel, which means the miss goes to an external `master_cache`
+   process when master-cache discovery is available and falls back to a master
+   follower otherwise. A hit at this level does not leave the client process.
+2. **External master-cache process.** A separate `master_cache` server role owns
+   another in-memory `ObjectService` cache and forwards misses to the upstream
+   master. A hit at this level does not contact any master peer at all.
+3. **Master-internal cache.** Every master peer owns an in-memory
    `ObjectService` cache (`/object_service_cache` in master profiling/Orchid)
    configured by the master's static `object_service/master_cache` section and
    guarded by the dynamic flag
@@ -57,17 +71,15 @@ There are two object-service cache levels that use the same cache entry format:
    sub-requests are completed from the stored response instead of entering the
    local-read executor and instead of acquiring an automaton block for reading
    Cypress state.
-2. **External master-cache process.** A separate `master_cache` server role owns
-   another in-memory `ObjectService` cache and forwards misses to the upstream
-   master. A hit at this level does not contact any master peer at all.
 
-Both levels are important. The master-internal level protects the automaton and
-local-read threads from repeated cacheable reads even when clients talk directly
-to masters. The external level additionally absorbs RPC traffic and
-`SyncWithUpstream` work before it reaches master peers.
+All three levels are important. The native-client level removes repeated
+cacheable reads inside long-lived component processes. The external level
+absorbs cross-process RPC traffic and `SyncWithUpstream` work before it reaches
+master peers. The master-internal level protects the automaton and local-read
+threads from repeated cacheable reads even when clients talk directly to masters.
 
-Internally each level maintains an in-memory SLRU object-service cache (default
-capacity: **1 GB**) keyed by:
+Each object-service cache level maintains an in-memory SLRU cache (default
+capacity: **1 GB**, unless overridden in that level's config) keyed by:
 
 - master cell tag;
 - authenticated user, unless the request disables the per-user cache;
@@ -81,12 +93,12 @@ Only non-mutating sub-requests with a caching header are eligible for these
 caches. The external master-cache service additionally rejects requests with
 unsupported attachments rather than caching them accidentally. Mutating requests
 with a caching header fail with a "cannot cache mutating request" error. On a
-cache miss, the master cache forwards exactly one
-sub-request to the upstream master over a follower channel; on a master-internal
-miss, the sub-request continues through the ordinary local-read path. The level
-that executed the miss stores the response together with the response revision
-and success flag, and then serves waiting callers from the stored entry. On a
-hit, the response is returned directly from the cache level that was hit.
+client-side or external-cache miss, that cache forwards exactly one sub-request
+to the next upstream cache/master channel; on a master-internal miss, the
+sub-request continues through the ordinary local-read path. The level that
+executed the miss stores the response together with the response revision and
+success flag, and then serves waiting callers from the stored entry. On a hit,
+the response is returned directly from the cache level that was hit.
 
 ### TTL splitting and stale serving { #master-cache-ttl }
 
@@ -95,15 +107,18 @@ updates (`expire_after_successful_update_time` and
 `expire_after_failed_update_time`) plus an optional
 `success_staleness_bound`.
 
-When a master-cache process is used as a second-level cache, it consumes only a
-fraction of the requested TTL locally. The dynamic option
+When a native-client or master-cache process uses `CachingObjectService`, that
+cache consumes only a fraction of the requested TTL locally before forwarding a
+miss to the next level. The dynamic option
 `//sys/master_caches/@config/caching_object_service/cache_ttl_ratio` defaults to
-`0.5`. For example, with a 20-minute successful-update TTL, the master-cache
-entry is considered fresh for 10 minutes; the forwarded request header is
-rewritten with the remaining 10 minutes so the master-internal cache can own the
-rest of the freshness budget. If second-level caching is disabled for a request,
-the local master-cache process uses the full TTL and does not split it with the
-upstream master level.
+`0.5` for external master-cache processes; the native-client cache uses the
+`caching_object_service` configuration embedded in its cluster connection. For
+example, with a 20-minute successful-update TTL and a 0.5 ratio, the current
+cache level considers its entry fresh for 10 minutes; the forwarded request
+header is rewritten with the remaining 10 minutes so upstream cache levels can
+own the rest of the freshness budget. If second-level caching is disabled for a
+request, the current `CachingObjectService` uses the full TTL and does not split
+it with the upstream level.
 
 Expired successful entries may still be returned while a refresh is in flight,
 but only within `success_staleness_bound`. Returning such a stale successful
@@ -114,11 +129,51 @@ stale entries after expiration. A caller can also request a
 evicted and refreshed.
 
 This means cache validation is time/revision based, not invalidation-message
-based: neither the external master-cache process nor the master-internal
-object-service cache subscribes to every master mutation. A metadata change
-becomes visible through the cache after the relevant cached entry expires, after
-a revision refresh is requested, or after the caller bypasses/suppresses the
-cache according to its read options.
+based: native-client caches, external master-cache processes, and the
+master-internal object-service cache do not subscribe to every master mutation.
+A metadata change becomes visible through the cache after the relevant cached
+entry expires, after a revision refresh is requested, or after the caller
+bypasses/suppresses the cache according to its read options.
+
+### Native-client object and attribute caches { #native-client-object-cache }
+
+The native-client object-service cache described above is transparent for
+ordinary YPath reads that use `TMasterReadOptions` and choose
+`ReadFrom = ClientSideCache` (or a higher-level helper that does so). If the
+connection was created with `EnableClientSideCache = false`, the requested
+`ClientSideCache` channel is downgraded to the `Cache` channel; if no external
+master cache is configured or discovered, `Cache` is downgraded to a follower
+master channel. Thus disabling client-side cache removes only the local
+per-connection cache; it does not by itself disable the external master-cache
+process or the master-internal cache.
+
+Some native components also build **object attribute caches** on top of YPath
+reads. `TObjectAttributeCache` stores parsed attribute dictionaries by Cypress
+path and fetches misses via `TBatchAttributeFetcher`, which sends batched
+`get <path>/@` or `list <dir>/@` requests with the same `TMasterReadOptions`.
+This means one logical attribute lookup may be cached twice:
+
+1. in the component's object attribute cache, keyed by the cache's logical
+   object key/path and governed by its `TAsyncExpiringCacheConfig`
+   (`expire_after_access_time`, `expire_after_successful_update_time`, and
+   `expire_after_failed_update_time`);
+2. in one or more object-service cache levels underneath, keyed by the YPath
+   request and governed by the request's master-read TTLs.
+
+Invalidating the object attribute cache only removes or refreshes that
+component-local parsed value. For caches that support
+`InvalidateActiveAndSetRefreshRevision`, the cache records a minimum
+`refresh_revision` for the path, and the next fetch passes that revision down in
+the caching header so lower object-service cache levels must refresh entries
+that are not newer. Caches that do not pass a refresh revision rely on their own
+expiration time plus the lower object-service TTLs.
+
+Operationally, if an object attribute change must be observed immediately by a
+long-lived native component, check all relevant layers: invalidate or wait out
+the component's attribute cache, ensure the read is not served by the
+client-side object-service cache, and account for external/master-internal cache
+TTLs unless the caller uses a refresh revision or bypasses cacheable master-read
+options.
 
 ### Serving cluster metadata and cell directories { #master-cache-cluster-meta }
 
@@ -184,7 +239,7 @@ easy to confuse during incidents:
 |-------|-----------------------|-------------|-------------------|
 | **Master server dynamic config** | `//sys/@config` | Changes behavior of master peers themselves, including multicell role descriptors at `multicell_manager/cell_descriptors/<cell_tag>/roles` and master-side object-service cache behavior. | Applied by master dynamic-config managers; mutations to this document are durable master state, but each option still has its own reconfiguration semantics. |
 | **Master-cache dynamic config** | `//sys/master_caches/@config` | Reconfigures master-cache processes, including `caching_object_service`, `cache_ttl_ratio`, request throttling, cache capacity, and the master-cache process's own `master_cell_directory_synchronizer` override. | Read by master-cache dynamic-config managers; affects master-cache processes, not master peers. |
-| **Cluster connection** | `//sys/@cluster_connection` plus the static cluster connection shipped in component configs | Describes how native clients connect to masters and auxiliary services. Its `secondary_masters` list is the persistent client-side source for master cell addresses; the connection also has dynamic sections for directory synchronizers and other client caches. | Native components consume it through their cluster-directory / connection update policy and through cached `GetClusterMeta` directory refreshes. Some fields are only read when a connection object is created. |
+| **Cluster connection** | `//sys/@cluster_connection` plus the static cluster connection shipped in component configs | Describes how native clients connect to masters and auxiliary services. Its `secondary_masters` list is the persistent client-side source for master cell addresses; it also carries `caching_object_service` settings for native-client object-service caches and dynamic sections for directory synchronizers and other client caches. | Native components consume it through their cluster-directory / connection update policy and through cached `GetClusterMeta` directory refreshes. Some fields are only read when a connection object is created. |
 
 The word "dynamic" in `//sys/@cluster_connection` means "stored in a dynamic
 source" rather than "every field is hot-reloadable". Existing native connection
@@ -228,10 +283,12 @@ Corner cases to account for:
 - If a master-cache process has stale cell-directory metadata, it may not have
   registered a caching service for a newly added cell yet. Direct master routing
   can work while master-cache routing for the same cell is still unavailable.
-- Disabling or bypassing the external master-cache process does not necessarily
-  disable the master-internal object-service cache. Use
-  `//sys/@config/object_service/enable_two_level_cache` when the goal is to make
-  cacheable requests execute through the ordinary master local-read path.
+- Disabling or bypassing one cache layer does not necessarily disable the
+  others. `EnableClientSideCache = false` bypasses only the native connection's
+  local object-service cache; disabling external master-cache discovery bypasses
+  only the separate `master_cache` process; use
+  `//sys/@config/object_service/enable_two_level_cache` for the master-internal
+  object-service cache.
 - Failed `GetClusterMeta` refreshes use the shorter failed-update TTL and retry
   period, but they do not make an old successful directory magically fresh; a
   component either keeps its last good directory or fails requests that require a
