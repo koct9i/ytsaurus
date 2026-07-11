@@ -48,6 +48,16 @@ Data node locations are exposed in Cypress in several places:
 * `//sys/cluster_nodes/<node-address>/@statistics/chunk_locations` contains the latest per-location statistics reported by that node in data node heartbeats. The legacy alias `@statistics/locations` may also be present.
 * The data node Orchid exposes local runtime state under its location manager, including `store_locations`, but Orchid is node-local runtime diagnostics rather than master-owned Cypress metadata.
 
+Typical inspection commands are:
+
+```bash
+yt get //sys/cluster_nodes/<node-address>/@chunk_locations
+yt get //sys/cluster_nodes/<node-address>/@statistics/chunk_locations
+yt get //sys/chunk_locations/<chunk-location-id>/@statistics
+```
+
+`@chunk_locations` and `@statistics/chunk_locations` expose the same per-location statistics shape; the former is keyed by location UUID, while the latter is a heartbeat statistics list.
+
 Chunk location statistics fields are:
 
 * `medium_name`: resolved medium name for the location's medium index, or an unknown-medium placeholder if the medium is absent.
