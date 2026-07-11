@@ -21,22 +21,31 @@ A location has its own lifecycle, independent of the node lifecycle:
 The location health checker can schedule disablement automatically when disk checks fail, including cases where the underlying drive becomes effectively read-only for {{product-name}} writes. Operators can do the same manually by location UUID:
 
 ```bash
-yt disable-chunk-locations '<node-address>' '[<location-uuid>;]'
+yt disable_chunk_locations '<node-address>' '[<location-uuid>;]'
 ```
 
 To undo an intentional disable after the disk is healthy again, resurrect the location:
 
 ```bash
-yt resurrect-chunk-locations '<node-address>' '[<location-uuid>;]'
+yt resurrect_chunk_locations '<node-address>' '[<location-uuid>;]'
 ```
 
 For a disk that must be retired rather than returned to service, destroy the already disabled location:
 
 ```bash
-yt destroy-chunk-locations '<node-address>' '[<location-uuid>;]'
+yt destroy_chunk_locations '<node-address>' '[<location-uuid>;]'
 ```
 
-`destroy-chunk-locations` is irreversible for the local replicas on that location; use `resurrect-chunk-locations` only when the original data is still expected to be readable and the disable was temporary.
+`destroy_chunk_locations` is irreversible for the local replicas on that location; use `resurrect_chunk_locations` only when the original data is still expected to be readable and the disable was temporary.
+
+The disabled state is persisted by a lock file inside the location directory. On startup the data node checks location lock files before enabling locations; if the disabled lock file is present, the location remains disabled and the reason stored in the file is used for diagnostics. `resurrect_chunk_locations` removes this disabled lock file and reinitializes the location.
+
+Data node locations are exposed in Cypress in several places:
+
+* `//sys/chunk_locations` is the global virtual map of chunk location objects. Each object has state attributes such as `@uuid`, `@state`, `@node_address`, `@statistics`, and optional writable `@medium_override`.
+* `//sys/chunk_location_shards/<shard>` contains the same chunk location objects partitioned by location UUID shard; this is useful when the global map is large.
+* `//sys/cluster_nodes/<node-address>/@statistics/chunk_locations` contains the latest per-location statistics reported by that node in data node heartbeats. The legacy alias `@statistics/locations` may also be present.
+* The data node Orchid exposes local runtime state under its location manager, including `store_locations`, but Orchid is node-local runtime diagnostics rather than master-owned Cypress metadata.
 
 ### Media
 
@@ -126,6 +135,28 @@ Possible chunk states include:
 * **Inconsistently placed**: the chunk has enough replicas or parts, but they violate placement rules such as rack or medium constraints.
 
 For erasure-coded chunks, the flow is similar to replication, but repair reads surviving parts, reconstructs the missing data or parity part, and writes it to a new target location.
+
+### Chunk object state attributes { #chunk-state-attributes }
+
+For an individual chunk, inspect `//sys/chunks/<chunk-id>/@...`. The most useful state attributes are:
+
+* `@stored_replicas`: currently known alive replicas. Replica entries include node address and attributes such as `medium`, `location_uuid`, `index` for erasure parts, `state` for journal replicas, `decommissioned` when the hosting node is decommissioned, and `offshore` for offshore media.
+* `@stored_master_replicas`: replicas known from master metadata.
+* `@stored_sequoia_replicas`: replicas known from Sequoia metadata when Sequoia chunk replica storage is used.
+* `@last_seen_replicas`: last nodes where replicas or erasure parts were seen; use this during lost-vital incidents to identify hosts or disks worth recovering.
+* `@unapproved_sequoia_replicas`: Sequoia replicas that are not yet approved in the regular replica view.
+* `@replication_status`: aggregated status computed by the chunk replicator. This is the fastest way to see whether the chunk is considered underreplicated, overreplicated, lost, data-missing, parity-missing, or otherwise deficient.
+* `@local_replication_status`: the local status on the chunk-replicator master peer.
+* `@scan_flags` and `@local_scan_flags`: whether the chunk is present in leader/replicator scan queues that maintain bad-state maps and schedule work.
+* `@jobs` and `@local_jobs`: active and recently finished jobs for the chunk, including job type, target node address, state, epoch, start time, and origin master.
+* `@part_loss_time` and `@local_part_loss_time`: time when an erasure part loss was detected, if any.
+* `@available`: whether the chunk is currently considered available for reads.
+* `@confirmed`: whether the chunk upload has been confirmed and committed into master metadata.
+* `@vital` and `@historically_non_vital`: whether loss of this chunk should trigger vital-data incident handling.
+* `@movable`: whether the system can move or replicate the chunk as part of balancing and repair.
+* `@requisition`, `@local_requisition`, and `@external_requisitions`: effective per-medium replication requirements derived from chunk owners and accounts.
+
+The virtual bad-state maps under `//sys`, such as `//sys/underreplicated_chunks`, `//sys/lost_vital_chunks`, `//sys/data_missing_chunks`, `//sys/parity_missing_chunks`, `//sys/quorum_missing_chunks`, `//sys/inconsistently_placed_chunks`, and `//sys/replica_temporarily_unavailable_chunks`, are indexes over these per-chunk states. Use the maps for cluster-wide triage and chunk attributes for per-chunk diagnosis.
 
 ## Bottlenecks during recovery { #bottlenecks }
 
