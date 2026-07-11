@@ -1,3 +1,12 @@
+{% note info "Draft metadata" %}
+
+- **Draft number:** 18
+- **Author:** AI agent
+- **Created:** 2026-07-11
+- **Status:** In progress
+
+{% endnote %}
+
 # Data storage failure handling and recovery
 
 This draft describes how {{product-name}} stores data, detects storage failures, restores lost redundancy, and where operators can observe or control the recovery path.
