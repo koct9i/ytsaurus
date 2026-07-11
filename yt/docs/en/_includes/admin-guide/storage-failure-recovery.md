@@ -8,24 +8,81 @@ This draft describes how {{product-name}} stores data, detects storage failures,
 
 A **chunk location** is a directory on a data node disk that belongs to a medium. Locations are the smallest operational unit for storing chunk replicas: they have capacity, disk health, read/write queues, and per-location throttlers. If a location becomes unhealthy or unavailable, all chunk replicas stored in it become unavailable until the location returns or the master schedules recovery elsewhere.
 
+A location has its own lifecycle, independent of the node lifecycle:
+
+* **Enabled**: the location is initialized, accepts new chunk write sessions, serves reads, and can participate in replication and repair jobs.
+* **Enabling**: the location is being initialized or resurrected. It is not yet a stable placement target.
+* **Disabling**: the data node is draining local activity, cancelling location sessions, removing local chunk registrations from memory, stopping the health checker, and preparing a master heartbeat that makes replicas on this location unavailable.
+* **Disabled**: the location is intentionally out of service. The node writes a disabled lock file in the location path so the state survives restart. Reads and new writes from that location are not expected to be served.
+* **Destroying**: the operator or hot-swap workflow has requested permanent destruction after the location is disabled.
+* **Destroyed**: destruction has finished and the disk can be replaced or recovered by the disk manager workflow.
+* **Crashed**: the location failed during initialization and requires operator investigation.
+
+The location health checker can schedule disablement automatically when disk checks fail, including cases where the underlying drive becomes effectively read-only for {{product-name}} writes. Operators can do the same manually by location UUID:
+
+```bash
+yt disable-chunk-locations '<node-address>' '[<location-uuid>;]'
+```
+
+To undo an intentional disable after the disk is healthy again, resurrect the location:
+
+```bash
+yt resurrect-chunk-locations '<node-address>' '[<location-uuid>;]'
+```
+
+For a disk that must be retired rather than returned to service, destroy the already disabled location:
+
+```bash
+yt destroy-chunk-locations '<node-address>' '[<location-uuid>;]'
+```
+
+`destroy-chunk-locations` is irreversible for the local replicas on that location; use `resurrect-chunk-locations` only when the original data is still expected to be readable and the disable was temporary.
+
 ### Media
 
 A **medium** is a logical pool of chunk locations, usually mapping to a disk class such as HDD or SSD. Quotas, balancing, and replication requirements are computed independently per medium. Each chunk owner has a primary medium for new writes and may request additional replicas on other media through the `media` attribute. Erasure-coded objects may also use `data_parts_only` media to place only data parts on a faster or cheaper tier.
 
 ### Data nodes
 
-A **data node** owns one or more chunk locations and serves reads, writes, replication traffic, and erasure repair traffic. It periodically reports its state to masters through data node heartbeats. Heartbeats include the node and location state, chunk counts, and incremental changes such as added, removed, or medium-changed chunks. Data nodes also execute chunk replica jobs: copying blocks to another node, reading blocks for repair, removing obsolete replicas, and honoring local disk and network throttlers.
+A **data node** owns one or more chunk locations and serves reads, writes, replication traffic, and erasure repair traffic. It periodically reports its state to masters through data node heartbeats. Heartbeats include the node and location state, chunk counts, write-session-disablement flag, and incremental changes such as added, removed, or medium-changed chunks. Data nodes also execute chunk replica jobs: copying blocks to another node, reading blocks for repair, removing obsolete replicas, and honoring local disk and network throttlers.
 
-### Health checks and node state
+### Node states and node maintenance flags
+
+Node lifecycle state answers whether the master currently sees the process. Node maintenance flags answer what the cluster should do with that process while it is alive or temporarily absent. Keep these concepts separate from per-location state.
+
+Important node states and flags for storage recovery are:
+
+* **online**: the node is registered and heartbeating. It can still be unsuitable for writes if `disable_write_sessions` or `decommissioned` is set.
+* **offline**: the node is not heartbeating. Replicas on it become unavailable unless the node is covered by `pending_restart`.
+* **pending_restart**: a short expected outage. The master extends the node lease and treats replicas as temporarily unavailable to avoid excessive repair during rolling restarts.
+* **disable_write_sessions**: the node refuses new chunk write sessions. Existing replicas remain readable, so this is a low-impact way to stop placing fresh data on a suspicious node or to drain writes before disk maintenance.
+* **decommissioned**: the node is being evacuated. The master schedules work to move chunk replicas away and, for multi-role nodes, other subsystems may move their ownership away as well. Decommission is the right state for long maintenance or permanent removal.
+* **banned**: the node is excluded more aggressively and should not be used for normal service; prefer narrower flags when only storage writes or only scheduler jobs must be drained.
+
+Use maintenance requests instead of setting raw boolean attributes when possible, because requests leave an auditable reason and several requests can coexist:
+
+```bash
+yt add-maintenance --component cluster_node --type disable_write_sessions --address '<node-address>' --comment 'disk diagnostics'
+yt add-maintenance --component cluster_node --type decommission --address '<node-address>' --comment 'host evacuation'
+yt add-maintenance --component cluster_node --type pending_restart --address '<node-address>' --comment 'rolling restart'
+```
+
+Undo the requested state by removing the maintenance request, for example:
+
+```bash
+yt remove-maintenance --component cluster_node --address '<node-address>' --type disable_write_sessions --mine
+```
+
+For short planned restarts, use `pending_restart` rather than `decommissioned`. It lets the master distinguish temporarily unavailable replicas from truly lost capacity and avoids unnecessary replication storms, provided that maintenance is limited to a safe failure domain, typically one rack at a time.
+
+### Health checks and state propagation
 
 The storage control plane treats failures as a sequence of visibility changes:
 
-* A disk or location health checker marks local storage unhealthy or read-only.
+* A disk or location health checker marks local storage unhealthy, failed, waiting for replacement, or effectively read-only; the data node then schedules location disablement.
 * A data node may stop reporting because of process, host, network, or Kubernetes failure.
 * The master node tracker eventually marks the node offline unless maintenance such as `pending_restart` intentionally extends its lease.
-* Chunk replicas on offline or unhealthy locations are excluded from the set of available replicas used by the chunk replicator.
-
-For short planned restarts, use `pending_restart` maintenance. It lets the master distinguish temporarily unavailable replicas from truly lost capacity and avoids unnecessary replication storms, provided that maintenance is limited to a safe failure domain, typically one rack at a time.
+* Chunk replicas on offline nodes, disabled locations, destroyed locations, or unhealthy locations are excluded from the set of available replicas used by the chunk replicator.
 
 ### Master chunk host and chunk metadata
 
@@ -50,18 +107,25 @@ The typical recovery path for a replicated chunk is:
 
 1. **Replica becomes unavailable.** A location fails, a data node stops heartbeating, or a chunk disappears from an incremental heartbeat.
 2. **Master refreshes chunk state.** The chunk server recomputes the set of stored, available, and last-seen replicas.
-3. **Chunk enters a bad-state set.** If available replicas are below the requested replication factor, the chunk appears in `//sys/underreplicated_chunks`. If all vital replicas are unavailable, it appears in `//sys/lost_vital_chunks`.
+3. **Chunk enters a bad-state set.** The chunk is classified into one or more bad-state sets such as underreplicated or lost vital.
 4. **Placement is selected.** The master chooses a target node and location in the required medium, respecting rack awareness, per-medium capacity, decommissioning/maintenance state, and replica-per-rack limits.
 5. **Replication job is issued.** The source and target data nodes copy blocks. The job competes for data node CPU, network, disk bandwidth, and throttler tokens.
 6. **Heartbeat confirms completion.** The target reports the new replica to the master. The chunk leaves the bad-state set after metadata is refreshed.
 7. **Cleanup follows.** If the source later returns and the chunk has too many replicas, obsolete replicas enter removal queues and are deleted in the background.
 
-For erasure-coded chunks, the flow is similar but the bad states and repair criteria differ:
+Possible chunk states include:
 
-1. A missing parity part makes the chunk **parity-missing** but still readable and repairable.
-2. A missing data part makes the chunk **data-missing**; reads may still succeed if enough parts remain for decoding.
-3. If too many parts are missing, the chunk becomes unrecoverable until at least one last-seen part returns.
-4. Erasure repair reads surviving parts, reconstructs the missing part, and writes it to a new target location.
+* **Healthy**: the chunk has the required replicas or erasure parts on acceptable nodes, locations, racks, and media.
+* **Underreplicated**: a replicated chunk has fewer available replicas than requested; it appears in `//sys/underreplicated_chunks`.
+* **Overreplicated**: more replicas exist than required; extra replicas are removed in the background.
+* **Unexpectedly overreplicated**: the master sees replicas that should not exist according to current metadata or placement decisions.
+* **Parity-missing**: an erasure-coded chunk has lost a parity part. Data is usually readable and repairable, but redundancy is reduced.
+* **Data-missing**: an erasure-coded chunk has lost a data part. Reads may still succeed if enough parts remain for decoding, but repair is urgent.
+* **Quorum-missing or unrecoverable**: too many erasure parts are missing to reconstruct the chunk until a last-seen part returns.
+* **Lost vital**: all available copies or enough erasure parts of vital data are missing; the chunk appears in `//sys/lost_vital_chunks` and requires incident response.
+* **Inconsistently placed**: the chunk has enough replicas or parts, but they violate placement rules such as rack or medium constraints.
+
+For erasure-coded chunks, the flow is similar to replication, but repair reads surviving parts, reconstructs the missing data or parity part, and writes it to a new target location.
 
 ## Bottlenecks during recovery { #bottlenecks }
 
@@ -75,6 +139,7 @@ Common bottlenecks are:
 * **Master automaton load.** A large failure creates many metadata updates, queue changes, and heartbeat deltas. High master automaton CPU delays scheduling and confirmation.
 * **Chunk count.** Many small chunks increase master memory use, queue sizes, and per-chunk scheduling overhead.
 * **Removal backlog.** Cleanup of destroyed or obsolete replicas consumes node work queues and can mask useful capacity until it catches up.
+* **Data node job slots.** Replication, repair, removal, seal, and merge jobs consume node resource slots. Defaults are intentionally conservative (`replication_slots = 16`, `removal_slots = 16`, `repair_slots = 4`, `seal_slots = 16`, `merge_slots = 4`) and may be overridden for production. Even with free disk and network bandwidth, recovery stops accelerating when replication or repair slots, or their data-size limits, are saturated.
 
 ## Metrics and inspection points { #metrics }
 
@@ -88,7 +153,7 @@ Use these indicators when diagnosing recovery:
 | Node and location health | data node alerts, node liveness, location free space, `chunk_count`, `trash_chunk_count` | Identifies failed disks, unavailable hosts, and cleanup pressure. |
 | Master pressure | `yt_resource_tracker_total_cpu{service="yt-master", thread="Automaton"}`, master memory, changelog and snapshot free space | Recovery is metadata-heavy and can be delayed by master saturation. |
 | Account pressure | `yt_accounts_chunk_count`, disk-space quota metrics | Quota exhaustion can prevent new data and complicate movement to other media. |
-| Queue pressure | node push/pull replication queue sizes and pull replication chunk count | Shows whether jobs are scheduled faster than nodes complete them. |
+| Queue pressure | node push/pull replication queue sizes, pull replication chunk count, `active_job_count`, replication/repair/removal slot usage | Shows whether jobs are scheduled faster than nodes complete them or whether job slots are saturated. |
 
 For a specific chunk, inspect its attributes such as stored replicas, last-seen replicas, requisition, replication, and replication status. `last_seen_replicas` is especially useful for deciding which hosts or disks might restore an otherwise lost chunk.
 
@@ -102,6 +167,7 @@ Operators can influence recovery with the following controls:
 * **Erasure codec.** Choose erasure for large, cold data to reduce storage overhead while retaining tolerance to part loss; avoid erasure where repair latency or CPU cost is unacceptable.
 * **Throttlers.** Raise recovery throttles during an incident if user traffic can tolerate it; lower them if repair traffic threatens cluster availability.
 * **Decommissioning and disablement.** Drain or decommission nodes gradually so the replicator can keep up.
+* **Write-session disablement.** Use `disable_write_sessions` when the node should keep serving existing replicas but should not receive new chunk writes.
 * **Chunk sizing and compaction.** Avoid excessive small chunks; merge or compact data to reduce metadata pressure and replication queue overhead.
 * **Quotas and capacity.** Keep per-medium free space and account quotas high enough for repair headroom.
 
@@ -114,6 +180,18 @@ Data placement mitigates loss by reducing correlated replica failures:
 * **Replica-per-rack limits.** The master avoids placing too many replicas of the same chunk in one failure domain. During maintenance, this is why one-rack-at-a-time procedures are safer.
 * **Transient media marking.** RAM or other unreliable media can be marked transient so operators can identify data stored only on volatile locations as precarious.
 * **Vitality.** Vital chunks receive stronger operational attention and alerts. Non-vital chunks, such as intermediate operation outputs, can be recomputed and therefore do not have to drive the same incident response.
+
+## Disk hot-plug and hot-unplug support { #disk-hotplug }
+
+When a data node is integrated with the disk manager and hot swap is enabled, storage can handle disk replacement without stopping the whole node:
+
+1. The location health checker periodically reads disk-manager state.
+2. If a disk is reported as failed, the corresponding location is marked failed and scheduled for disablement; alerts identify the disk id, model, path, device name, and state.
+3. The master stops considering replicas on the disabled location available and schedules replication or erasure repair elsewhere.
+4. The operator can destroy the disabled location when the disk is being removed.
+5. After the replacement disk is connected and the disk manager reports it as healthy again, the location can be resurrected or recreated according to the node configuration.
+
+This is hot-plug/hot-unplug at the disk/location level, not a guarantee that every filesystem, volume plugin, or Kubernetes storage class can be replaced online. If hot swap is not configured, disk replacement usually requires node-level maintenance: disable write sessions or decommission the node, stop it, replace the disk or volume, then start the node and let full heartbeats reconcile location state.
 
 ## Replication versus erasure coding { #replication-vs-erasure }
 
