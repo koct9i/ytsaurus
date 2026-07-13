@@ -11,6 +11,8 @@ This page is a compact operator cheat sheet for the most common cluster-wide swi
 | `hydra_read_only` / read-only mode | `//sys/@hydra_read_only`; `yt-admin build-master-snapshots --read-only`; `yt-admin master-exit-read-only` | Master cells | Forbids ordinary mutating requests while allowing reads and special administrative requests. | Master snapshots, emergency write freeze, investigations that need a stable master state. | `yt-admin master-exit-read-only` or `yt-admin exit-read-only --cell-id <cell-id>`. |
 | `enable_safe_mode` | `//sys/@config/enable_safe_mode` | Cluster clients and services that honor safe mode | Rejects non-read-only requests from everyone except super-users; the `replicator` user is excluded from this exception. | Emergency stop of user writes or automated actions without putting Hydra itself into read-only mode. | Set the dynamic config flag back to `false`. |
 | `provision_lock` | `//sys/@provision_lock` | Cluster node registration | Fresh-master safety attribute: while it is `true`, node registration is refused to prevent accidental startup against incomplete or wrong snapshot/changelog directories. | Initial cluster provisioning or disaster-recovery safety check. | Remove only with `yt remove //sys/@provision_lock` after verifying the master data directories and intended cluster identity. |
+| Scheduler active lock | `//sys/scheduler/lock`; active addresses in `//sys/scheduler/@addresses`; all registered instances in `//sys/scheduler/instances` | Scheduler processes | Exactly one scheduler instance holds the exclusive lock and is active; if it disappears, another instance can acquire the lock and recover scheduler state from Cypress. | Scheduler restart, active scheduler failover check, diagnosing data-processing unavailability. | Start or restart scheduler processes; do not manually remove the lock except as part of expert recovery. |
+| Controller agent instance locks | `//sys/controller_agents/instances/<address>/lock`; all instances in `//sys/controller_agents/instances` | Controller agent processes | Each active controller agent holds its own lock in a transaction nested under the active scheduler transaction; the scheduler uses this coupling to assign operations and fence stale agent incarnations. | Controller agent restart, operation revival diagnostics, checking whether agents are connected to the active scheduler. | Start or restart controller agents; the scheduler reassigns operations when an agent disappears. |
 
 ### Per-node operational flags
 
@@ -85,7 +87,7 @@ yt remove-maintenance --component cluster_node --address my-node.example.net --t
 yt remove-maintenance --component cluster_node --address my-node.example.net --all
 ```
 
-Supported components are `cluster_node`, `http_proxy`, `rpc_proxy`, and virtual component `host`. For `cluster_node` and `host`, supported maintenance types are `ban`, `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, and `pending_restart`; `host` expands only to cluster nodes registered on that host. For `http_proxy` and `rpc_proxy`, use `ban`: proxy maintenance targets expose only `@banned` and `@maintenance_requests`, so drain-style node maintenance types are not meaningful for them.
+Supported components are `cluster_node`, `http_proxy`, `rpc_proxy`, and virtual component `host`. For `cluster_node` and `host`, supported maintenance types are `ban`, `decommission`, `disable_scheduler_jobs`, `disable_write_sessions`, `disable_tablet_cells`, and `pending_restart`; `host` expands only to cluster nodes registered on that host. For `http_proxy` and `rpc_proxy`, use `ban`: proxy maintenance targets expose only `@banned` and `@maintenance_requests`, so drain-style node maintenance types are not meaningful for them. Scheduler instances and controller agents are not maintenance API targets; administer them through their Cypress instance/lock state, process orchestration, and dynamic config paths.
 
 ## Explanations for non-trivial cases
 
@@ -127,6 +129,107 @@ A safe rolling restart pattern is:
 The boolean attributes (`@banned`, `@decommissioned`, and so on) are effective state. `@maintenance_requests` is the reason ledger. Multiple requests can contribute to the same effective flag. Removing one request clears the flag only if no other active request still requires it.
 
 This is why cleanup should normally remove the exact ids returned by `add-maintenance`. Removing by `--type`, `--mine`, `--user`, or `--all` is useful during recovery, but it is broader and should be used deliberately.
+
+### Scheduler instances and controller agents
+
+Schedulers and controller agents are data-processing control-plane components rather than cluster-node maintenance targets. Do not try to `ban`, `decommission`, or add `pending_restart` maintenance for them. Their safe restart/failover behavior is based on Cypress registration nodes, exclusive locks, transactions, and operation revival.
+
+#### Scheduler instances
+
+Scheduler processes register themselves under `//sys/scheduler/instances/<address>` and expose their Orchid below the instance node. The active scheduler is the process that holds the exclusive lock on `//sys/scheduler/lock`. When it becomes active, it publishes the current scheduler addresses in `//sys/scheduler/@addresses`, updates `//sys/scheduler/orchid` remote addresses, writes `//sys/scheduler/@connection_time`, reads operation metadata from Cypress, and resumes handling operation requests and exec-node heartbeats.
+
+Operationally this means:
+
+* restarting a standby scheduler instance should not affect scheduling availability;
+* restarting the active scheduler causes a short data-processing control-plane failover while another instance acquires `//sys/scheduler/lock` and recovers state;
+* aborting the transaction that owns `//sys/scheduler/lock` is useful to recover faster when the active scheduler is dead or unable to refresh/release its lock, but by itself it does not guarantee a switch to another live scheduler;
+* if no scheduler holds the lock, new operations, new allocations, and scheduler-side progress are unavailable until an instance becomes active;
+* inspect `//sys/scheduler/@addresses`, `//sys/scheduler/@connection_time`, `//sys/scheduler/@alerts`, `//sys/scheduler/instances`, and `//sys/scheduler/orchid/scheduler` when diagnosing scheduler liveness.
+
+Useful checks:
+
+```bash
+yt get //sys/scheduler/@addresses
+yt get //sys/scheduler/@connection_time
+yt get //sys/scheduler/@alerts
+yt list //sys/scheduler/instances
+yt get //sys/scheduler/orchid/scheduler/nodes
+yt get //sys/scheduler/lock/@locks
+```
+
+A safer/faster active scheduler recovery or switch procedure is:
+
+1. Verify that at least one standby scheduler is registered in `//sys/scheduler/instances` and that the current active scheduler has no critical alerts.
+2. For an intentional switch away from a still-running active scheduler, first stop, pause, or otherwise remove that scheduler process from orchestration. If the process keeps competing for the lock, it may immediately acquire `//sys/scheduler/lock` again; Cypress locking does not provide an operator-facing fair queue that guarantees a different scheduler will win.
+3. Read `//sys/scheduler/lock/@locks` and find the `transaction_id` of the acquired exclusive lock.
+4. Abort that transaction with `yt abort-tx <transaction-id>`. This releases the active lock immediately, aborts nested controller-agent transactions, and forces controller agents to reconnect to whichever scheduler acquires the lock next.
+5. Watch `//sys/scheduler/@connection_time` and `//sys/scheduler/@addresses` until they change, then check scheduler alerts and controller-agent liveness.
+6. If the same scheduler reacquires the lock when you expected a switch, stop that process first and abort the new lock transaction only if you need to avoid waiting for its lock timeout. If no scheduler becomes active, restart a scheduler instance instead of repeatedly aborting transactions.
+
+Do not remove `//sys/scheduler/lock` or edit `//sys/scheduler/@addresses` manually. Those nodes are coordination state; the scheduler processes should update them after acquiring the lock.
+
+```bash
+yt list //sys/scheduler/instances
+yt get //sys/scheduler/lock/@locks
+yt abort-tx <scheduler-lock-transaction-id>
+yt get //sys/scheduler/@connection_time
+yt get //sys/scheduler/@addresses
+```
+
+#### Controller agent instances
+
+Controller agents register under `//sys/controller_agents/instances/<address>`, expose Orchid below `orchid`, and create an instance lock at `//sys/controller_agents/instances/<address>/lock`. After connecting to the active scheduler, a controller agent creates a transaction nested under the scheduler's lock transaction and locks its own instance lock. This transaction couples the agent to the current active scheduler and fences stale incarnations: if the scheduler failovers or explicitly disconnects the agent, the nested transaction is aborted and the agent must reconnect.
+
+Operationally this means:
+
+* controller agents can usually be restarted one at a time;
+* for a planned drain, first make the target agent unattractive for new assignments by changing its tags on the next incarnation, then abort its instance-lock transaction or restart it;
+* operations assigned to a restarted, disconnected, or failed agent are reassigned by the scheduler to other agents and revived from their latest controller snapshots;
+* some progress since the last operation snapshot can be lost, but operations should continue if enough agents remain available;
+* if too few or no controller agents are active, new or revived operations cannot be controlled effectively even if the scheduler is alive;
+* inspect instance nodes, per-instance alerts, connection times, tags, and controller-agent Orchid when diagnosing assignment or revival problems.
+
+Useful checks:
+
+```bash
+yt list //sys/controller_agents/instances
+yt get //sys/controller_agents/instances/<address>/@connection_time
+yt get //sys/controller_agents/instances/<address>/@alerts
+yt get //sys/controller_agents/instances/<address>/@tags
+yt get //sys/controller_agents/instances/<address>/orchid/controller_agent
+yt get //sys/controller_agents/instances/<address>/lock/@locks
+```
+
+A planned controller-agent drain is:
+
+1. Check that enough other controller agents are alive for every tag used by operations. Pay special attention to `controller_agent_tracker/min_agent_count` and `controller_agent_tracker/tag_to_alive_controller_agent_thresholds` in the scheduler dynamic config.
+2. Set `//sys/controller_agents/instances/<address>/@tags_override` to a temporary tag that no operation uses, for example `["maintenance:<ticket>"]`. Do not use an empty list as a drain marker: old schedulers may treat an empty tag set as `default`.
+3. Read `//sys/controller_agents/instances/<address>/lock/@locks` and find the `transaction_id` of the acquired exclusive lock.
+4. Abort that transaction with `yt abort-tx <transaction-id>` or restart the controller-agent process. Aborting the transaction is faster than waiting for scheduler heartbeat timeout: the scheduler unregisters the agent, returns its operations to the waiting-for-agent path, and assigns them to other eligible agents.
+5. Wait until the target agent reconnects with only the maintenance tag, and verify that its assigned operation count drops to zero while other agents pick up the operations.
+6. Perform maintenance. To return the agent to service, remove `@tags_override` (or set the intended production tags) and restart the agent or abort its current instance-lock transaction so the next handshake advertises the production tags.
+
+This is a control-plane drain, not a job drain. Running jobs keep reporting through exec-node heartbeats; affected operations are revived on other agents from their latest snapshots, so some controller progress since the last snapshot may be replayed or lost.
+
+```bash
+yt list //sys/controller_agents/instances
+yt get //sys/scheduler/config/controller_agent_tracker
+yt set //sys/controller_agents/instances/<address>/@tags_override '["maintenance:<ticket>"]'
+yt get //sys/controller_agents/instances/<address>/lock/@locks
+yt abort-tx <controller-agent-lock-transaction-id>
+yt get //sys/controller_agents/instances/<address>/@tags
+yt remove //sys/controller_agents/instances/<address>/@tags_override
+```
+
+#### Dynamic config
+
+Scheduler dynamic config is stored in `//sys/scheduler/config`. Controller agent dynamic config is stored in `//sys/controller_agents/config`; each controller agent applies the patch to its `controller_agent` subsystem and exposes the effective config in its Orchid. Prefer dynamic config for supported runtime tuning, and process restarts for static-config or binary changes.
+
+```bash
+yt get //sys/scheduler/config
+yt get //sys/controller_agents/config
+yt get //sys/controller_agents/instances/<address>/orchid/controller_agent/config
+```
 
 ### HTTP and RPC proxy maintenance
 
