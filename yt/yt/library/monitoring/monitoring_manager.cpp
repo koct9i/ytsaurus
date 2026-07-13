@@ -43,7 +43,7 @@ public:
     void Register(const TYPath& path, TYsonProducer producer) final
     {
         auto guard = Guard(SpinLock_);
-        YT_VERIFY(PathToProducer_.emplace(path, producer).second);
+        YT_VERIFY(PathToProducer_.emplace(path, std::move(producer)).second);
     }
 
     void Unregister(const TYPath& path) final

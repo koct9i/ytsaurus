@@ -29,6 +29,8 @@
 
 #include <yt/yt/library/profiling/solomon/exporter.h>
 
+#include <yt/yt/library/tcmalloc/tcmalloc_manager.h>
+
 #ifdef _linux_
 #include <yt/yt/library/ytprof/http/handler.h>
 #include <yt/yt/library/ytprof/build_info.h>
@@ -111,6 +113,7 @@ void Initialize(
 {
     *monitoringManager = CreateMonitoringManager();
     (*monitoringManager)->Register("/ref_counted", GetCachingRefCountedTrackerStatisticsProducer());
+    (*monitoringManager)->Register("/tcmalloc/stats", NTCMalloc::GetTCMallocStatisticsProducer());
     (*monitoringManager)->Register("/solomon", BIND([] (NYson::IYsonConsumer* consumer) {
         auto tags = NProfiling::TSolomonRegistry::Get()->GetDynamicTags();
 

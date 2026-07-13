@@ -1,5 +1,7 @@
 #include "tcmalloc_manager.h"
 
+#include <yt/yt/core/ytree/fluent.h>
+
 #include "config.h"
 
 #include <yt/yt/library/profiling/solomon/registry.h>
@@ -510,6 +512,16 @@ private:
 void TTCMallocManager::Configure(const TTCMallocConfigPtr& config)
 {
     TTCMallocManagerImpl::Get()->Configure(config);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+NYson::TYsonProducer GetTCMallocStatisticsProducer()
+{
+    return BIND([] (NYson::IYsonConsumer* consumer) {
+        NYTree::BuildYsonFluently(consumer)
+            .Value(tcmalloc::MallocExtension::GetStats());
+    });
 }
 
 ////////////////////////////////////////////////////////////////////////////////

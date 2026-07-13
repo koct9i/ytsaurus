@@ -13,6 +13,8 @@ PEERDIR(
     yt/yt/library/profiling
     yt/yt/library/profiling/solomon
     library/cpp/cgiparam
+
+    yt/yt/library/tcmalloc
 )
 
 IF (OS_LINUX)
