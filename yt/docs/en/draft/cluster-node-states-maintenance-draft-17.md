@@ -142,7 +142,7 @@ Operationally this means:
 
 * restarting a standby scheduler instance should not affect scheduling availability;
 * restarting the active scheduler causes a short data-processing control-plane failover while another instance acquires `//sys/scheduler/lock` and recovers state;
-* for a planned active-scheduler switch, aborting the transaction that owns `//sys/scheduler/lock` is usually faster and cleaner than killing the process and waiting for its lock transaction timeout;
+* aborting the transaction that owns `//sys/scheduler/lock` is useful to recover faster when the active scheduler is dead or unable to refresh/release its lock, but by itself it does not guarantee a switch to another live scheduler;
 * if no scheduler holds the lock, new operations, new allocations, and scheduler-side progress are unavailable until an instance becomes active;
 * inspect `//sys/scheduler/@addresses`, `//sys/scheduler/@connection_time`, `//sys/scheduler/@alerts`, `//sys/scheduler/instances`, and `//sys/scheduler/orchid/scheduler` when diagnosing scheduler liveness.
 
@@ -157,20 +157,21 @@ yt get //sys/scheduler/orchid/scheduler/nodes
 yt get //sys/scheduler/lock/@locks
 ```
 
-A safer/faster planned active scheduler switch is:
+A safer/faster active scheduler recovery or switch procedure is:
 
 1. Verify that at least one standby scheduler is registered in `//sys/scheduler/instances` and that the current active scheduler has no critical alerts.
-2. Read `//sys/scheduler/lock/@locks` and find the `transaction_id` of the acquired exclusive lock.
-3. Abort that transaction with `yt abort-transaction <transaction-id>`. This releases the active lock immediately, aborts nested controller-agent transactions, and forces controller agents to reconnect to the next active scheduler.
-4. Watch `//sys/scheduler/@connection_time` and `//sys/scheduler/@addresses` until they change, then check scheduler alerts and controller-agent liveness.
-5. If no new scheduler becomes active, restart a scheduler instance instead of repeatedly aborting transactions.
+2. For an intentional switch away from a still-running active scheduler, first stop, pause, or otherwise remove that scheduler process from orchestration. If the process keeps competing for the lock, it may immediately acquire `//sys/scheduler/lock` again; Cypress locking does not provide an operator-facing fair queue that guarantees a different scheduler will win.
+3. Read `//sys/scheduler/lock/@locks` and find the `transaction_id` of the acquired exclusive lock.
+4. Abort that transaction with `yt abort-tx <transaction-id>`. This releases the active lock immediately, aborts nested controller-agent transactions, and forces controller agents to reconnect to whichever scheduler acquires the lock next.
+5. Watch `//sys/scheduler/@connection_time` and `//sys/scheduler/@addresses` until they change, then check scheduler alerts and controller-agent liveness.
+6. If the same scheduler reacquires the lock when you expected a switch, stop that process first and abort the new lock transaction only if you need to avoid waiting for its lock timeout. If no scheduler becomes active, restart a scheduler instance instead of repeatedly aborting transactions.
 
 Do not remove `//sys/scheduler/lock` or edit `//sys/scheduler/@addresses` manually. Those nodes are coordination state; the scheduler processes should update them after acquiring the lock.
 
 ```bash
 yt list //sys/scheduler/instances
 yt get //sys/scheduler/lock/@locks
-yt abort-transaction <scheduler-lock-transaction-id>
+yt abort-tx <scheduler-lock-transaction-id>
 yt get //sys/scheduler/@connection_time
 yt get //sys/scheduler/@addresses
 ```
@@ -204,7 +205,7 @@ A planned controller-agent drain is:
 1. Check that enough other controller agents are alive for every tag used by operations. Pay special attention to `controller_agent_tracker/min_agent_count` and `controller_agent_tracker/tag_to_alive_controller_agent_thresholds` in the scheduler dynamic config.
 2. Set `//sys/controller_agents/instances/<address>/@tags_override` to a temporary tag that no operation uses, for example `["maintenance:<ticket>"]`. Do not use an empty list as a drain marker: old schedulers may treat an empty tag set as `default`.
 3. Read `//sys/controller_agents/instances/<address>/lock/@locks` and find the `transaction_id` of the acquired exclusive lock.
-4. Abort that transaction with `yt abort-transaction <transaction-id>` or restart the controller-agent process. Aborting the transaction is faster than waiting for scheduler heartbeat timeout: the scheduler unregisters the agent, returns its operations to the waiting-for-agent path, and assigns them to other eligible agents.
+4. Abort that transaction with `yt abort-tx <transaction-id>` or restart the controller-agent process. Aborting the transaction is faster than waiting for scheduler heartbeat timeout: the scheduler unregisters the agent, returns its operations to the waiting-for-agent path, and assigns them to other eligible agents.
 5. Wait until the target agent reconnects with only the maintenance tag, and verify that its assigned operation count drops to zero while other agents pick up the operations.
 6. Perform maintenance. To return the agent to service, remove `@tags_override` (or set the intended production tags) and restart the agent or abort its current instance-lock transaction so the next handshake advertises the production tags.
 
@@ -215,7 +216,7 @@ yt list //sys/controller_agents/instances
 yt get //sys/scheduler/config/controller_agent_tracker
 yt set //sys/controller_agents/instances/<address>/@tags_override '["maintenance:<ticket>"]'
 yt get //sys/controller_agents/instances/<address>/lock/@locks
-yt abort-transaction <controller-agent-lock-transaction-id>
+yt abort-tx <controller-agent-lock-transaction-id>
 yt get //sys/controller_agents/instances/<address>/@tags
 yt remove //sys/controller_agents/instances/<address>/@tags_override
 ```
