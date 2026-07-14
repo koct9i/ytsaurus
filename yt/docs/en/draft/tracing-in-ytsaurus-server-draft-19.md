@@ -122,6 +122,12 @@ tracing = {
 
 ## Useful examples
 
+{% note info "Examples are fragments" %}
+
+The snippets below show the tracing-related parts only. Merge them into the static or dynamic configuration shape used by the target component in your deployment, and validate the final YSON before rollout.
+
+{% endnote %}
+
 ### Trace a single HTTP request from a script
 
 When you already have a trace id from an external system, pass it with a W3C `traceparent` header and store the `X-YT-Trace-Id` response header in the caller logs. The sampled flag in the example below asks YTsaurus to export the server-side spans, unless proxy sampling policy clears it.
@@ -232,14 +238,26 @@ Masters and cluster nodes link the Jaeger tracing library and can export interna
 
 ## Limitations and caveats
 
-- Jaeger export is the server-side exporter implemented in this codebase. OpenTelemetry-native OTLP export and Zipkin export are not exposed by the YTsaurus C++ server tracer in the files reviewed for this draft.
-- There is no documented OpenTelemetry Collector pipeline configuration in this server tracer. If your observability platform is OpenTelemetry-first, use a Jaeger-compatible ingestion path or add/export an adapter outside the YTsaurus server process.
-- Metrics and logs are not emitted as OpenTelemetry signals by this tracer. Correlation is identifier-based: preserve `trace_id`, request id, user, command, and process tags in logs and metrics dashboards.
-- Tail-based sampling, adaptive sampling by latency/error, remote sampler control, and span processors are not described by the current server options. Sampling is configured at proxies/connectors with probabilities, per-user rules, minimum per-user samples, and explicit sampled flags.
-- Cross-process context propagation is not universal W3C propagation. HTTP propagation supports `traceparent`, but native RPC propagation uses YTsaurus protobuf extensions, and `tracestate` is not described in the reviewed code. Do not assume B3, Zipkin, `uber-trace-id`, or arbitrary vendor headers are understood.
-- Baggage is YTsaurus-specific YSON data in the native RPC extension rather than the W3C `baggage` HTTP header. Keep it small and non-sensitive.
+### Missing features compared with modern tracing stacks
+
+The current server tracing path is intentionally narrower than a full OpenTelemetry SDK. In particular, do not plan a rollout around the following features unless they are added by a separate adapter or a future YTsaurus change:
+
+| Feature | Status in this draft | Practical workaround |
+| --- | --- | --- |
+| Native OTLP export | Not exposed by the C++ server tracer reviewed for this draft. | Export to a Jaeger-compatible collector endpoint or bridge outside the server process. |
+| Zipkin export | Not exposed by the server tracer reviewed for this draft. | Use a backend or collector path that accepts Jaeger data. |
+| OpenTelemetry logs and metrics signals | The tracer exports spans; logs and metrics are correlated by ids rather than emitted as OpenTelemetry signals. | Preserve `trace_id`, request id, user, command, and process tags in logs and dashboards. |
+| Tail-based or adaptive sampling | Not described by the current server options. | Use probability/per-user/minimum-count sampling at proxies and connectors, then filter in the backend. |
+| Remote sampler control and span processors | Not described by the current server options. | Treat sampler configuration as YTsaurus configuration and roll it out through normal config management. |
+| Universal HTTP propagation | HTTP accepts `traceparent`, while native RPC uses YTsaurus protobuf extensions. | Standardize external clients on `traceparent`; do not assume B3, `uber-trace-id`, or arbitrary vendor headers are consumed. |
+| W3C `tracestate` and `baggage` | `tracestate` is not described in the reviewed code; YTsaurus baggage is YSON in the native RPC extension. | Keep cross-system baggage outside YTsaurus or copy selected values into safe request tags/log fields. |
+
+### Operational caveats
+
 - Sampling decisions can be inherited from incoming requests. Use `clear_sampled_flag` for users or integrations that send overly aggressive sampled flags.
+- Baggage should be small and non-sensitive. It may cross service boundaries and appear in diagnostics.
 - Trace volume grows with fan-out. A single sampled request can produce many spans on a large cluster.
+- Treat examples in this draft as starting points, not as production-ready full component configs.
 
 ## Troubleshooting checklist
 
