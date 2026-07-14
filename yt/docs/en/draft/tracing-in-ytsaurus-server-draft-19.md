@@ -120,6 +120,84 @@ tracing = {
 }
 ```
 
+## Useful examples
+
+### Trace a single HTTP request from a script
+
+When you already have a trace id from an external system, pass it with a W3C `traceparent` header and store the `X-YT-Trace-Id` response header in the caller logs. The sampled flag in the example below asks YTsaurus to export the server-side spans, unless proxy sampling policy clears it.
+
+```bash
+TRACE_ID=4bf92f3577b34da6a3ce929d0e0e4736
+SPAN_ID=00f067aa0ba902b7
+curl -sv \
+    -H "Authorization: OAuth ${YT_TOKEN}" \
+    -H "traceparent: 00-${TRACE_ID}-${SPAN_ID}-01" \
+    "https://$YT_PROXY/api/v4/get?path=//sys/@cluster_name" \
+    2>&1 | awk 'tolower($0) ~ /x-yt-trace-id/ {print}'
+```
+
+Use the printed trace id to search server logs and the Jaeger UI. If the request creates many internal RPCs, search by operation name, user, proxy role, and the process tags configured in `jaeger`.
+
+### Temporarily force traces for one user
+
+Prefer a narrow per-user override instead of enabling `force_tracing` for every request on a busy proxy. The following dynamic sampler fragment records every request from `alice`, keeps a small background sample for everyone else, and captures the first five requests per user each minute so low-traffic users are still represented.
+
+```yson
+tracing = {
+    global_sample_rate = 0.0005;
+    user_sample_rate = {
+        alice = 1.0;
+    };
+    min_per_user_samples = 5;
+    min_per_user_samples_period = 1m;
+}
+```
+
+Roll this back after the incident. If the caller sends sampled `traceparent` headers too often, add the user to `clear_sampled_flag` and rely on the proxy sampler instead.
+
+### Route noisy diagnostic traffic to a separate collector endpoint
+
+Use `user_endpoints` when a diagnostic user or synthetic workload should not compete with production traces in the default collector path.
+
+```yson
+tracing = {
+    global_sample_rate = 0.001;
+    user_sample_rate = {
+        synthetic_tracing_test = 1.0;
+    };
+    user_endpoints = {
+        synthetic_tracing_test = "jaeger-diag-collector.example.net:14250";
+    };
+}
+```
+
+### Enable CHYT request tracing for one query
+
+The ClickHouse HTTP path can force sampling through the `chyt.enable_tracing` CGI parameter. This is useful when a BI tool or test script can add query parameters but cannot set arbitrary tracing headers.
+
+```bash
+curl -sv \
+    -H "Authorization: OAuth ${YT_TOKEN}" \
+    "https://$YT_PROXY/chyt?database=default&chyt.enable_tracing=1" \
+    --data-binary 'select 1'
+```
+
+### Dry-run collector pressure before sending real spans
+
+Set `test_drop_spans = %true` in a staging or canary configuration to exercise span creation, batching, and logging without writing to the collector. Combine it with realistic sampler settings and check whether span volume and batch sizes look safe before enabling real export.
+
+```yson
+jaeger = {
+    service_name = "yt-http-proxy-canary";
+    collector_channel_config = {
+        address = "jaeger-collector.example.net:14250";
+    };
+    test_drop_spans = %true;
+    max_memory = 256MB;
+    flush_period = 15s;
+}
+```
+
 ## Component-specific entry points
 
 ### HTTP proxy
@@ -155,9 +233,12 @@ Masters and cluster nodes link the Jaeger tracing library and can export interna
 ## Limitations and caveats
 
 - Jaeger export is the server-side exporter implemented in this codebase. OpenTelemetry-native OTLP export and Zipkin export are not exposed by the YTsaurus C++ server tracer in the files reviewed for this draft.
-- HTTP propagation supports `traceparent`; native RPC propagation uses YTsaurus protobuf extensions. Do not assume every third-party tracing header is understood.
+- There is no documented OpenTelemetry Collector pipeline configuration in this server tracer. If your observability platform is OpenTelemetry-first, use a Jaeger-compatible ingestion path or add/export an adapter outside the YTsaurus server process.
+- Metrics and logs are not emitted as OpenTelemetry signals by this tracer. Correlation is identifier-based: preserve `trace_id`, request id, user, command, and process tags in logs and metrics dashboards.
+- Tail-based sampling, adaptive sampling by latency/error, remote sampler control, and span processors are not described by the current server options. Sampling is configured at proxies/connectors with probabilities, per-user rules, minimum per-user samples, and explicit sampled flags.
+- Cross-process context propagation is not universal W3C propagation. HTTP propagation supports `traceparent`, but native RPC propagation uses YTsaurus protobuf extensions, and `tracestate` is not described in the reviewed code. Do not assume B3, Zipkin, `uber-trace-id`, or arbitrary vendor headers are understood.
+- Baggage is YTsaurus-specific YSON data in the native RPC extension rather than the W3C `baggage` HTTP header. Keep it small and non-sensitive.
 - Sampling decisions can be inherited from incoming requests. Use `clear_sampled_flag` for users or integrations that send overly aggressive sampled flags.
-- Baggage should be small and non-sensitive. It may cross service boundaries and appear in diagnostics.
 - Trace volume grows with fan-out. A single sampled request can produce many spans on a large cluster.
 
 ## Troubleshooting checklist
