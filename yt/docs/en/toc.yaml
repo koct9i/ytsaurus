@@ -671,3 +671,5 @@ items:
           href: draft/cluster-node-states-maintenance-draft-17.md
         - name: Data storage failure handling and recovery (draft-18)
           href: draft/data-storage-failure-recovery-draft-18.md
+        - name: Using tracing in YTsaurus server (draft-19)
+          href: draft/tracing-in-ytsaurus-server-draft-19.md
