@@ -95,6 +95,27 @@ Possible multicell interference during failover:
 - Cross-cell reads can see amplified latency because they may need both local catch-up (`SyncWithUpstream`) and remote Hive synchronization with the recovering cell.
 - If the primary cell is the one failing over, user-visible impact is broader because the primary hosts the root Cypress tree and coordinates global metadata flows.
 
+### Follower recovery { #follower-recovery }
+
+A peer that has joined an election epoch as a follower does not immediately become a serving follower. It first enters `FollowerRecovery` and must catch its local automaton state up to the leader's committed state.
+
+The recovery target is learned from the leader's initial Hydra ping or mutation stream. It consists of the leader's committed `segment_id` and committed `sequence_number` for the current term. The follower creates a follower committer, initializes its expected sequence number from this target, and then runs recovery before it is allowed to serve normal follower reads.
+
+Recovery proceeds in two modes:
+
+1. **Changelog-only recovery**. If the follower is only slightly behind (`target_sequence_number - current_sequence_number < max_sequence_number_gap_for_changelog_only_recovery`), it tries to replay local changelogs from its current state. This is the fast path after a short restart or a small network gap.
+2. **Snapshot-assisted recovery**. If the gap is too large, or changelog-only recovery fails, the follower finds the newest usable snapshot locally or on other peers, downloads it if necessary, loads it into the automaton, and then replays changelogs from the snapshot generation up to the target sequence number.
+
+When persistent changelogs are enabled, follower recovery also synchronizes each changelog segment with the leader before replaying it:
+
+- if the local segment has extra records beyond the leader's accepted record count, the follower truncates the local tail;
+- if the local segment is shorter, the follower downloads missing records from the leader;
+- if truncation would remove a mutation that is known to have been reliably applied, recovery fails and the peer restarts instead of silently rolling back durable state.
+
+After replay reaches the target state, the follower performs a final catch-up through the follower committer. During this catch-up it may already accept and log new `AcceptMutations` batches from the leader, but it does not transition to normal `Following` until recovery is complete. Once recovery completes, the follower may serve follower reads; write availability still depends on the leader having an active quorum.
+
+Operationally, `FollowerRecovery` means the peer is alive but still not a healthy read replica. In Orchid `/hydra`, check `state`, `active_follower`, `catching_up`, `automaton_sequence_number`, and `last_snapshot_id_used_for_recovery`. A peer stuck in `FollowerRecovery` is usually waiting on snapshot download/load, changelog read/download, changelog truncation, or mutation replay on the automaton thread.
+
 ### Changelog and snapshot storage { #changelog-snapshot }
 
 Hydra durably stores committed mutations in *changelogs* (also called journals). A changelog is an append-only file; mutations are appended sequentially. On disk, changelog files are stored in the location configured as `changelogs` in the master static configuration.
