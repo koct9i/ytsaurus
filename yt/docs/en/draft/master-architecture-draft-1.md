@@ -208,12 +208,12 @@ Hydra exposes several closely related numbers. They are easy to confuse because 
 |--------|-----------|-------|---------|
 | **Physical version** | `(segment_id, record_id)` | One Hydra cell | Changelog position of a physical mutation record. `segment_id` is the changelog/snapshot generation; `record_id` is the record inside that changelog. |
 | **Sequence number** | signed 64-bit counter | One Hydra cell | Monotonic apply/commit order across all physical mutations. This is the number used by commit quorum state, catch-up, and `SyncWithUpstream`. |
-| **Revision** | unsigned 64-bit integer | One Hydra cell | Compact public form of a Hydra version, computed as `(segment_id << 32) | record_id`. Object attributes store revisions, not the two-field tuple. `0` is `NullRevision` and means "not set". |
+| **Revision** | unsigned 64-bit integer | One Hydra cell | Compact public form of a **logical** Hydra version, computed as `(segment_id << 32) | logical_record_id`. Object attributes store revisions, not the two-field tuple. `0` is `NullRevision` and means "not set". |
 | **Automaton version** | `(segment_id, physical_record_id, logical_record_id)` | One peer's automaton | The peer's applied automaton position. In normal mutation streams the logical and physical record ids usually move together; logical ids exist for compatibility with historical/logical record numbering. |
 
 There is no cluster-wide Hydra revision. The numbers above are local to a single master cell. Comparing revisions from different cells is only meaningful as opaque diagnostics; it does not define global recency.
 
-Master objects keep two revision attributes:
+Master objects keep two revision attributes. Both are logical revisions: they are suitable for object-level freshness checks but are not physical changelog offsets.
 
 - `@attribute_revision` — last mutation revision that changed the object's attributes (for example user attributes, ACL-related attributes, owner/account metadata, expiration attributes, annotations, and other attribute-like metadata).
 - `@content_revision` — last mutation revision that changed the object's content or structure (for example table/file contents as represented in master metadata, document value, map-node children, links, locks that alter content state, and other type-specific content changes).
@@ -248,7 +248,7 @@ The `//sys` Cypress node exposes cell-level Hydra state for the cell serving the
 //sys/@hydra_read_only
 ```
 
-The basic-attributes RPC path also returns `revision`, `attribute_revision`, and `content_revision`, so clients can use these fields without listing all attributes. Many Cypress commands accept revision prerequisites (for example "perform this mutation only if path P still has revision R"); the prerequisite is checked against the target object's current `@revision` on the cell that owns that path. Use this for optimistic concurrency, but do not use it to order updates across unrelated master cells.
+The basic-attributes RPC path also returns `revision`, `attribute_revision`, and `content_revision`, so clients can use these fields without listing all attributes. Many Cypress commands accept revision prerequisites (for example "perform this mutation only if path P still has revision R"); the prerequisite is checked against the target object's current `@revision` on the cell that owns that path. Use this for optimistic concurrency, but do not treat it as a physical changelog position and do not use it to order updates across unrelated master cells.
 
 Master Orchid exposes peer-local Hydra progress rather than per-object revisions. Under the master's monitoring Orchid `/hydra`, the most useful fields are:
 
