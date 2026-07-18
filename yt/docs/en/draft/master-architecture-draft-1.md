@@ -116,6 +116,29 @@ After replay reaches the target state, the follower performs a final catch-up th
 
 Operationally, `FollowerRecovery` means the peer is alive but still not a healthy read replica. In Orchid `/hydra`, check `state`, `active_follower`, `catching_up`, `automaton_sequence_number`, and `last_snapshot_id_used_for_recovery`. A peer stuck in `FollowerRecovery` is usually waiting on snapshot download/load, changelog read/download, changelog truncation, or mutation replay on the automaton thread.
 
+### Entering and leaving read-only mode { #read-only-mode-transitions }
+
+Hydra read-only mode is a replicated state-machine state, not just an RPC filter on one process. It is normally entered by a forced snapshot request with `set_read_only=true`, for example the administrative flow that builds master snapshots with `--read-only --wait-for-snapshot-completion`.
+
+Entering read-only mode has several steps:
+
+1. The active leader rejects concurrent snapshot-build attempts and marks `entering_read_only_mode=true` in its epoch state.
+2. If the automaton read-only barrier is enabled, the leader first commits a heartbeat system mutation. This flushes mutations that were already serialized/scheduled before the transition. After that, the automaton-specific `GetReadyToEnterReadOnlyMode` hook is awaited; master components use this hook to stop starting workflows that would otherwise leave prepared transactions or other in-flight durable work behind the barrier.
+3. The leader commits the `EnterReadOnly` system mutation. When this mutation is serialized/applied, the Hydra epoch and automaton `read_only` flags become true.
+4. The leader builds the requested snapshot. The snapshot metadata records `read_only=true`; after it is loaded during recovery, the peer comes back in read-only mode.
+
+Once read-only is active, ordinary user mutations are rejected with the Hydra `ReadOnly` error. System mutations, including `ExitReadOnly`, are still allowed; otherwise the cluster could not leave the mode. Periodic snapshot triggering is skipped while the cell is read-only, but the explicit read-only snapshot request either returns the in-flight/latest read-only snapshot result or reports that the requested result has already been lost.
+
+Leaving read-only mode is also a mutation. The active leader commits `ExitReadOnly`; when the mutation is applied, Hydra clears the automaton read-only flag and advances the logical clock because an arbitrary amount of wall-clock time may have passed while no ordinary mutations were accepted. If a peer still observes itself as read-only after the exit mutation callback, Hydra schedules a quorum restart so all peers re-enter a consistent non-read-only epoch.
+
+Nontrivial operational details:
+
+- Read-only state is persisted in snapshot metadata. Restarting from a read-only snapshot does not by itself resume writes; an explicit `ExitReadOnly` action is required.
+- Followers learn read-only snapshot requests from the leader. A follower in normal `Following` may build the requested snapshot locally; a follower still in `FollowerRecovery` records the snapshot id but cannot build a snapshot until recovery completes.
+- Cross-cell read requests that require synchronization (`cell_tags_to_sync_with` or transaction/barrier synchronization) are rejected while the local Hydra manager is read-only. Plain local reads that do not require such synchronization can still be served by active peers.
+- `//sys/@hydra_read_only` exposes the current cell's Hydra read-only flag through Cypress. The master Orchid `/hydra` exposes both `read_only` and `entering_read_only_mode`; `last_snapshot_read_only` shows whether the latest successfully built snapshot was a read-only snapshot.
+- Do not confuse Hydra read-only mode with a read-only changelog or snapshot store used by dry-run/offline tooling. Hydra read-only is a consensus-visible automaton state; storage read-only is an I/O capability of the local persistence backend.
+
 ### Changelog and snapshot storage { #changelog-snapshot }
 
 Hydra durably stores committed mutations in *changelogs* (also called journals). A changelog is an append-only file; mutations are appended sequentially. On disk, changelog files are stored in the location configured as `changelogs` in the master static configuration.
