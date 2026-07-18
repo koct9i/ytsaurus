@@ -95,6 +95,50 @@ Possible multicell interference during failover:
 - Cross-cell reads can see amplified latency because they may need both local catch-up (`SyncWithUpstream`) and remote Hive synchronization with the recovering cell.
 - If the primary cell is the one failing over, user-visible impact is broader because the primary hosts the root Cypress tree and coordinates global metadata flows.
 
+### Follower recovery { #follower-recovery }
+
+A peer that has joined an election epoch as a follower does not immediately become a serving follower. It first enters `FollowerRecovery` and must catch its local automaton state up to the leader's committed state.
+
+The recovery target is learned from the leader's initial Hydra ping or mutation stream. It consists of the leader's committed `segment_id` and committed `sequence_number` for the current term. The follower creates a follower committer, initializes it to the committed sequence number reported by the leader, and then runs recovery before it is allowed to serve normal follower reads.
+
+Recovery proceeds in two modes:
+
+1. **Changelog-only recovery**. If the follower is only slightly behind (`target_sequence_number - current_sequence_number < max_sequence_number_gap_for_changelog_only_recovery`), it tries to replay local changelogs from its current state. This is the fast path after a short restart or a small network gap.
+2. **Snapshot-assisted recovery**. If the gap is too large, or changelog-only recovery fails, the follower finds the newest usable snapshot locally or on other peers, downloads it if necessary, loads it into the automaton, and then replays changelogs from the snapshot generation up to the target sequence number.
+
+When persistent changelogs are enabled, follower recovery also synchronizes each changelog segment with the leader before replaying it:
+
+- if the local segment has extra records beyond the leader's record count needed for the recovery target, the follower truncates the local tail;
+- if the local segment is shorter, the follower downloads missing records from the leader;
+- if truncation would remove a mutation that is known to have been reliably applied, recovery fails and the peer restarts instead of silently rolling back durable state.
+
+After replay reaches the target state, the follower performs a final catch-up through the follower committer. During this catch-up it may already accept and log new `AcceptMutations` batches from the leader, but it does not transition to normal `Following` until recovery is complete. Once recovery completes, the follower may serve follower reads; write availability still depends on the leader having an active quorum.
+
+Operationally, `FollowerRecovery` means the peer is alive but still not a healthy read replica. In Orchid `/hydra`, check `state` (it remains `FollowerRecovery` until the transition completes), `catching_up`, `automaton_sequence_number`, and `last_snapshot_id_used_for_recovery`; `active_follower` becomes true only after recovery completes. A peer stuck in `FollowerRecovery` is usually waiting on snapshot download/load, changelog read/download, changelog truncation, or mutation replay on the automaton thread.
+
+### Entering and leaving read-only mode { #read-only-mode-transitions }
+
+Hydra read-only mode is a replicated state-machine state, not just an RPC filter on one process. It is normally entered by a forced snapshot request with `set_read_only=true`, for example the administrative flow that builds master snapshots with `--read-only --wait-for-snapshot-completion`.
+
+Entering read-only mode has several steps:
+
+1. The active leader rejects concurrent snapshot-build attempts and marks `entering_read_only_mode=true` in its epoch state.
+2. If the automaton read-only barrier is enabled, the leader first commits a heartbeat system mutation. This flushes mutations that were already serialized/scheduled before the transition. After that, the automaton-specific `GetReadyToEnterReadOnlyMode` hook is awaited; master components use this hook to stop starting workflows that would otherwise leave prepared transactions or other in-flight durable work behind the barrier.
+3. The leader commits the `EnterReadOnly` system mutation. When this mutation is serialized/applied, the Hydra epoch and automaton `read_only` flags become true.
+4. The leader builds the requested snapshot. The snapshot metadata records `read_only=true`; after it is loaded during recovery, the peer comes back in read-only mode.
+
+Once read-only is active, ordinary user mutations are rejected with the Hydra `ReadOnly` error. System mutations, including `ExitReadOnly`, are still allowed; otherwise the cluster could not leave the mode. Periodic snapshot triggering is skipped while the cell is read-only, but the explicit read-only snapshot request either returns the in-flight/latest read-only snapshot result or reports that the requested result has already been lost.
+
+Leaving read-only mode is also a mutation. The active leader commits `ExitReadOnly`; when the mutation is applied, Hydra clears the automaton read-only flag and advances the logical clock because an arbitrary amount of wall-clock time may have passed while no ordinary mutations were accepted. If a peer still observes itself as read-only after the exit mutation callback, Hydra schedules a quorum restart so all peers re-enter a consistent non-read-only epoch.
+
+Nontrivial operational details:
+
+- Read-only state is persisted in snapshot metadata. Restarting from a read-only snapshot does not by itself resume writes; an explicit `ExitReadOnly` action is required.
+- Followers learn read-only snapshot requests from the leader. A follower in normal `Following` may build the requested snapshot locally; a follower still in `FollowerRecovery` records the snapshot id but cannot build a snapshot until recovery completes.
+- Cross-cell read requests that require synchronization (`cell_tags_to_sync_with` or transaction/barrier synchronization) are rejected while the local Hydra manager is read-only. Plain local reads that do not require such synchronization can still be served by active peers.
+- `//sys/@hydra_read_only` exposes the current cell's Hydra read-only flag through Cypress. The master Orchid `/hydra` exposes both `read_only` and `entering_read_only_mode`; `last_snapshot_read_only` shows whether the latest successfully built snapshot was a read-only snapshot.
+- Do not confuse Hydra read-only mode with a read-only changelog or snapshot store used by dry-run/offline tooling. Hydra read-only is a consensus-visible automaton state; storage read-only is an I/O capability of the local persistence backend.
+
 ### Changelog and snapshot storage { #changelog-snapshot }
 
 Hydra durably stores committed mutations in *changelogs* (also called journals). A changelog is an append-only file; mutations are appended sequentially. On disk, changelog files are stored in the location configured as `changelogs` in the master static configuration.
@@ -155,6 +199,66 @@ The important consequence is:
 - Recovery loads `000000123.snapshot` and then replays changelog `000000123.log` and later segments.
 
 The snapshot metadata also stores the exact last included mutation as `last_segment_id` and `last_record_id`, plus the corresponding `sequence_number`.
+
+#### Hydra versions, revisions, and object attributes { #hydra-versions-and-object-revisions }
+
+Hydra exposes several closely related numbers. They are easy to confuse because they all grow with mutations, but they answer different questions:
+
+| Number | Structure | Scope | Meaning |
+|--------|-----------|-------|---------|
+| **Physical version** | `(segment_id, record_id)` | One Hydra cell | Changelog position of a physical mutation record. `segment_id` is the changelog/snapshot generation; `record_id` is the record inside that changelog. |
+| **Sequence number** | signed 64-bit counter | One Hydra cell | Monotonic apply/commit order across all physical mutations. This is the number used by commit quorum state, catch-up, and `SyncWithUpstream`. |
+| **Revision** | unsigned 64-bit integer | One Hydra cell | Compact public form of a **logical** Hydra version, computed as `(segment_id << 32) | logical_record_id`. Object attributes store revisions, not the two-field tuple. `0` is `NullRevision` and means "not set". |
+| **Automaton version** | `(segment_id, physical_record_id, logical_record_id)` | One peer's automaton | The peer's applied automaton position. In normal mutation streams the logical and physical record ids usually move together; logical ids exist for compatibility with historical/logical record numbering. |
+
+There is no cluster-wide Hydra revision. The numbers above are local to a single master cell. Comparing revisions from different cells is only meaningful as opaque diagnostics; it does not define global recency.
+
+Master objects keep two revision attributes. Both are logical revisions: they are suitable for object-level freshness checks but are not physical changelog offsets.
+
+- `@attribute_revision` — last mutation revision that changed the object's attributes (for example user attributes, ACL-related attributes, owner/account metadata, expiration attributes, annotations, and other attribute-like metadata).
+- `@content_revision` — last mutation revision that changed the object's content or structure (for example table/file contents as represented in master metadata, document value, map-node children, links, locks that alter content state, and other type-specific content changes).
+- `@revision` — `max(@attribute_revision, @content_revision)`, i.e. the latest visible change known for that object on this cell.
+
+Cypress nodes can additionally expose `@native_content_revision` when the object is external to the cell serving the request. It records the content revision reported by the node's native cell, so it is useful when debugging portal/external-node propagation. For native objects, use `@content_revision`.
+
+For transactional Cypress operations, a branch initially inherits the trunk object's `attribute_revision` and `content_revision`. Mutations inside the transaction update the branch. When the transaction is committed, the trunk receives the commit mutation's current revision for the affected attribute/content parts, not an independent wall-clock timestamp. This is why revision values are durable ordering tokens rather than time values.
+
+The following attributes are visible through the Cypress API on objects that support the standard object proxy attributes:
+
+```text
+# Object-wide attributes
+@id
+@type
+@native_cell_tag
+@foreign
+@life_stage
+@revision
+@attribute_revision
+@content_revision
+
+# Cypress-node additions
+@native_content_revision   # present for external/foreign Cypress-node representations when available
+```
+
+The `//sys` Cypress node exposes cell-level Hydra state for the cell serving the request:
+
+```text
+//sys/@current_hydra_version   # string form: segment:physical_record(logical_record)
+//sys/@hydra_logical_time
+//sys/@hydra_read_only
+```
+
+The basic-attributes RPC path also returns `revision`, `attribute_revision`, and `content_revision`, so clients can use these fields without listing all attributes. Many Cypress commands accept revision prerequisites (for example "perform this mutation only if path P still has revision R"); the prerequisite is checked against the target object's current `@revision` on the cell that owns that path. Use this for optimistic concurrency, but do not treat it as a physical changelog position and do not use it to order updates across unrelated master cells.
+
+Master Orchid exposes peer-local Hydra progress rather than per-object revisions. Under the master's monitoring Orchid `/hydra`, the most useful fields are:
+
+- `automaton_version` — string form of the applied automaton version, i.e. the peer's current `(segment_id, physical_record_id, logical_record_id)` position;
+- `automaton_sequence_number` — latest applied mutation sequence number;
+- `state`, `active`, `active_leader`, `active_follower`, and `read_only` — whether this peer can serve traffic and whether mutations are accepted;
+- `last_snapshot_id`, `last_snapshot_read_only`, and `last_snapshot_id_used_for_recovery` — snapshot generation diagnostics;
+- on the leader-committer monitoring subtree, `next_logged_version`, `next_logged_sequence_number`, `committed_sequence_number`, and `committed_segment_id` show changelog logging and quorum-commit progress.
+
+These Orchid fields are process-local. Query the leader and followers of each master cell separately when comparing recovery lag, follower catch-up, or suspected stale reads.
 
 #### How many changelog files exist at once { #changelog-count }
 
