@@ -99,7 +99,7 @@ Possible multicell interference during failover:
 
 A peer that has joined an election epoch as a follower does not immediately become a serving follower. It first enters `FollowerRecovery` and must catch its local automaton state up to the leader's committed state.
 
-The recovery target is learned from the leader's initial Hydra ping or mutation stream. It consists of the leader's committed `segment_id` and committed `sequence_number` for the current term. The follower creates a follower committer, initializes its expected sequence number from this target, and then runs recovery before it is allowed to serve normal follower reads.
+The recovery target is learned from the leader's initial Hydra ping or mutation stream. It consists of the leader's committed `segment_id` and committed `sequence_number` for the current term. The follower creates a follower committer, initializes it to the committed sequence number reported by the leader, and then runs recovery before it is allowed to serve normal follower reads.
 
 Recovery proceeds in two modes:
 
@@ -108,13 +108,13 @@ Recovery proceeds in two modes:
 
 When persistent changelogs are enabled, follower recovery also synchronizes each changelog segment with the leader before replaying it:
 
-- if the local segment has extra records beyond the leader's accepted record count, the follower truncates the local tail;
+- if the local segment has extra records beyond the leader's record count needed for the recovery target, the follower truncates the local tail;
 - if the local segment is shorter, the follower downloads missing records from the leader;
 - if truncation would remove a mutation that is known to have been reliably applied, recovery fails and the peer restarts instead of silently rolling back durable state.
 
 After replay reaches the target state, the follower performs a final catch-up through the follower committer. During this catch-up it may already accept and log new `AcceptMutations` batches from the leader, but it does not transition to normal `Following` until recovery is complete. Once recovery completes, the follower may serve follower reads; write availability still depends on the leader having an active quorum.
 
-Operationally, `FollowerRecovery` means the peer is alive but still not a healthy read replica. In Orchid `/hydra`, check `state`, `active_follower`, `catching_up`, `automaton_sequence_number`, and `last_snapshot_id_used_for_recovery`. A peer stuck in `FollowerRecovery` is usually waiting on snapshot download/load, changelog read/download, changelog truncation, or mutation replay on the automaton thread.
+Operationally, `FollowerRecovery` means the peer is alive but still not a healthy read replica. In Orchid `/hydra`, check `state` (it remains `FollowerRecovery` until the transition completes), `catching_up`, `automaton_sequence_number`, and `last_snapshot_id_used_for_recovery`; `active_follower` becomes true only after recovery completes. A peer stuck in `FollowerRecovery` is usually waiting on snapshot download/load, changelog read/download, changelog truncation, or mutation replay on the automaton thread.
 
 ### Entering and leaving read-only mode { #read-only-mode-transitions }
 
@@ -237,7 +237,15 @@ The following attributes are visible through the Cypress API on objects that sup
 @content_revision
 
 # Cypress-node additions
-@native_content_revision   # present for external nodes
+@native_content_revision   # present for external/foreign Cypress-node representations when available
+```
+
+The `//sys` Cypress node exposes cell-level Hydra state for the cell serving the request:
+
+```text
+//sys/@current_hydra_version   # string form: segment:physical_record(logical_record)
+//sys/@hydra_logical_time
+//sys/@hydra_read_only
 ```
 
 The basic-attributes RPC path also returns `revision`, `attribute_revision`, and `content_revision`, so clients can use these fields without listing all attributes. Many Cypress commands accept revision prerequisites (for example "perform this mutation only if path P still has revision R"); the prerequisite is checked against the target object's current `@revision` on the cell that owns that path. Use this for optimistic concurrency, but do not use it to order updates across unrelated master cells.
