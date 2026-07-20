@@ -6,7 +6,7 @@ Status: In progress
 Target: user-guide/dynamic-tables
 -->
 
-# Capacity planning and scaling
+# Dynamic tables capacity planning and scaling
 
 This article describes how to plan capacity for dynamic tables and how to scale them without creating new bottlenecks. The focus is on administration, background-process headroom, and predictable growth of read and write throughput.
 
