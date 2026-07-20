@@ -167,8 +167,8 @@ Snapshots are initiated by the **active leader** of a Hydra cell. The leader req
    - Default: **1 GB** of changelog payload.
 
 4. **Manual snapshot request**
-   - Operators can force a snapshot explicitly, for example with `yt-admin build-master-snapshots --read-only --wait-for-snapshot-completion`.
-   - Read-only mode first commits a barrier mutation, then switches the cell into read-only state, so the resulting snapshot has a clean empty tail changelog.
+   - Operators can force a snapshot explicitly. For a regular manual snapshot, use `yt execute build_master_snapshots '{set_read_only=%false}'`.
+   - Entering read-only mode is optional: use `set_read_only=%true`, typically with `wait_for_snapshot_completion=%true`, only when the operation requires a quiesced master state and a clean empty tail changelog. In that mode, Hydra first commits a barrier mutation and switches the cell into read-only state before building the snapshot.
 
 5. **Final recovery action**
    - Some recovery flows request `BuildSnapshotAndRestart` after recovery completes.
