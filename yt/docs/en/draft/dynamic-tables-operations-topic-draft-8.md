@@ -6,7 +6,7 @@ Status: In progress
 Target: user-guide/dynamic-tables
 -->
 
-# Dynamic tables — operating in production (topic draft)
+# Dynamic tables production operations overview
 
 ## Operating dynamic tables in production { #operations_in_production }
 
