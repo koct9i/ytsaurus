@@ -1,4 +1,4 @@
-# Using tracing in YTsaurus server (draft)
+# Using tracing in YTsaurus server
 
 Draft number: 19
 

@@ -6,7 +6,7 @@ Status: In progress
 Target: admin-guide/master-architecture.md
 -->
 
-# Master server architecture: performance and administration
+# Master performance and administration
 
 Operational bottlenecks, monitoring, snapshots, and scaling guidance.
 

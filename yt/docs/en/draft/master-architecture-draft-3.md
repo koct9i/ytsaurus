@@ -6,7 +6,7 @@ Status: In progress
 Target: admin-guide/master-architecture.md
 -->
 
-# Master server architecture: transaction lifecycle and mutation pipeline
+# Master transaction lifecycle and mutation pipeline
 
 Transaction coordinator behavior, lifecycle cost model, and mutation ordering internals.
 
