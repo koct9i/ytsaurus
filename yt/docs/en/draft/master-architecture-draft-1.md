@@ -6,7 +6,7 @@ Status: In progress
 Target: admin-guide/master-architecture.md
 -->
 
-# Master server architecture
+# Master server architecture overview
 
 This page describes the internal architecture of {{product-name}} master servers, covering the Hydra consensus engine, multi-cell topology, inter-cell communication, and performance characteristics relevant for users, administrators, and developers diagnosing performance issues.
 
