@@ -154,7 +154,28 @@ Do not treat the fork phase itself as free. A large master has a large virtual a
 
 ### Snapshots and read-only mode
 
-Use `yt-admin build-master-snapshots --read-only --wait-for-snapshot-completion` to create a clean snapshot with an empty subsequent changelog. This is required before major updates or before adding new master cells. In read-only mode the master accepts no mutations; this ensures the snapshot captures a fully quiesced state.
+Use `yt execute build_master_snapshots '{set_read_only=%false}'` to build master snapshots without changing write availability. Set `set_read_only=%true` only when the procedure requires a fully quiesced master state, for example before major updates or before adding new master cells. In read-only mode the master accepts no ordinary mutations; this ensures the snapshot captures a clean state with an empty subsequent changelog. A common quiescing command is:
+
+```bash
+yt execute build_master_snapshots '{set_read_only=%true;wait_for_snapshot_completion=%true}'
+```
+
+`build_master_snapshots` accepts the following parameters:
+
+- `set_read_only` (required boolean): whether to enter Hydra read-only mode while building snapshots. Use `%false` for an ordinary manual snapshot and `%true` for a quiescing snapshot.
+- `wait_for_snapshot_completion` (optional boolean): whether the command should wait until snapshot building completes before returning.
+- `retry` (optional boolean): whether to retry the operation on transient failures.
+- `enable_automaton_read_only_barrier` (optional boolean): whether to use the automaton read-only barrier before entering read-only mode.
+
+### Leaving read-only mode
+
+Read-only mode persists until it is explicitly cleared. After a read-only snapshot procedure is complete and writes may resume, run:
+
+```bash
+yt execute master_exit_read_only '{}'
+```
+
+`master_exit_read_only` exits read-only mode on all master cells. It accepts the optional boolean parameter `retry`, which controls retrying the operation on transient failures. To leave read-only mode for one cell instead, use `yt execute exit_read_only '{cell_id=<cell-id>}'`.
 
 ### Monitoring master health
 
