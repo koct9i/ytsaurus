@@ -6,7 +6,7 @@ Status: In progress
 Target: user-guide/dynamic-tables
 -->
 
-# Performance profiling and bottleneck analysis
+# Dynamic tables performance profiling and bottleneck analysis
 
 This article describes how to investigate slow or unstable dynamic tables in production. It covers practical operational topics such as tablet layout, flush, compaction, queue semantics, and tablet-cell execution.
 
