@@ -6,7 +6,7 @@ Status: In progress
 Target: admin-guide/master-architecture.md
 -->
 
-# Master server architecture: cell topology and inter-cell communication
+# Master cell topology and inter-cell communication
 
 Core multicell layout, Hive messaging, and cross-cell balancing mechanics.
 
