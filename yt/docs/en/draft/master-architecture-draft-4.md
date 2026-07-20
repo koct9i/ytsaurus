@@ -6,7 +6,7 @@ Status: In progress
 Target: admin-guide/master-architecture.md
 -->
 
-# Master server architecture: read request execution
+# Master read request execution
 
 Read-path execution model, scheduling, and cross-cell freshness behavior.
 
