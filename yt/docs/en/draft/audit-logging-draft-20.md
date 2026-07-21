@@ -85,6 +85,64 @@ Interactive job-shell access is audited separately from the Cypress access log. 
 
 The job-prober protocol also carries a `logging_context` field explicitly described as additional attributes for SOC audit via job-shell structured logging. This makes job-shell session creation/auditing a dedicated coverage area, not just a side effect of ordinary HTTP proxy request logging.
 
+## Audit-log writing backends
+
+Audit records are emitted as ordinary YTsaurus structured log events, so the persistence backend is selected by logging `rules` and `writers` rather than by the access-log call sites themselves. A rule must include the relevant category, for example `Access` for Cypress access logs or `JobShell` for job-shell audit records, and must point to one or more writers.
+
+The following writer backends are available in the logging subsystem used by these audit logs:
+
+| Writer `type` | Destination | Notes for audit logging |
+| --- | --- | --- |
+| `file` | Local file on the component host. | This is the usual backend for master access logs and JobShell structured logs. It supports `file_name`, rotation policy, timestamp suffixes, and optional compression. Use a structured message format such as JSON or YSON. |
+| `dynamic_table` | A YTsaurus dynamic table. | The dynamic-table writer can write to ordered or sorted dynamic tables and must be configured with `format = yson`. Configure `table_path`, flush period, backlog watermarks, batch limits, and write backoff. This backend requires the component to initialize the dynamic-table log writer with a native client; it is available in components that do so, such as Cypress proxy, job proxy, master cache, chaos cache, and tablet balancer. |
+| `stderr` | Process standard error. | Registered by the core logging subsystem and useful mostly for debugging, tests, containers, or bootstrap diagnostics. It is not a recommended durable audit backend by itself. |
+
+A Flow runner also registers a `queue` log writer for controller logs in the Flow subsystem. This is not a general YTsaurus server audit-log backend, but it is another example of a component-specific writer factory that can be registered with the same log manager mechanism.
+
+Example file-backed access log:
+
+```yson
+{
+  logging = {
+    rules = [
+      {min_level = info; include_categories = [Access]; writers = [audit_file]; message_format = structured;}
+    ];
+    writers = {
+      audit_file = {
+        type = file;
+        file_name = "logs/access.json.log";
+        accepted_message_format = structured;
+        rotation_policy = {max_segment_size = 1073741824; max_segment_count_to_keep = 10;}
+      };
+    };
+  };
+}
+```
+
+Example dynamic-table-backed access log:
+
+```yson
+{
+  logging = {
+    rules = [
+      {min_level = info; include_categories = [Access]; writers = [audit_table]; message_format = structured;}
+    ];
+    writers = {
+      audit_table = {
+        type = dynamic_table;
+        format = yson;
+        table_path = "//sys/audit/access_log";
+        flush_period = 1000;
+        max_batch_row_count = 50000;
+        max_batch_weight = 2097152;
+      };
+    };
+  };
+}
+```
+
+Backend choice affects durability and operations, but not coverage: a method or component is audited only if it emits the `Access` or `JobShell` structured event in the first place. Conversely, the same audit event may be sent to multiple writers by listing multiple writer names in the logging rule.
+
 ## What is not tracked, or is only partially tracked
 
 The current audit logging is not a complete, end-to-end history of every user-visible effect in YTsaurus. Important limitations are:
@@ -96,7 +154,7 @@ The current audit logging is not a complete, end-to-end history of every user-vi
 * **Read-only and failed authorization events are not the same as access-log coverage.** Authorization failures may be reported through normal error/logging paths, but the access log is emitted only from the access-log call sites.
 * **Non-Cypress APIs are not automatically included.** HTTP/RPC proxy requests, admin RPCs, tablet-node RPCs, data-node traffic, query engines, CHYT/SPYT/YQL execution, and queue consumers/producers require their own logging paths unless they eventually trigger a covered Cypress access-log call.
 * **Multi-master leader/recovery behavior matters.** On masters, access logging is disabled during Hydra recovery. For multi-peer cells, the helper avoids logging on the leader while allowing non-leader peers, which prevents duplicate or unsafe records during replicated mutation handling.
-* **Log availability depends on logging configuration.** Emitting a structured event is not the same as retaining it. Operators still need a logging rule/writer that persists the `Access` and `JobShell` categories to the desired destination.
+* **Log availability depends on logging configuration.** Emitting a structured event is not the same as retaining it. Operators still need a logging rule/writer that persists the `Access` and `JobShell` categories to a durable backend such as files or dynamic tables.
 
 ## Practical interpretation
 
@@ -119,6 +177,7 @@ Do not use it alone to answer questions such as:
 
 1. Ensure master dynamic config has `security_manager.enable_access_log = true`.
 2. Ensure Cypress proxy dynamic config has `enable_access_log = true` if Cypress proxy / Sequoia access logging is required.
-3. Configure structured log writers for the access-log category and verify that records contain `user`, `method`, `path`, and `transaction_info` for test requests.
-4. Configure a structured writer for the `JobShell` category if job-shell audit is required.
-5. For compliance-sensitive workflows, verify the exact command path in code or by test: only call sites that reach the access-log helpers or the `JobShell` structured logger are covered.
+3. Choose a persistence backend: usually rotated files for local collection, or `dynamic_table` when the component supports writing structured logs directly to a YTsaurus dynamic table.
+4. Configure structured log writers for the access-log category and verify that records contain `user`, `method`, `path`, and `transaction_info` for test requests.
+5. Configure a structured writer for the `JobShell` category if job-shell audit is required.
+6. For compliance-sensitive workflows, verify the exact command path in code or by test: only call sites that reach the access-log helpers or the `JobShell` structured logger are covered.
