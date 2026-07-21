@@ -94,7 +94,7 @@ The following writer backends are available in the logging subsystem used by the
 | Writer `type` | Destination | Notes for audit logging |
 | --- | --- | --- |
 | `file` | Local file on the component host. | This is the usual backend for master access logs and JobShell structured logs. It supports `file_name`, rotation policy, timestamp suffixes, and optional compression. Use a structured message format such as JSON or YSON. |
-| `dynamic_table` | A YTsaurus dynamic table. | The dynamic-table writer can write to ordered or sorted dynamic tables and must be configured with `format = yson`. Configure `table_path`, flush period, backlog watermarks, batch limits, and write backoff. This backend requires the component to initialize the dynamic-table log writer with a native client; it is available in components that do so, such as Cypress proxy, job proxy, master cache, chaos cache, and tablet balancer. |
+| `dynamic_table` | A YTsaurus dynamic table. | The dynamic-table writer can write to ordered or sorted dynamic tables and must be configured with `format = yson`. Configure `table_path`, flush period, backlog watermarks, batch limits, and write backoff. This backend requires the component to initialize the dynamic-table log writer with a native client; this is done by many server components, including masters, schedulers, controller agents, proxies, cluster nodes, job proxies, queue agents, query trackers, and several balancer/cache services. |
 | `stderr` | Process standard error. | Registered by the core logging subsystem and useful mostly for debugging, tests, containers, or bootstrap diagnostics. It is not a recommended durable audit backend by itself. |
 
 A Flow runner also registers a `queue` log writer for controller logs in the Flow subsystem. This is not a general YTsaurus server audit-log backend, but it is another example of a component-specific writer factory that can be registered with the same log manager mechanism.
@@ -132,7 +132,7 @@ Example dynamic-table-backed access log:
         type = dynamic_table;
         format = yson;
         table_path = "//sys/audit/access_log";
-        flush_period = 1000;
+        flush_period = 1s;
         max_batch_row_count = 50000;
         max_batch_weight = 2097152;
       };
@@ -150,7 +150,7 @@ Audit logging has two buffering layers to monitor:
 1. The **process log manager queue**, shared by all ordinary log writers in the process.
 2. The **writer backend buffer**, which is especially important for `dynamic_table` because it has its own asynchronous queue and retry loop.
 
-Monitor both layers for every component that emits audit records. The general logging subsystem exposes Prometheus-style sensors under the `yt_logging_*` prefix and the internal `/logging` profiler path. The most important signals are:
+Monitor both layers for every component that emits audit records. The general logging subsystem exposes Prometheus-style sensors under the `yt_logging_*` prefix and the internal `/logging` profiler path; dynamic-table writer sensors are tagged by writer name and table path. The most important signals are:
 
 | Signal | Applies to | What it means | Operator action |
 | --- | --- | --- | --- |
@@ -185,7 +185,7 @@ There is no end-to-end exactly-once audit sequence number in the access-log reco
 * **Retention loss:** rotated file segments disappearing before the collector ingests them, dynamic-table TTL trimming data before export, or manual truncation/removal of audit destinations.
 * **Configuration loss:** missing `Access` or `JobShell` rules, a rule that writes only to `stderr`, disabled `enable_access_log`, or a dynamic-table writer configured in a component that has not initialized the dynamic-table log writer client.
 
-For high-assurance deployments, send audit events to at least two independent destinations, for example a local rotated file collected by an external log pipeline and a YTsaurus dynamic table. Keep alerts on both the producer-side drop counters and the consumer-side ingestion lag. Periodically generate a known audit event, such as a controlled `Get`/`List` on a test Cypress path or a test job-shell spawn in a non-production environment, and verify that it appears in every configured sink within the expected delay.
+For high-assurance deployments, send audit events to at least two independent destinations, for example a local rotated file collected by an external log pipeline and a YTsaurus dynamic table. Keep alerts on both the producer-side drop counters and the consumer-side ingestion lag. Periodically generate a known audit event with a unique path, transaction title, user tag, or request context, such as a controlled `Get`/`List` on a test Cypress path or a test job-shell spawn in a non-production environment, and verify that it appears exactly where expected in every configured sink within the expected delay.
 
 ## What is not tracked, or is only partially tracked
 
