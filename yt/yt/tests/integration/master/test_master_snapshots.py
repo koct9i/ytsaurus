@@ -814,6 +814,33 @@ class TestMastersSnapshotsShardedTx(YTEnvSetup):
 
 class TestMastersPersistentReadOnly(YTEnvSetup):
     @authors("danilalexeev")
+    def test_regular_snapshot_after_read_only_recovery(self):
+        build_master_snapshots(set_read_only=True)
+
+        primary = ls("//sys/primary_masters",
+                     suppress_transaction_coordinator_sync=True,
+                     suppress_upstream_sync=True)
+        wait(lambda: all_peers_in_read_only("//sys/primary_masters", primary))
+
+        with Restarter(self.Env, MASTERS_SERVICE):
+            pass
+
+        wait(lambda: all_peers_in_read_only("//sys/primary_masters", primary))
+
+        master_exit_read_only_sync()
+
+        # Regression test for a follower that has recovered from a read-only
+        # snapshot and is already following when the leader sends a newer
+        # regular snapshot request. Such a request carries read_only=false and
+        # used to crash the follower in SetReadOnly(false).
+        build_snapshot(
+            cell_id=self.Env.configs["master"][0]["primary_master"]["cell_id"],
+            set_read_only=False)
+
+        wait(lambda: no_peers_in_read_only("//sys/primary_masters", primary))
+        create("table", "//tmp/regular_snapshot_after_read_only_recovery")
+
+    @authors("danilalexeev")
     def test_read_only_after_recovery(self):
         build_master_snapshots(set_read_only=True)
 

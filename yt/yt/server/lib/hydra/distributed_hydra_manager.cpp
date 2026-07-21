@@ -2936,8 +2936,14 @@ private:
 
         YT_VERIFY(value ||
             ControlState_ == EPeerState::LeaderRecovery ||
-            ControlState_ == EPeerState::FollowerRecovery);
+            ControlState_ == EPeerState::FollowerRecovery ||
+            ControlState_ == EPeerState::Following);
 
+        // A follower may receive a regular (non-read-only) snapshot request after
+        // it has already completed recovery from a read-only snapshot. In this
+        // case the request is a part of the leader-to-follower replication flow,
+        // so the control epoch read-only flag must follow the snapshot metadata
+        // instead of crashing on the state transition.
         ControlEpochContext_->ReadOnly = value;
 
         YT_LOG_INFO("Read-only mode %v", value ? "enabled" : "disabled");
