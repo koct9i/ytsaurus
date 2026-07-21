@@ -678,3 +678,5 @@ items:
           href: draft/data-storage-failure-recovery-draft-18.md
         - name: Using tracing in YTsaurus server (draft-19)
           href: draft/tracing-in-ytsaurus-server-draft-19.md
+        - name: YTsaurus audit logging (draft-20)
+          href: draft/audit-logging-draft-20.md
