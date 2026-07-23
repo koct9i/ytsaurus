@@ -11,7 +11,9 @@ jobs:
     permissions: write-all
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: "yt/docs"
 
       - name: Build
         uses: diplodoc-platform/docs-build-action@v3
