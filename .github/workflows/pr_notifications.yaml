@@ -12,6 +12,7 @@ permissions: {}
 
 jobs:
   pr-notifications:
+    if: github.repository == 'ytsaurus/ytsaurus'
     name: Send PR notifications
     uses: ./.github/workflows/send_telegram_notification.yaml
     with:
