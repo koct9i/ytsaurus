@@ -43,6 +43,21 @@ The node tracker state is exposed as `//sys/cluster_nodes/<address>/@state`.
 | `mixed` | Aggregated state differs between master cells. | Multi-cell convergence issue or propagation delay; inspect per-cell details. |
 | `unknown` | Internal/default state. | Treat as diagnostic-only; do not build operational procedures around it. |
 
+### Checking a node Orchid through its monitoring HTTP port
+
+When Cypress or a proxy is unavailable, query the node process directly through the `monitoring_port` from its static configuration. The monitoring HTTP server exposes the same node Orchid below `/orchid`; use the node host name and the monitoring port, not the node RPC port:
+
+```bash
+# Check that the monitoring endpoint and the Orchid root are reachable.
+curl -fsS -o /dev/null 'http://<node-host>:<monitoring-port>/orchid/'
+
+# Read the whole node Orchid or only the subtree needed for the investigation.
+curl -fsS 'http://<node-host>:<monitoring-port>/orchid/'
+curl -fsS 'http://<node-host>:<monitoring-port>/orchid/node_resource_manager'
+```
+
+The monitoring endpoint renders the response as JSON. Prefer a narrow subtree because the complete Orchid can be large and may contain expensive-to-build sections. This direct check proves that the node process and its monitoring HTTP server respond even if the node is not registered with the masters; it does not by itself prove that master registration, heartbeats, or every node role is healthy. The monitoring address must also be reachable from the operator host, so a connection failure can mean that the port is bound only locally or blocked by a firewall rather than that the node process is down.
+
 ### Maintenance API quick reference
 
 ```bash
