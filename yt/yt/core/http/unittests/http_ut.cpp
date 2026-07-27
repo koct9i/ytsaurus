@@ -1448,6 +1448,7 @@ TEST(THttpHandlerMatchingTest, Simple)
     handlers->Add("/a", h2);
     handlers->Add("/a/b", h3);
     ASSERT_FALSE(handlers->IsEmpty());
+    EXPECT_EQ((std::vector<std::string>{"/a", "/a/b"}), handlers->ListPatterns());
 
     EXPECT_EQ(h1.Get(), handlers->Match(TStringBuf("/")).Get());
     EXPECT_EQ(h1.Get(), handlers->Match(TStringBuf("/c")).Get());

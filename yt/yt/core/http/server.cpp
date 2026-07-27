@@ -21,6 +21,8 @@
 
 #include <yt/yt/core/profiling/timing.h>
 
+#include <algorithm>
+
 namespace NYT::NHttp {
 
 using namespace NConcurrency;
@@ -691,6 +693,18 @@ IHttpHandlerPtr TRequestPathMatcher::Match(TStringBuf path)
 bool TRequestPathMatcher::IsEmpty() const
 {
     return Exact_.empty() && Subtrees_.empty();
+}
+
+std::vector<std::string> TRequestPathMatcher::ListPatterns() const
+{
+    std::vector<std::string> patterns;
+    patterns.reserve(Exact_.size());
+    for (const auto& [pattern, handler] : Exact_) {
+        Y_UNUSED(handler);
+        patterns.push_back(pattern);
+    }
+    std::sort(patterns.begin(), patterns.end());
+    return patterns;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

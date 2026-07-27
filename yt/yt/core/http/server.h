@@ -13,6 +13,8 @@
 
 #include <library/cpp/yt/memory/ref.h>
 
+#include <vector>
+
 namespace NYT::NHttp {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -118,6 +120,7 @@ struct IRequestPathMatcher
     virtual void Add(const std::string& pattern, TCallback<void(const IRequestPtr&, const IResponseWriterPtr&)> handler) = 0;
     virtual IHttpHandlerPtr Match(TStringBuf path) = 0;
     virtual bool IsEmpty() const = 0;
+    virtual std::vector<std::string> ListPatterns() const = 0;
 };
 
 DEFINE_REFCOUNTED_TYPE(IRequestPathMatcher)
@@ -132,6 +135,7 @@ public:
     void Add(const std::string& pattern, TCallback<void(const IRequestPtr&, const IResponseWriterPtr&)> handler) override;
     IHttpHandlerPtr Match(TStringBuf path) override;
     bool IsEmpty() const override;
+    std::vector<std::string> ListPatterns() const override;
 
 private:
     THashMap<std::string, IHttpHandlerPtr, THash<std::string>, TEqualTo<>> Exact_;

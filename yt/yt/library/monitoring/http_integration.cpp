@@ -273,6 +273,8 @@ void RegisterMonitoringHandlers(
     monitoringServer->AddHandler(
         "/orchid/",
         GetOrchidYPathHttpHandler(orchidRoot));
+
+    AddIndexPageHandler(monitoringServer, "YT monitoring");
 }
 
 ////////////////////////////////////////////////////////////////////////////////

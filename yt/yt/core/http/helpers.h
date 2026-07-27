@@ -5,6 +5,8 @@
 
 #include <yt/yt/core/misc/error.h>
 
+#include <yt/yt/core/actions/callback.h>
+
 #include <yt/yt/core/rpc/public.h>
 
 #include <yt/yt/core/yson/public.h>
@@ -12,6 +14,8 @@
 #include <yt/yt/core/tracing/public.h>
 
 #include <util/generic/string.h>
+
+#include <vector>
 
 namespace NYT::NHttp {
 
@@ -109,6 +113,15 @@ void SetUserAgent(const THeadersPtr& headers, const std::string& value);
 void ReplyJson(const IResponseWriterPtr& rsp, std::function<void(NYson::IYsonConsumer*)> producer);
 
 void ReplyError(const IResponseWriterPtr& response, const TError& error);
+
+IHttpHandlerPtr CreateIndexPageHandler(
+    std::string title,
+    TCallback<std::vector<std::string>()> linksProvider);
+
+void AddIndexPageHandler(
+    const IServerPtr& server,
+    std::string title = "YT monitoring",
+    std::string pattern = "/{$}");
 
 NTracing::TTraceId GetTraceId(const IRequestPtr& req);
 void SetTraceId(const IResponseWriterPtr& rsp, NTracing::TTraceId traceId);

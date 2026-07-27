@@ -26,6 +26,7 @@ ELSE()
 ENDIF()
 
 PEERDIR(
+    library/cpp/html/escape
     yt/yt/core
     contrib/deprecated/http-parser
 )

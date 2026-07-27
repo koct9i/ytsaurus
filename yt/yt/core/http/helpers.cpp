@@ -3,6 +3,7 @@
 #include "http.h"
 #include "private.h"
 #include "config.h"
+#include "server.h"
 
 #include <yt/yt/core/concurrency/scheduler.h>
 
@@ -18,8 +19,11 @@
 
 #include <library/cpp/yt/string/stream.h>
 
+#include <library/cpp/html/escape/escape.h>
+
 #include <util/stream/buffer.h>
 #include <util/stream/mem.h>
+#include <util/stream/str.h>
 
 #include <util/generic/buffer.h>
 
@@ -395,6 +399,65 @@ void ReplyError(const IResponseWriterPtr& response, const TError& error)
         BuildYsonFluently(consumer)
             .Value(error);
     });
+}
+
+namespace {
+
+TString ToTString(const std::string& value)
+{
+    return TString(value.data(), value.size());
+}
+
+class TIndexPageHandler
+    : public IHttpHandler
+{
+public:
+    TIndexPageHandler(std::string title, TCallback<std::vector<std::string>()> linksProvider)
+        : Title_(std::move(title))
+        , LinksProvider_(std::move(linksProvider))
+    { }
+
+    void HandleRequest(const IRequestPtr& /*req*/, const IResponseWriterPtr& rsp) override
+    {
+        TStringStream out;
+        out << "<html><head><title>" << NHtml::EscapeText(ToTString(Title_)) << "</title></head><body>"
+            << "<h1>" << NHtml::EscapeText(ToTString(Title_)) << "</h1>"
+            << "<ul>";
+
+        for (const auto& link : LinksProvider_.Run()) {
+            out << "<li><a href=\"" << NHtml::EscapeAttributeValue(ToTString(link)) << "\">"
+                << NHtml::EscapeText(ToTString(link)) << "</a></li>";
+        }
+
+        out << "</ul></body></html>";
+
+        rsp->SetStatus(EStatusCode::OK);
+        rsp->GetHeaders()->Set(ContentTypeHeaderName, "text/html; charset=utf-8");
+        WaitFor(rsp->WriteBody(TSharedRef::FromString(out.Str())))
+            .ThrowOnError();
+    }
+
+private:
+    const std::string Title_;
+    const TCallback<std::vector<std::string>()> LinksProvider_;
+};
+
+} // namespace
+
+IHttpHandlerPtr CreateIndexPageHandler(
+    std::string title,
+    TCallback<std::vector<std::string>()> linksProvider)
+{
+    return New<TIndexPageHandler>(std::move(title), std::move(linksProvider));
+}
+
+void AddIndexPageHandler(const IServerPtr& server, std::string title, std::string pattern)
+{
+    server->AddHandler(pattern, CreateIndexPageHandler(
+        std::move(title),
+        BIND([pathMatcher = server->GetPathMatcher()] {
+            return pathMatcher->ListPatterns();
+        })));
 }
 
 NTracing::TTraceId GetTraceId(const IRequestPtr& req)
