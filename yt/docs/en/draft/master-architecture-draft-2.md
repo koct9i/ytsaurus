@@ -80,7 +80,7 @@ The Hive channel between any two cells maintains strict per-channel ordering, so
 **When this matters operationally:**
 
 - After modifying an account's quota on the primary cell (`//sys/accounts/<name>/@resource_limits`), a subsequent read from a secondary cell may still return the old quota until the Hive message is applied.
-- After creating a new account, the account may not yet be visible on a secondary cell even if the primary cell has already confirmed the creation. Reading the account list from any secondary before the Hive message is applied will not include the new account.
+- For an ordinarily replicated type without two-phase creation, a newly created object may not yet be visible on a secondary even after the create request returns. Accounts use the stronger two-phase protocol described below: synchronous creation does not return successfully until every replication cell has confirmed the account.
 - To guarantee that a secondary cell has applied a write, use `SyncWith` against that cell (see [SyncWith semantics](#syncwith-semantics)) or direct the subsequent read to the primary cell.
 
 #### Global object update mechanics and performance implications { #global-object-update-mechanics }
@@ -89,7 +89,7 @@ Every write to a globally replicated object (account, user, group, medium, etc.)
 
 **Two-phase creation and removal**
 
-Accounts, users, and groups (types with `TwoPhaseCreation` and `TwoPhaseRemoval` flags) use a distributed confirmation protocol to ensure every cell sees the object in a consistent state:
+Accounts, users, tablet cell bundles, and chaos cell bundles currently carry the `TwoPhaseCreation` and `TwoPhaseRemoval` flags and replicate to all registered secondary master cells. They use a distributed confirmation protocol to ensure every replication cell sees the object in a consistent state. This list is implementation-defined and may change; search master object type handlers for `ETypeFlags::TwoPhaseCreation` when diagnosing a different release. Replication alone does not imply two-phase creation: for example, groups are replicated but do not currently carry the two-phase flags.
 
 ```
 Creation:
@@ -109,6 +109,49 @@ Creation:
 ```
 
 Until `CreationCommitted` is reached, the object exists on the native cell but cannot yet be used as a valid reference (e.g., a new account cannot be set as the parent of another account until committed).
+
+The primary counts itself plus every replication target. It advances only after all votes for the current stage arrive. Thus one registered but unavailable secondary cell is enough to leave an object at `CreationStarted`; a failure during the second confirmation round leaves it at `CreationPreCommitted`.
+
+##### Client timeout is not creation rollback { #two-phase-creation-timeout }
+
+The native `CreateObject` call has two separately observable steps:
+
+1. Commit the initial mutation on the native cell and return an Object ID.
+2. If the type uses two-phase creation and the request has `sync=true` (the default), poll `#<object-id>/@life_stage` until it becomes `CreationCommitted`.
+
+`Failed to wait until object ... creation is committed` is emitted by the second step. It stops only the client's polling loop: it neither rolls back the initial mutation nor sends a lifecycle-abort request. Creation remains represented by durable master state and reliable Hive messages. If the missing cell or channel recovers, confirmations can arrive and the same object can continue to `CreationCommitted` after the original client has exited. If a required cell never recovers, the object may remain inactive indefinitely; ordinary removal also requires `CreationCommitted` and is not an automatic cleanup path.
+
+After this error, reconcile the returned Object ID instead of assuming that creation failed:
+
+```bash
+yt get '#<object-id>/@life_stage'
+yt get //sys/users/<name>/@id
+```
+
+`creation_started` means the first confirmation round is incomplete, `creation_pre_committed` means the second round is incomplete, and `creation_committed` means creation finished after the client timed out. Once multicell connectivity is restored, retry a named create operation with `ignore_existing` or keep polling the original ID. Setting `sync=false` merely returns after the initial mutation; it does not make the object usable or weaken the server-side protocol.
+
+##### Relationship to user transactions { #two-phase-creation-transactions }
+
+Object lifecycle phases are not a user-visible Cypress transaction or the transaction two-phase commit described later on this page. `CreateObject` options have mutation ID and prerequisite support, but no transaction ID; even a transaction-client wrapper delegates global object creation directly to the underlying client. Aborting such a transaction therefore does not roll back creation of a user, account, or cell bundle. Prerequisites are checked before the initial mutation, while a mutation ID makes a retried mutation idempotent; neither makes the later lifecycle wait transactional.
+
+##### Readiness and diagnosis { #two-phase-creation-readiness }
+
+`//sys/@registered_master_cell_tags` is membership state, not a complete health check. Before running initialization that creates two-phase objects:
+
+1. Run a routed liveness check from the same client configuration as the initializer:
+
+   ```bash
+   yt execute check_cluster_liveness \
+     '{check_cypress_root=%true;check_secondary_master_cells=%true}'
+   ```
+
+   This sends a small Cypress read to every secondary known to that client.
+
+2. Inspect every peer under `//sys/primary_masters/<address>/orchid/monitoring/hydra` and `//sys/secondary_masters/<cell-tag>/<address>/orchid/monitoring/hydra`. Each cell should have one peer with `state=leading` and `active_leader=true`; healthy followers have `state=following` and `active_follower=true`. Ensure the leader is active and not read-only.
+3. Compare the intended cells in `//sys/@cluster_connection/secondary_masters`, the registered tags, and the cells exposed under `//sys/secondary_masters`. This catches a client directory that disagrees with master registration.
+4. For the strongest readiness gate, create and remove a uniquely named disposable object of a two-phase type and require `@life_stage=creation_committed`. A read-only liveness probe cannot by itself prove both directions of the Hive confirmation exchange.
+
+In master logs, correlate the Object ID with `Two-phase object creation started`, `Confirming object life stage to native master cell`, `Object life stage confirmed by foreign cell`, and `Object life stage votes collected; advancing life stage`. The confirmation records include the cell tag and vote count, which identify the missing round or cell.
 
 Removal follows the symmetric path (`RemovalStarted` → `RemovalPreCommitted` → `RemovalAwaitingCellsSync` → `RemovalCommitted`), where the object is removed from all cells only after every secondary has confirmed it released its reference counter.
 
