@@ -21,251 +21,223 @@ A typical shared cluster has at least two workload classes:
 
 The QoS goal is not to make batch invisible. The practical goal is to reserve enough disk, network, CPU, memory, request-queue, and background-maintenance capacity so that batch work slows down before online traffic becomes unstable.
 
-## Mental model
+## Concrete control planes
 
-Data I/O in {{product-name}} passes through several shared resources:
+Use the following levers first; they map directly to resource contention.
 
-1. **Client-side concurrency**: request fan-out, retries, timeouts, and operation job counts.
-2. **Proxy and RPC queues**: HTTP/RPC proxy request queues and tablet/data-node RPC queues.
-3. **Tablet nodes**: lookup/select/write thread pools, tablet cells, dynamic-store memory, preload memory, and compaction/flush execution.
-4. **Data nodes and media**: per-node and per-location disk queues, network throttlers, chunk readers/writers, repair and replication jobs.
-5. **Scheduler pools**: operation CPU, memory, user slots, and operation-level I/O intensity.
-6. **Background work**: flush, compaction, partitioning, tablet balancing, chunk replication, repair, merge, and cleanup.
-
-QoS is achieved by combining three techniques:
-
-* **Isolation** where contention is too risky: separate tablet cell bundles, media, scheduler pools, accounts, or even node tags for critical workloads.
-* **Shaping** where sharing is acceptable: throttlers, fair-share pool guarantees, operation limits, client concurrency limits, and request timeouts.
-* **Feedback** from monitoring: tune based on saturation, queueing, and latency signals rather than on average bandwidth alone.
+| Lever | What it isolates or shapes | Concrete use in a mixed cluster |
+| --- | --- | --- |
+| `replication_factor` / erasure codec | Read fan-out options, recovery traffic, disk usage | Use `replication_factor = 3` for hot tables when possible: each chunk has three independent read sources, so random reads are spread across more disks and one slow replica hurts less. `replication_factor = 2` saves space but gives fewer placement choices and less read load balancing. Erasure coding saves space for cold scans, but a degraded or reconstructed read may touch more nodes and add CPU/network cost. |
+| `primary_medium` and `media` | Disk class and per-medium queues | Put serving chunks on SSD/NVMe media; keep backfills, archival tables, and scan-heavy snapshots on cheaper media. Set the attribute on a directory so new chunks inherit it. |
+| `tablet_cell_bundle` | Tablet nodes, tablet cells, memory, lookup/select/write thread pools | Put strict-SLO dynamic tables into a serving bundle. Do not mount experimental ingestion tables in that bundle. |
+| RPC proxy `role` | Proxy CPU, connection pools, request queues, and proxy-level monitoring | Use separate proxy roles such as `serving`, `interactive`, and `batch`; configure clients to discover or connect to the matching role. This prevents batch scans from filling the same proxy queues used by point lookups. |
+| Workload category | Data-node request queues and fair throttler buckets | Mark interactive and batch reads differently where the client/API supports workload descriptors. Per-workload queues and fair throttlers can then protect interactive reads from scan traffic. |
+| User and account | ACLs, quotas, attribution, emergency kill switch | Use separate users/accounts for serving services, batch pipelines, and maintenance robots. This gives separate disk quotas, clearer dashboards, and a way to suspend or throttle one class without blocking another. |
+| Scheduler pool | Job CPU, memory, user slots, and operation admission | Put batch operations into capped pools. Keep serving-adjacent operations in a small protected pool with strict admission control. |
+| Data-node / location throttlers | Disk and network bandwidth by traffic kind | Cap batch, local-job, replication, repair, compaction, and flush categories below the point where disk queues hurt p99. |
+| Inter-cluster throttlers | Remote read and `RemoteCopy` bandwidth | Limit cross-cluster batch reads so remote traffic slows down instead of saturating links used by online replication or serving. |
 
 ## Table tuning
 
-### Choose the storage layout for the access pattern
+### Replication, erasure, and read bandwidth
 
-For latency-sensitive tables, optimize the table for the dominant request shape.
+Replication factor is a QoS setting, not only a durability setting.
+
+* With replicated chunks, a read can be served from any available replica. Increasing `replication_factor` from 2 to 3 increases disk usage, write traffic, and repair work, but it also gives the system more choices for placing reads and balancing load across data nodes and racks.
+* For hot small reads, `replication_factor = 3` is usually preferable to erasure coding: the system can choose one nearby/healthy replica, and the read path is simple.
+* For cold batch scans, erasure coding is often acceptable because storage efficiency matters more than per-request latency. Keep in mind that degraded erasure reads and repair can consume extra CPU, network, and disk bandwidth.
+* Do not put a hot serving table and a large erasure-coded scan table on the same slow medium unless throttlers and scheduler pools are already limiting the scan.
+* If a table is hot and has only two replicas, first check whether p99 is caused by replica placement or overloaded locations before adding tablet nodes.
+
+### Choose the storage layout for the request shape
 
 * Use sorted dynamic tables for key-value and bounded range reads.
 * Keep hot lookup tables in `optimize_for=lookup` unless scan efficiency is more important than point-read latency.
-* Use `optimize_for=scan` for wide analytical tables where batch reads select large ranges or many rows.
-* Avoid oversized blocks in dynamic tables. Dynamic-table reads pay the cost of reading and decompressing blocks; blocks that are too large amplify single-row reads.
-* Prefer faster compression codecs for hot serving data. Stronger compression may save disk and network, but it can move the bottleneck to tablet-node or job CPU.
-* Use erasure coding primarily for colder or throughput-oriented data. Hot low-latency tables usually benefit from ordinary replication because reads have fewer reconstruction and placement constraints.
+* Use `optimize_for=scan` for wide analytical tables and snapshots scanned by batch jobs.
+* Keep dynamic-table blocks small enough for point reads. Oversized blocks make a single-row lookup read and decompress too much data.
+* Prefer fast compression for serving tables; prefer stronger compression only when CPU is not on the critical path.
+* Rewrite static tables before converting them to dynamic tables if their chunks or blocks are too large for dynamic-table reads.
 
-For dynamic tables converted from static tables, rewrite or compact them with dynamic-table-friendly chunk and block sizes before opening serving traffic. Large static-table chunks can produce poor tablet distribution, excessive read amplification, and slow preloads.
+### Keep hot and cold data physically separate
 
-### Keep hot and cold data apart
+* Put hot rows and recent versions into serving tables or recent partitions.
+* Move history to snapshot/static tables on a batch medium.
+* Use TTL and `trim_rows` for ordered tables so obsolete rows stop consuming chunks and compaction/scan work.
+* Do not run large scans over a mounted hot table when a frozen table, snapshot, replica, or export is sufficient.
 
-Mixing hot serving rows and cold history in the same physical layout makes every maintenance process more expensive.
+### Shard for request rate
 
-* Partition by time, tenant, or another natural dimension if hot and cold data have different latency requirements.
-* Move old partitions to a colder medium or stronger compression policy.
-* Use TTL and trimming so that obsolete versions and old ordered-table rows stop consuming disk, chunk count, compaction, and lookup cost.
-* Avoid running large analytical scans directly over the newest serving table when a periodically frozen or exported snapshot is sufficient.
-
-### Shard for load, not only for size
-
-A table with enough bytes per tablet can still be under-sharded for request rate.
-
-* Choose tablet count from peak read/write request rate, hot-key distribution, and expected background work.
-* For sorted tables, verify that pivot keys spread hot ranges across tablets.
-* For ordered tables, create enough tablets for producer and consumer parallelism.
-* Use tablet balancing groups when several tables in the same bundle have different load profiles.
-* Do not rely on adding nodes to fix a single hot tablet. A hot tablet remains hot until the key range or queue shard is split.
+* Pick tablet count from peak RPS, write rate, and hot-key distribution, not only from bytes.
+* Split hot sorted-table key ranges; adding nodes does not fix a single hot tablet.
+* Create enough ordered-table tablets for producer and consumer parallelism.
+* Use tablet balancing groups when tables in one bundle have different load profiles.
+* Monitor the hottest tablet, not only bundle totals.
 
 ### Reserve maintenance headroom
 
-Low-latency reads depend on background work keeping up.
+Serving p99 depends on background work staying current.
 
-* Keep dynamic-store memory below sustained pressure so writes can flush smoothly.
-* Leave disk and network headroom for flush, compaction, partitioning, and replication.
-* Watch write amplification: large write bursts can create delayed compaction debt that hurts reads later.
-* Tune compaction and partitioning conservatively for serving tables; an aggressive setting can reduce debt faster but may steal the very I/O you are trying to protect.
-* For read-mostly in-memory tables, mount frozen when possible to reduce maintenance overhead.
+* Keep dynamic-store memory below sustained pressure so writes can flush without emergency behavior.
+* Leave bandwidth for flush, compaction, partitioning, replication, and repair.
+* Treat compaction backlog as future read latency. Large write bursts can hurt reads later even if the write path looked healthy.
+* For read-mostly in-memory tables, mount frozen where possible to reduce maintenance overhead.
 
-### Put critical tables in the right bundle and medium
+### Use bundles and media deliberately
 
-Use a dedicated tablet cell bundle for online serving when the workload has strict SLOs. A bundle gives you a separate set of tablet cells and configurable tablet-node resources. With Bundle controller, you can allocate tablet nodes, memory categories, and lookup/select/write thread-pool sizes per bundle.
-
-Use storage media deliberately:
-
-* Put latency-sensitive chunks on SSD/NVMe media if the cluster has multiple media.
-* Keep large batch and archival tables on HDD or lower-priority media when possible.
-* Set `primary_medium` at a directory boundary so new chunks inherit the intended placement.
-* Ensure accounts have enough quota on the chosen medium; quota failures often appear as application errors during peak load.
+* Put strict-SLO dynamic tables into a dedicated `tablet_cell_bundle`.
+* Size lookup/select/write thread pools for the actual serving mix.
+* Keep enough spare tablet nodes for failover; otherwise a single node loss can collapse isolation.
+* Put serving chunks on SSD/NVMe media and batch/archive chunks on cheaper media.
+* Set `primary_medium` on directories used by each workload class.
 
 ## Client setup
 
-### Classify traffic explicitly
+### Route clients to separate proxy roles
 
-Every producer, consumer, and batch pipeline should know its workload class. At minimum, separate configuration profiles for:
+Use separate RPC proxy roles for different traffic classes:
 
-* `serving`: small requests, short deadlines, bounded retries, limited concurrency.
-* `interactive`: human-triggered queries and dashboards, moderate deadlines, moderate concurrency.
-* `batch`: scans, backfills, exports, and large writes, long deadlines, throttled concurrency.
-* `maintenance`: compaction backfills, migrations, verification, repair-oriented user jobs.
+```text
+serving clients      -> RPC proxies with role = serving
+interactive queries  -> RPC proxies with role = interactive
+batch pipelines      -> RPC proxies with role = batch
+maintenance robots   -> RPC proxies with role = maintenance
+```
 
-Give each profile different proxy addresses, scheduler pools, operation specs, retry budgets, and observability labels where the client library supports them.
+This protects proxy CPU, connection pools, request queues, and dashboards. If a batch client opens thousands of long scan requests, it should fill the `batch` proxy role first, not the serving proxies. Also restrict who may use serving proxy roles so accidental batch jobs cannot bypass the split.
 
-### Bound concurrency at the source
+### Set workload category on requests
 
-A shared cluster cannot protect low latency if every client treats timeouts as a signal to multiply traffic.
+Where the client or API exposes workload descriptors/categories, set them consistently:
+
+* point lookups and user-facing range reads: interactive/user category;
+* scheduled scans and backfills: batch category;
+* compaction-style user maintenance: maintenance/background category.
+
+This matters because data-node request queues and fair throttlers can be split by workload category. If all clients use the default/uncategorized category, the cluster cannot distinguish a dashboard lookup from a backfill scan.
+
+### Use separate users and accounts
+
+Do not run all pipelines under one robot.
+
+* Use one user/account for serving writes and serving-owned tables.
+* Use separate users/accounts for batch ingestion, ad-hoc analytics, exports, and maintenance.
+* Give batch accounts explicit disk quotas on batch media; do not let them consume serving SSD quota.
+* Use user/account tags in dashboards and alerts.
+* In an incident, suspend or reduce limits for the batch user/account instead of disrupting serving.
+
+### Bound concurrency and retries at the source
 
 For serving clients:
 
-* Use small connection pools and explicit in-flight request limits per process.
-* Prefer batching that reduces overhead without creating large tail-latency outliers.
-* Set request deadlines close to the user-facing SLO and fail fast when the answer is no longer useful.
-* Use exponential backoff with jitter and a small retry budget.
-* Avoid unbounded parallel lookups over many tablets from one request path.
+* set per-process in-flight request limits;
+* use short deadlines close to the user SLO;
+* use a small retry budget with exponential backoff and jitter;
+* avoid fan-out to many tablets in one synchronous user request.
 
 For batch clients:
 
-* Limit reader and writer parallelism before submitting work.
-* Split large backfills into resumable ranges with pauses between waves.
-* Use scheduler pools with low weight or no strong guarantees for opportunistic work.
-* Use operation-level job counts, data-size-per-job settings, and pool limits to keep aggregate I/O below the reserved batch budget.
+* cap scan readers and table writers;
+* split backfills into resumable ranges;
+* add pauses between waves;
+* keep operation job counts and bytes-per-job consistent with the batch I/O budget.
+
+Timeouts must not create retry storms. If p99 rises, multiplying requests usually makes every shared queue worse.
 
 ### Make scans cooperative
 
-Batch scans are the most common cause of serving-latency regressions on shared storage.
-
-* Prefer reading snapshots, frozen tables, or replicated copies instead of mounted hot tables.
-* Read only required columns and key ranges.
-* Avoid small random reads from many jobs when a sequential scan or pre-aggregation would do.
-* Use sampling for exploratory queries.
-* Schedule large scans in windows where serving traffic has known headroom.
-* For remote reads, enable and respect inter-cluster bandwidth throttling.
-
-### Separate writes by durability and freshness needs
-
-Low-latency writes and batch ingestion have different optimal shapes.
-
-* Keep serving writes small, evenly distributed, and deadline-bound.
-* Buffer batch ingestion outside {{product-name}} or in staging tables when possible, then merge or publish in controlled waves.
-* Avoid large append storms to the same ordered-table tablet.
-* For dynamic tables, monitor flush debt before increasing batch write concurrency.
+* Read only needed columns and key ranges.
+* Prefer snapshots, frozen tables, or replicas over mounted hot tables.
+* Use sampling for exploration.
+* Schedule known heavy scans outside peak serving windows.
+* Respect inter-cluster bandwidth throttlers for remote reads.
 
 ## Cluster tuning
 
-### Use scheduler pools as the first line of defense
+### Scheduler pools
 
-Batch operations should be assigned to explicit scheduler pools. Configure pool guarantees and limits so that online-adjacent work has enough CPU and user slots even during large backfills.
+Use pools as admission control for jobs:
 
-Recommended pool pattern:
+* `prod_serving`: small, protected, strict admission, only serving-adjacent operations.
+* `prod_interactive`: bounded query/ad-hoc work.
+* `prod_batch`: large but capped share for scans, backfills, exports.
+* `prod_maintenance`: admin-controlled repair/migration work.
 
-* `prod_serving`: strong guarantees, strict admission control, used only by latency-sensitive operations.
-* `prod_interactive`: moderate guarantees, bounded concurrency.
-* `prod_batch`: large but capped share, preemptible/opportunistic where possible.
-* `prod_maintenance`: controlled by administrators, often low weight but allowed during planned windows.
+Set caps so `prod_batch` cannot consume all user slots or CPU even when it has unlimited pending work. Keep emergency backfills out of serving pools.
 
-Do not put emergency backfills or one-off analytical jobs into the same pool as serving operations just because they are owned by the same team.
+### Data-node, location, and network throttlers
 
-### Configure data-node and network throttlers
+Configure limits below the saturation point, not at theoretical device bandwidth. Watch disk queues while tuning.
 
-Cluster nodes expose network and data-node throttlers for different traffic categories. Use them to cap background and batch categories below physical disk and network capacity.
+Concrete reservations to decide per medium/node:
 
-A practical starting point is to reserve a fixed percentage of per-node bandwidth for online traffic and recovery, then give batch the remaining budget. The exact ratio depends on hardware, but the important rule is that throttler limits must be lower than the point where disk queues and RPC queues grow without bound.
+* minimum bandwidth left for serving reads;
+* minimum bandwidth left for tablet store flush;
+* minimum bandwidth left for compaction/partitioning;
+* minimum bandwidth left for replication and repair;
+* maximum bandwidth for local jobs / batch scans;
+* maximum remote-read bandwidth per source cluster.
 
-Pay special attention to:
+Use per-location throttlers when SSD and HDD are present in the same cluster: an HDD scan should not define the safe limit for SSD serving traffic, and SSD serving should not hide HDD queue growth.
 
-* total in/out network throttlers;
-* per-category data-node throttlers for replication, repair, merge, tablet compaction/partitioning, tablet store flush, local jobs, and cache traffic;
-* per-location throttlers when one medium is much slower than another;
-* request-queue size limits that reject instead of letting latency grow indefinitely.
+### Tablet-node isolation
 
-### Isolate tablet-node resources
+For a serving bundle:
 
-For dynamic-table serving, tablet-node isolation is often more important than raw disk bandwidth.
+* allocate enough tablet nodes and keep spares;
+* allocate lookup/select/write threads according to real traffic;
+* keep `tablet_dynamic` memory large enough for write bursts;
+* keep in-memory table limits separate from dynamic-store memory;
+* move bulk ingestion and experiments to another bundle before load tests.
 
-* Create dedicated bundles for strict SLO tables.
-* Allocate enough lookup, select, and write threads for the online bundle.
-* Keep memory limits for dynamic stores and in-memory tables realistic.
-* Maintain spare tablet nodes so failover does not collapse isolation.
-* Avoid mounting experimental or bulk-ingestion tables into the same bundle as critical online tables.
+If Bundle controller is enabled, make these changes through bundle target config so node count, memory categories, and thread pools stay consistent.
 
-If Bundle controller is enabled, manage these settings through bundle target configs instead of hand-editing individual nodes.
+### Inter-cluster links and recovery
 
-### Protect inter-cluster links
+Remote reads and `RemoteCopy` need explicit throttling. Without it, a backfill from another cluster can look like local batch work until the network link is saturated.
 
-Remote reads and `RemoteCopy` can saturate links in ways that local per-node throttlers do not fully express. Configure cluster throttlers for remote-source traffic and keep their state visible to operators. Batch pipelines that read from another cluster should be designed to slow down when the remote-bandwidth budget is exhausted.
-
-### Keep recovery bandwidth available
-
-Do not allocate 100% of disk and network capacity to foreground work. Replication and repair are part of the cluster's safety margin. If repair cannot keep up after a disk or node failure, the cluster may remain exposed to a second failure for too long.
-
-Reserve enough background bandwidth for:
-
-* chunk replication and repair;
-* tablet store flush;
-* tablet compaction and partitioning;
-* tablet snapshots and changelogs;
-* decommission and medium balancing.
+Reserve recovery bandwidth even on busy clusters. Replication and repair are not optional: if they fall behind after a disk/node failure, the cluster remains exposed to the next failure longer. Do not use all remaining bandwidth for foreground batch just because serving p99 is currently green.
 
 ## Monitoring
 
-### SLO dashboards
+### Dashboards by isolation dimension
 
-For each critical table or service, maintain a dashboard with:
+Every dashboard should be splittable by:
 
-* request rate by command and workload class;
-* p50/p95/p99 latency and timeout rate;
-* error rate by error code, especially throttling, queue overflow, unavailable tablet, memory pressure, and timeout errors;
-* in-flight request count and client-side retry count;
-* top tables, tablets, nodes, and users by traffic.
+* table and tablet;
+* tablet cell bundle;
+* medium and location;
+* RPC proxy role;
+* workload category;
+* user and account;
+* scheduler pool and operation id;
+* remote cluster for remote reads.
 
-The dashboard should show both user-visible latency and internal wait time. If p99 latency rises while CPU and bandwidth averages look normal, look for queueing, hot tablets, overloaded locations, or retry amplification.
+If a graph cannot answer "which class consumed the I/O budget?", add the missing tag or split.
 
-### Tablet and bundle health
+### Signals to alert on
 
-For dynamic tables, watch:
-
-* tablet count and distribution across cells;
-* per-tablet read/write request rate and data weight;
-* dynamic-store memory usage and flush backlog;
-* compaction backlog, partitioning backlog, and overlapping-store indicators;
-* lookup/select/write thread-pool saturation;
-* tablet cell health, failed cells, and tablet moves;
-* preload state for in-memory tables.
-
-Alert on sustained imbalance, not only on hard failures. A single hot tablet can dominate p99 latency long before the bundle looks globally saturated.
-
-### Data-node and medium saturation
-
-For data I/O QoS, average node bandwidth is less important than queues and tail latency. Monitor:
-
-* disk read/write bandwidth by medium and location;
-* disk queue size and read/write latency;
-* network in/out bandwidth and throttler overdraft duration;
-* per-category throttler rates and queue sizes;
-* chunk reader and writer errors;
+* serving p95/p99 latency, timeout rate, and throttling errors;
+* proxy and RPC request queue size by proxy role;
+* data-node read/write queue size and latency by medium/location;
+* throttler rate, overdraft duration, and queue size by workload category;
+* hottest tablets by read RPS, write RPS, and data weight;
+* dynamic-store memory, flush backlog, compaction backlog, partitioning backlog;
 * replication and repair backlog;
-* cache hit rate for hot reads.
+* scheduler pool fair-share usage, pending jobs, and top operations by bytes read/written;
+* account quota usage by medium.
 
-When a batch job starts, online latency should remain flat or degrade within the agreed budget. If latency rises with disk queues, lower batch I/O limits or move the batch data to another medium. If latency rises without disk queues, inspect tablet-node CPU, thread pools, and request queues.
+Alert on debt before SLO violation: compaction backlog, flush backlog, and repair backlog are often the warning that the next batch wave will hurt serving latency.
 
-### Scheduler and operation visibility
+### Quick diagnosis matrix
 
-Batch owners need their own feedback loop:
-
-* operation pool, weight, and fair-share usage;
-* runnable and pending job counts;
-* input and output bytes per second;
-* job failures caused by throttling or unavailable bandwidth;
-* remote-cluster bandwidth availability;
-* top operations by read/write volume.
-
-Operators should be able to answer: "Which operation consumed the I/O budget when serving latency regressed?" If this requires manual log archaeology, QoS incidents will last too long.
-
-### Alerting strategy
-
-Use layered alerts:
-
-1. **User SLO alerts**: p99 latency, timeout rate, and error rate.
-2. **Contention alerts**: disk queues, throttler overdraft, request queues, thread-pool saturation.
-3. **Debt alerts**: compaction backlog, flush backlog, replication/repair backlog, unbalanced tablets.
-4. **Capacity alerts**: medium free space, account quotas, node count, spare tablet nodes.
-
-Debt alerts should fire before user SLO alerts. If the first signal is user-facing latency, the system is already operating without enough headroom.
+| Symptom | Check first | Typical action |
+| --- | --- | --- |
+| Serving p99 rises; batch operation just started | proxy role queues, workload-category throttlers, disk queues | Pause/lower batch pool; lower batch/local-job throttler; move scan to snapshot. |
+| One table has high p99; bundle totals look fine | hottest tablets and pivot ranges | Split/reshard hot tablets; fix key distribution. |
+| Reads slow only on one medium | per-location disk queues and throttler overdraft | Lower scans on that medium; move hot table to SSD; increase replicas if read placement is too narrow. |
+| Writes time out during ingestion | dynamic-store memory and flush backlog | Reduce writer concurrency; add serving-bundle memory/flush capacity; stage batch writes. |
+| RemoteCopy hurts local users | inter-cluster throttler state and remote bandwidth | Reduce remote bandwidth limit or pause RemoteCopy pool. |
+| Repair backlog grows during peak | repair throttlers and batch caps | Reserve more repair bandwidth; reduce foreground batch until redundancy is restored. |
 
 ## Rollout checklist
 
