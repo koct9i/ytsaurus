@@ -43,6 +43,20 @@ The node tracker state is exposed as `//sys/cluster_nodes/<address>/@state`.
 | `mixed` | Aggregated state differs between master cells. | Multi-cell convergence issue or propagation delay; inspect per-cell details. |
 | `unknown` | Internal/default state. | Treat as diagnostic-only; do not build operational procedures around it. |
 
+### Checking a node Orchid through its monitoring HTTP port
+
+Query the node process directly through the `monitoring_port` from its static configuration. The monitoring HTTP server exposes the node Orchid below `/orchid`; use the node host name and the monitoring port, not the node RPC port:
+
+```bash
+# List the children of the Orchid root without fetching every subtree.
+curl -fsS 'http://<node-host>:<monitoring-port>/orchid/?verb=list' | jq .
+
+# Read a particular subtree.
+curl -fsS 'http://<node-host>:<monitoring-port>/orchid/node_resource_manager' | jq .
+```
+
+The endpoint returns JSON. Use `?verb=list` to inspect the children of an Orchid node, and fetch only the subtree needed for the investigation: reading the complete Orchid can be expensive. A successful request proves that the node process and its monitoring HTTP server respond, but it does not prove that the node is registered with the masters or sending every expected heartbeat. A connection failure can also mean that the monitoring port is bound only locally or blocked by a firewall.
+
 ### Maintenance API quick reference
 
 ```bash
