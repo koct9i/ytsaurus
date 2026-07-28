@@ -32,12 +32,12 @@ The connection published by the local cluster is stored in the
 yt get //sys/@cluster_connection
 ```
 
-The value normally contains the primary and secondary master cell descriptions,
-the cluster name, timestamp-provider or clock settings, discovery-server
-addresses, network addresses, and native-client settings. The exact fields depend
-on the deployment and server version. Treat the complete document as an opaque,
-versioned connection configuration: copy it first, then make only intentional
-patches such as network-specific addresses or transport security settings.
+The value normally contains the primary and secondary master cell descriptions
+and native-client settings for services such as timestamp providers, clocks, and
+discovery servers. The exact fields depend on the deployment and server version.
+Treat the complete document as a versioned connection configuration: copy it
+first, then make only intentional patches such as network-specific addresses or
+transport security settings.
 
 The cluster directory visible from the local cluster is stored at
 `//sys/clusters`. Its keys are cluster names and its values are cluster connection
@@ -109,9 +109,11 @@ Before enabling production traffic, verify the following settings.
 
 ### Identity and topology
 
-* The directory key is the canonical cluster name expected by operations and
-  rich YPaths such as `remote-cluster://path/to/table`.
-* The connection's `cluster_name` agrees with that key.
+* The directory key is the cluster name or alias expected by operations and rich
+  YPaths such as `remote-cluster://path/to/table`.
+* If the connection has no `cluster_name`, the native cluster directory supplies
+  the directory key as its name. If `cluster_name` is present, avoid a surprising
+  mismatch unless the directory key is deliberately an alias.
 * Master cell IDs and cell tags are correct and do not collide across federated
   clusters.
 * Primary and secondary master lists are current.
@@ -133,8 +135,8 @@ Before enabling production traffic, verify the following settings.
   boundary where the selected feature requires it.
 * For TLS or mTLS, CA files, client certificates, and private keys exist on every
   component host that creates the remote connection.
-* Certificate names match the advertised hostnames and certificate rotation is
-  tested without relying on a process restart.
+* Certificate names match the advertised hostnames, and the certificate-rotation
+  procedure is tested for every component that creates a remote connection.
 
 ### Time and availability
 
@@ -152,12 +154,14 @@ The registry contains liveness state and an `addresses` attribute grouped first
 by listener type and then by network name. Common listener types include `http`,
 `https`, and `monitoring_http`; a deployment may expose additional types.
 
-There are two supported discovery approaches.
+There are two discovery approaches. The first is the application-facing API; the
+second is an administrative diagnostic. Neither means that HTTP proxy addresses
+are embedded in `//sys/@cluster_connection`.
 
 ### Use the `discover_proxies` command
 
-Prefer the API v4 `discover_proxies` command. Execute it using a native connection
-to the target cluster and specify:
+Prefer the API v4 `discover_proxies` command. Execute it through a driver backed
+by the **target** native connection and specify:
 
 * `type = "http"`;
 * the required `network_name`;
@@ -174,6 +178,12 @@ Conceptually, the request parameters are:
     role = "data";
 }
 ```
+
+`discover_proxies` belongs to the driver command API, while the cluster directory
+provides native connections. The exact SDK call therefore depends on how the
+application constructs its driver. The invariant is that the driver must use the
+connection returned for `remote-cluster`; a caller must not run the command on its
+local connection and then label the result as remote.
 
 Discovery filters out dead and banned proxies and applies the requested role. If
 balancers are configured for the role, discovery can return their addresses
@@ -197,14 +207,21 @@ command executes.
 ### Inspect the target proxy registry
 
 For troubleshooting, use a native client connected to the target cluster and
-inspect the registry directly:
+inspect the registry directly. In the following commands, `<target-proxy>` is an
+already known bootstrap endpoint for the target cluster; it is not the name of
+the source cluster:
 
 ```bash
-yt get //sys/http_proxies
-yt get //sys/http_proxies/<proxy>/@addresses
-yt get //sys/http_proxies/<proxy>/@banned
-yt get //sys/http_proxies/<proxy>/@role
+yt --proxy <target-proxy> get //sys/http_proxies
+yt --proxy <target-proxy> get //sys/http_proxies/<proxy>/@addresses
+yt --proxy <target-proxy> get //sys/http_proxies/<proxy>/@banned
+yt --proxy <target-proxy> get //sys/http_proxies/<proxy>/@role
 ```
+
+This registry method is therefore useful for verifying discovery, not for solving
+the initial HTTP bootstrap problem by itself. When no target HTTP endpoint is
+known, start with the native connection from `//sys/clusters/<target>` and the
+driver command described above.
 
 A representative address map looks like this:
 
@@ -270,4 +287,3 @@ Typical symptoms have distinct causes:
   permanent application configuration.
 * Remove a directory entry only after all dependent operations, replicas, queues,
   and services have stopped using it.
-
