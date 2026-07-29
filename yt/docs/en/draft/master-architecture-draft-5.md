@@ -157,15 +157,38 @@ Do not treat the fork phase itself as free. A large master has a large virtual a
 Use `yt execute build_master_snapshots '{set_read_only=%false}'` to build master snapshots without changing write availability. Set `set_read_only=%true` only when the procedure requires a fully quiesced master state, for example before major updates or before adding new master cells. In read-only mode the master accepts no ordinary mutations; this ensures the snapshot captures a clean state with an empty subsequent changelog. A common quiescing command is:
 
 ```bash
-yt execute build_master_snapshots '{set_read_only=%true;wait_for_snapshot_completion=%true}'
+yt execute build_master_snapshots \
+  '{set_read_only=%true;wait_for_snapshot_completion=%true;retry=%true;enable_automaton_read_only_barrier=%true}'
 ```
 
-`build_master_snapshots` accepts the following parameters:
+For the `yt execute` client-driver command shown above, `build_master_snapshots` accepts the following parameters:
 
-- `set_read_only` (required boolean): whether to enter Hydra read-only mode while building snapshots. Use `%false` for an ordinary manual snapshot and `%true` for a quiescing snapshot.
-- `wait_for_snapshot_completion` (optional boolean): whether the command should wait until snapshot building completes before returning.
-- `retry` (optional boolean): whether to retry the operation on transient failures.
-- `enable_automaton_read_only_barrier` (optional boolean): whether to use the automaton read-only barrier before entering read-only mode.
+- `set_read_only` (optional boolean, default `%false`): whether to enter Hydra read-only mode while building snapshots. Use `%false` for an ordinary manual snapshot and `%true` for a quiescing snapshot.
+- `wait_for_snapshot_completion` (optional boolean, default `%false`): whether the command should wait until snapshot building completes before returning.
+- `retry` (optional boolean, default `%false`): whether to retry a failed request to an individual cell.
+- `enable_automaton_read_only_barrier` (optional boolean, default `%false`): whether to use the automaton read-only barrier before entering read-only mode.
+
+These are client-driver defaults, not universal API defaults. A direct native API call constructed with `TBuildMasterSnapshotsOptions{}` also defaults `set_read_only` to `false`, but defaults `wait_for_snapshot_completion`, `retry`, and `enable_automaton_read_only_barrier` to `true`. Specify the values explicitly in operational commands instead of relying on the calling interface's defaults.
+
+#### Repeated and partially read-only invocations
+
+The command sends a request to the primary cell and every secondary master cell concurrently, but handles retries and results independently for each cell. The following table describes what happens at one cell; the whole command returns successfully only after every cell has produced a snapshot ID.
+
+| Cell state when its request is handled | `set_read_only=%false` | `set_read_only=%true` |
+|----------------------------------------|-------------------------|------------------------|
+| Writable; no snapshot is being built | Starts a new snapshot and leaves the cell writable. | Enters read-only mode and starts a read-only snapshot. |
+| Writable, or still entering read-only; a snapshot is already being built | The request receives an `Unavailable` error (`Snapshot is already being built`). With `retry=%true`, `build_master_snapshots` repeatedly sends a new request to this cell and, once the existing build has finished, starts a **second** snapshot. It does not attach to the existing writable snapshot build. With `retry=%false`, the whole command fails. | The same retry behavior applies until the cell has actually entered read-only mode. Once it is read-only, a request with `set_read_only=%true` can attach to the in-progress read-only build as described below. |
+| Read-only; a read-only snapshot is still being built | The request cannot attach to that build because it did not request read-only mode. It fails with `ReadOnlySnapshotBuildFailed`. This error is not retried. | The request attaches to the existing read-only snapshot operation. If `wait_for_snapshot_completion=%true`, it waits for and returns that operation's result; otherwise it immediately returns the allocated snapshot ID. It does not start another snapshot. |
+| Read-only; a valid snapshot covers the current state and the following changelog is still empty | Returns the existing snapshot ID. It does not build another snapshot or leave read-only mode. | Returns the existing snapshot ID. It does not build another snapshot. This makes a repeated quiescing command idempotent. |
+| Read-only, but there is no valid snapshot for the current state (for example, the previous read-only build failed) | Fails with `ReadOnlySnapshotBuildFailed`. | Fails with `ReadOnlySnapshotBuildFailed`. |
+
+`retry=%true` retries every per-cell error except `ReadOnlySnapshotBuildFailed`; retries are not limited to the `Unavailable` response caused by another snapshot build. A cell that keeps returning a retryable error can therefore prevent the command from completing. `ReadOnlySnapshotBuilt` is not treated as an error: the existing snapshot ID carried by that response is included in the command result.
+
+The meaning of “returns” in the table depends on `wait_for_snapshot_completion`. With `%true`, the cell result is returned only after the snapshot has completed. With the client-driver default `%false`, a newly started or joined build returns its allocated snapshot ID immediately; the command can finish before snapshot I/O finishes and does not report a later build failure. On an already read-only cell whose completed snapshot is still valid, the existing snapshot ID is returned immediately for either setting.
+
+In a multicell cluster, some cells may already be read-only while others remain writable. Each cell follows the table independently: a read-only cell reuses or joins its valid read-only snapshot operation, while a writable cell builds a new snapshot and, when `set_read_only=%true`, enters read-only mode. There is no all-cells transaction or rollback. Requests are issued concurrently, so other cells may successfully build snapshots or enter read-only mode before one cell returns a terminal error. After a failed command, inspect every cell rather than assuming their states are uniform; fix any read-only cell without a valid snapshot (or explicitly leave read-only mode when it is safe) before retrying.
+
+Neither value of `set_read_only` makes an already read-only cell writable. `set_read_only=%false` means “do not enter read-only mode,” not “exit read-only mode.” Use `master_exit_read_only` or the per-cell `exit_read_only` command to resume writes.
 
 ### Leaving read-only mode
 
