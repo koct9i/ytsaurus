@@ -75,6 +75,7 @@ using namespace NHydra;
 
 static constexpr auto& Logger = CellMasterLogger;
 static const auto RegisterRetryPeriod = TDuration::MilliSeconds(100);
+static const auto RegistrationAttemptRetryPeriod = TDuration::Seconds(30);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -559,6 +560,7 @@ private:
     std::map<TCellTag, TMasterEntry> RegisteredMasterMap_;
     TCellTagList RegisteredMasterCellTags_;
     EPrimaryRegisterState RegisterState_ = EPrimaryRegisterState::None;
+    TInstant LastRegistrationAttemptTime_;
     // NB: After registration on primary, the current cell doesn't add itself into RegisteredMasterMap_,
     // so after loading from snapshot it will consider itself as "in process of dynamic propagation" even if it was already propagated or statically known,
     // to differ that cases this flag is used.
@@ -883,15 +885,10 @@ private:
 
         RegisterMasterMailbox(cellTag);
 
-        try {
-            if (MasterEntryExists(cellTag))  {
-                THROW_ERROR_EXCEPTION("Attempted to re-register secondary master %v", cellTag);
-            }
-        } catch (const std::exception& ex) {
-            YT_LOG_WARNING(ex, "Error registering secondary master (CellTag: %v)",
+        if (MasterEntryExists(cellTag))  {
+            YT_LOG_INFO("Secondary master is already registered, sending successful response (CellTag: %v)",
                 cellTag);
             NProto::TRspRegisterSecondaryMasterAtPrimary response;
-            ToProto(response.mutable_error(), TError(ex));
             PostToMaster(response, cellTag, true);
             return;
         }
@@ -998,15 +995,19 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(IsSecondaryMaster());
 
-        if (RegisterState_ != EPrimaryRegisterState::None) {
+        if (RegisterState_ == EPrimaryRegisterState::Registered) {
             return;
         }
 
-        YT_LOG_INFO("Registering at primary master");
+        if (RegisterState_ == EPrimaryRegisterState::None) {
+            YT_LOG_INFO("Registering at primary master");
 
-        RegisterState_ = EPrimaryRegisterState::Registering;
-        RegisterMasterMailbox(GetPrimaryCellTag());
-        RegisterMasterEntry(GetPrimaryCellTag());
+            RegisterState_ = EPrimaryRegisterState::Registering;
+            RegisterMasterMailbox(GetPrimaryCellTag());
+            RegisterMasterEntry(GetPrimaryCellTag());
+        } else {
+            YT_LOG_INFO("Retrying registration at primary master");
+        }
 
         NProto::TReqRegisterSecondaryMasterAtPrimary request;
         request.set_cell_tag(ToProto(GetCellTag()));
@@ -1143,9 +1144,17 @@ private:
             return;
         }
 
-        if (RegisterState_ != EPrimaryRegisterState::None) {
+        if (RegisterState_ == EPrimaryRegisterState::Registered) {
             return;
         }
+
+        auto now = TInstant::Now();
+        if (RegisterState_ == EPrimaryRegisterState::Registering &&
+            now < LastRegistrationAttemptTime_ + RegistrationAttemptRetryPeriod)
+        {
+            return;
+        }
+        LastRegistrationAttemptTime_ = now;
 
         NProto::TReqStartSecondaryMasterRegistration request;
         YT_UNUSED_FUTURE(CreateMutation(Bootstrap_->GetHydraFacade()->GetHydraManager(), request)
