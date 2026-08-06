@@ -234,6 +234,69 @@ yt get //sys/@dynamically_propagated_masters_cell_tags
 
 Adding secondary cells requires a complete cluster downtime. For detailed steps, see [Extending master servers](../admin-guide/cell-addition.md).
 
+#### Secondary-cell registration sequence
+
+Registration starts only after the new secondary has recovered, elected a leader,
+and completed world initialization. The secondary leader periodically checks its
+persistent registration state. When the state is `None`, it commits a local
+`StartSecondaryMasterRegistration` mutation. Applying that mutation changes the
+state to `Registering`, creates the reliable Hive mailbox and master entry for the
+primary, and sends `RegisterSecondaryMasterAtPrimary(cell_tag)` to the primary.
+Consequently, seeing an active Hydra leader on the new cell is necessary but does
+not by itself mean that multicell registration has completed.
+
+The request is then processed in the following order:
+
+1. **Validate and record the new cell on the primary.** The primary accepts only
+   a secondary cell tag present in its static master configuration. It creates a
+   reliable Hive mailbox for that cell, adds the cell to
+   `registered_master_cell_tags`, recomputes cell roles and names, and writes
+   `Master cell registered` to the primary log. An unknown cell is ignored. A
+   duplicate request receives an error rather than running the bootstrap again.
+2. **Send the dynamically propagated-cell set first.** Before global state is
+   copied, the primary sends its complete
+   `dynamically_propagated_masters_cell_tags` set to the new cell. Some of the
+   following replication decisions depend on this set, so this message must
+   precede replicated keys and values.
+3. **Connect every registered master to every other master.** For each previously
+   registered cell, the primary sends one registration message informing that
+   cell about the newcomer and another informing the newcomer about the existing
+   cell. Each recipient creates a Hive mailbox, records the peer in its registered
+   cell set, recomputes roles and names, and logs `Master cell registered`. Thus,
+   the message on an existing secondary is peer discovery; it is not that
+   secondary registering at the primary again.
+4. **Replicate global state in two passes.** The primary fires the
+   `ReplicateKeysToSecondaryMaster` callbacks and then the
+   `ReplicateValuesToSecondaryMaster` callbacks. Subsystems use the key pass to
+   create global objects and identities on the new cell, and the value pass to
+   copy attributes and relationships after their referenced objects exist. This
+   includes state owned by the security, node-tracker, data-node-tracker,
+   Cypress, cell, configuration, and object managers; it is not a copy of the
+   complete primary Cypress tree.
+5. **Acknowledge registration.** Only after the primary has enqueued the topology
+   and global-state replication messages does it enqueue a reliable success
+   response to the new cell. Reliable messages to that cell preserve their
+   mailbox order. Applying the response changes the new cell's persistent state
+   from `Registering` to `Registered` and writes `Successfully registered at
+   primary master` to its log.
+
+The `Master cell registered` line therefore has a local meaning: the process
+that emitted it has added a peer to its own registered-cell set. For operational
+verification, first find that line for the new cell tag on the primary, then
+verify the corresponding peer-registration lines on all secondaries, the
+`Successfully registered at primary master` line on the new secondary, and the
+global-object replication activity on the new cell. Also check:
+
+```bash
+yt get //sys/@registered_master_cell_tags
+yt get //sys/@dynamically_propagated_masters_cell_tags
+```
+
+Do not assign traffic-bearing roles or restart ordinary cluster components until
+all of those checks are consistent. Registration makes the masters mutually
+aware; it does not instantly update the cached master cell directories held by
+proxies, nodes, schedulers, or master caches, as described below.
+
 After cells are added and global objects are replicated, assign roles via:
 
 ```bash
