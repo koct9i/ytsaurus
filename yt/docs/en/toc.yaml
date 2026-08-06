@@ -673,3 +673,5 @@ items:
           href: draft/audit-logging-draft-20.md
         - name: Configuring cross-cluster communication (draft-21)
           href: draft/cross-cluster-communication-draft-21.md
+        - name: Queue Agent purpose, features, usage, and administration (draft-22)
+          href: draft/queue-agent-draft-22.md
