@@ -20,7 +20,7 @@ YTsaurus C++ code uses a small set of primitives for asynchronous execution:
 - **invokers** choose where that work runs;
 - **futures/promises** pass results between producers and consumers;
 - **fibers** allow code running on scheduler threads to wait without blocking an OS thread;
-- **propagating storage** carries execution context such as trace context, codicils, profiling tags, and other ambient state across callback boundaries.
+- **propagating storage** carries typed ambient values—most notably the current trace context—across callback boundaries.
 
 The most important rule is: do not treat asynchronous code as "just threads". Most server code runs on invokers and often inside fibers, so blocking, thread-local state, and context propagation have different consequences than in plain `std::thread` code.
 
@@ -211,6 +211,73 @@ return asyncStep.Apply(BIND([] (const TStepResult& step) {
 
 When code intentionally starts a detached background operation, use a fresh trace context or `TNullTraceContextGuard` and `BIND_NO_PROPAGATE` to prevent the parent RPC trace from accumulating unrelated work.
 
+### What `BIND` propagates and how { #propagated-context }
+
+`BIND` does not maintain a hard-coded list of fields. It copies the current `TPropagatingStorage` into the callback's bind state. The storage is a fiber-local, copy-on-write map keyed by C++ type (`std::type_index`) with type-erased values (`std::any`). Copying a callback is therefore cheap until one copy changes a value. Immediately before the callback body runs, the callback installs its captured storage with `TPropagatingStorageGuard`; the guard restores the previous storage after the call. Fiber switches use the same storage-switch machinery.
+
+The framework currently puts `TTraceContextPtr` in this map. Consequently, all state reachable from that trace-context object follows a normal `BIND` callback:
+
+- trace, span, and parent-span identities, sampling/debug state, and span name;
+- request id, target endpoint, logging tag, and baggage;
+- trace tags and profiling tags;
+- allocation tags used by allocator profiling;
+- timing, CPU-time, and async-child accounting kept by the context.
+
+A child trace context inherits request id, target endpoint, logging tag, baggage, profiling tags, and allocation tags from its parent. This is distinct from merely copying propagating storage: the latter shares the current `TTraceContextPtr`, while `CreateChild` constructs a new span linked to its parent.
+
+Other subsystems may place their own type in propagating storage by using `TPropagatingValueGuard<T>`. A type has at most one value in a storage snapshot. The guard temporarily exchanges the value and restores or removes it on scope exit. Do not put mutable request state there merely for convenience: callback copies can share the stored object, and ambient dependencies are harder to audit than explicit parameters.
+
+Not every fiber-local diagnostic is part of propagating storage. For example, codicil stacks, the minimum log level, and the thread-message tag are fiber-local facilities with their own switching behavior; do not assume that adding one of these guards before `BIND` makes it part of the callback's captured map. Use the subsystem's dedicated guarded invoker or install its guard in the callback when a value must cross that boundary.
+
+`BIND_NO_PROPAGATE` stores no snapshot and installs no propagation guard. It preserves the callable and bound arguments, but does not bring any typed values from the bind-time storage. The callback therefore sees whatever ambient storage is already installed at its execution site; scheduler queues normally invoke detached callbacks with empty storage, but infrastructure that invokes one inline should not mistake “not captured” for “forced to null”.
+
+## Errors and exceptions { #errors }
+
+`TError` is the framework's structured failure value. Besides a code and message, it may carry origin information, attributes, and nested inner errors. Prefer it at asynchronous and component boundaries: `TFuture<T>` resolves to `TErrorOr<T>`, and `TFuture<void>` resolves to `TError`, so failures retain their structure instead of being flattened into strings.
+
+```cpp
+return ReadRow().Apply(BIND([] (const TErrorOr<TRow>& rowOrError) {
+    if (!rowOrError.IsOK()) {
+        return TError("Failed to read input row") << rowOrError;
+    }
+    return ValidateRow(rowOrError.Value());
+}));
+```
+
+Use `TErrorAttribute("key", value)` for machine-readable detail and nest the original error when adding context. `Wrap(...)` and `THROW_ERROR_EXCEPTION_IF_FAILED(error, "...")` preserve the causal error tree. Avoid logging and then discarding an error at every layer; either handle it, enrich and return it, or log it once at the boundary that owns the operation.
+
+`TErrorException` is the exception wrapper around a `TError`. `THROW_ERROR_EXCEPTION(...)` constructs and throws one; `THROW_ERROR error` throws an existing structured error. Catch `const TErrorException&` when exception-based control flow is required and use `ex.Error()` to recover the structured value. Ordinary `std::exception` can be converted to `TError`, but usually loses framework-specific codes and attributes.
+
+Exceptions are useful for synchronous-looking fiber code and validation helpers, but futures must still be completed with an error. Framework continuation helpers generally convert a thrown exception to a failed future; code that manually invokes a promise must catch at its ownership boundary and complete the promise with a converted error. Never let an exception escape a thread entry point, destructor, or C callback.
+
+## Logging { #logging }
+
+Declare a component logger and use severity-specific macros such as `YT_LOG_TRACE`, `YT_LOG_DEBUG`, `YT_LOG_INFO`, `YT_LOG_WARNING`, `YT_LOG_ERROR`, and `YT_LOG_FATAL`. Use structured-looking fields in the message rather than building strings eagerly:
+
+```cpp
+YT_LOG_INFO("Request completed (Method: %v, RowCount: %v)", method, rowCount);
+YT_LOG_WARNING(error, "Request failed (Method: %v)", method);
+```
+
+Pass a `TError` or `TErrorException` to an error-aware logging overload so nested errors and attributes are retained in the rendered event. Choose levels by action: trace/debug for diagnosis, info for meaningful lifecycle events, warning for a recoverable abnormal condition, error when an operation has failed, and fatal only when the process cannot safely continue. Do not use logging as synchronization and do not place secrets or unbounded payloads in fields.
+
+### Trace context in logs { #trace-context-in-log }
+
+Every log call obtains a `TLoggingContext`. When a current trace context exists, the logging layer automatically copies its trace id, request id, and logging tag into the log event; it also records timestamp, OS thread id/name, and fiber id. Thus a log emitted by a propagated `BIND` callback remains correlated with the initiating request without manually formatting those identifiers.
+
+Set a concise stable value with `traceContext->SetLoggingTag(...)` when operators need a human-readable correlation tag. The request id and trace id are separate machine-readable fields. Formatter configuration controls which fields appear in plain-text or structured output, so application code should not duplicate them in every message. Detached work created with `BIND_NO_PROPAGATE` has no inherited trace fields unless it explicitly installs a context.
+
+## Assertions and affinity checks { #assertions }
+
+Use assertion macros for programmer errors and broken invariants, not for invalid user input, failed I/O, overload, or other expected runtime failures:
+
+- `YT_ASSERT(expr[, description])` checks only in debug builds; in release builds it does not evaluate the expression. Never put side effects in it.
+- `YT_VERIFY(expr[, description])` evaluates and checks in every build and terminates the process on failure.
+- `YT_ABORT([description])` marks an unconditional fatal invariant violation; `YT_UNIMPLEMENTED` and `YT_UNREACHABLE` document narrower cases.
+- `YT_ASSERT_INVOKER_AFFINITY(invoker)` and related thread/spin-lock/serialized-invoker macros document and debug-check async execution affinity.
+
+Failed assertions terminate rather than producing a `TError`; they are not an error-handling shortcut. For preconditions originating outside the process, return or throw a structured error instead.
+
 ## Backtraces and callback locations { #backtraces }
 
 Asynchronous code makes ordinary thread backtraces less complete: the stack at a crash shows the currently running callback, but not necessarily who scheduled it. YTsaurus compensates with several mechanisms:
@@ -248,6 +315,31 @@ Guidelines:
 - Keep guards narrow: broad guards can make unrelated allocations look like part of the same request.
 - Remember that asynchronous continuations may run after the original stack has unwound. If attribution must continue, arrange propagation explicitly or install a new guard in the continuation.
 - Treat memory tracking as diagnostic metadata, not as ownership. Freeing memory depends on object lifetimes and reference counts.
+
+### Memory accounting primitives { #memory-accounting }
+
+Allocation tags answer *who allocated this memory?*; `IMemoryUsageTracker` answers *how much memory may this subsystem use?* These mechanisms complement each other but are independent.
+
+An `IMemoryUsageTracker` exposes `Acquire`/`Release` for unconditional accounting and `TryAcquire`/`TryChange` for limit-aware operations that return `TError`. `GetUsed`, `GetFree`, `GetLimit`, and `IsExceeded` expose tracker state. Prefer the fallible methods when a request can reject or shed work instead of violating its limit.
+
+`TMemoryUsageTrackerGuard` is the RAII primitive for recounting a changing amount:
+
+```cpp
+auto guardOrError = TMemoryUsageTrackerGuard::TryAcquire(tracker, initialSize);
+if (!guardOrError.IsOK()) {
+    return guardOrError;
+}
+auto guard = std::move(guardOrError.Value());
+if (auto error = guard.TrySetSize(actualSize); !error.IsOK()) {
+    return error;
+}
+```
+
+`Build` starts at zero, `Acquire` accounts immediately, and `TryAcquire` enforces the limit. `SetSize`/`TrySetSize`, `IncreaseSize`, and `DecreaseSize` recount as a buffer changes. A non-unit granularity batches tracker updates while retaining the exact logical size. `TransferMemory` moves part of the accounted amount to another guard without double counting. Destruction releases the accounted memory; `ReleaseNoReclaim` deliberately detaches the guard without decrementing the tracker and therefore requires the caller to transfer or release that accounting manually.
+
+For reference-counted buffers, use `TrackMemory`/`TryTrackMemory`: the returned `TSharedRef` holder releases accounting when the final tracked reference dies. Tracking the same reference again normally replaces its previous tracking holder; request `keepExistingTracking` only when accounting in multiple trackers is intentional. `TMemoryTrackedBlob` couples blob resize/reserve operations to a guard. `CreateScopedMemoryTracker` delegates to an underlying tracker while exposing the current and peak amount acquired through that scope.
+
+Accounting is not allocation and does not extend lifetime. Keep the guard or tracked holder alive for exactly as long as the bytes it represents, and make ownership transfer explicit at asynchronous boundaries.
 
 ## Common pitfalls { #pitfalls }
 
