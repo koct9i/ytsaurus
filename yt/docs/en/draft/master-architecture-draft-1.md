@@ -42,7 +42,7 @@ Mutations are the **only** way to modify durable (persistent) state. Any variabl
 
 In contrast, *transient* state lives only in the process memory and is rebuilt after every restart. Examples of transient state include the chunk refresh queue, replication queues, and in-flight job tracking. A mutation is allowed to modify transient state as a side-effect, but transient code paths must never modify persistent state.
 
-### Master reign
+### Persistence compatibility versions
 
 The master **reign** is the integer version of the master's persistent automaton
 format. It is bumped when a master change requires version-aware snapshot or
@@ -66,6 +66,51 @@ ytserver-master --compatibility-info --yson  # machine-readable output
 In a multi-cell cluster, the same per-peer Orchid value is available at
 `//sys/secondary_masters/<cell-tag>/<address>/orchid/reign` for secondary
 masters.
+
+The name is not master-specific. Other persistent state machines and snapshot
+owners have their own compatibility counters:
+
+| Component | Compatibility value | What it versions | Where to inspect it |
+|-----------|---------------------|------------------|---------------------|
+| Tablet cell | **tablet reign** | Tablet-cell Hydra snapshots and mutations | `//sys/tablet_nodes/<address>/orchid/tablet_cells/<cell-id>/reign` on the node hosting the cell; `#<tablet-id>/orchid/reign` also reports the reign saved for that tablet |
+| Chaos cell | **chaos reign** | Chaos-cell Hydra snapshots and mutations | The value is part of the chaos automaton and its snapshot/mutation metadata; unlike tablet reign, it has no dedicated top-level `reign` child in the chaos-cell Orchid |
+| Cluster clock | **clock reign** | Clock-cell Hydra snapshots and mutations | The value is internal to clock-cell recovery; the clock Orchid exposes Hydra and election state, but no standalone current-reign field |
+| Controller agent | **snapshot version** | Per-operation controller snapshots used for operation revival | `//sys/controller_agents/instances/<address>/orchid/controller_agent/snapshot_version` |
+| Sequoia | **Sequoia reign** | Compatibility of requests between Sequoia-aware components | A compiled protocol value carried in relevant requests; it is not a Hydra snapshot reign |
+| Sequoia ground | **ground reign** | Migrations of Sequoia's ground-cluster tables and state | `//sys/primary_masters/<address>/orchid/ground_reign` is the target compiled into that master; `<sequoia-root>/@ground_reign` on the ground cluster is the deployed value |
+
+Tablet, chaos, and clock reigns play the same basic role as master reign because
+each component owns a Hydra automaton. Controller-agent snapshot version is the
+closest analogue outside Hydra: operation controllers persist snapshots for
+revival, but the controller agent is not a replicated Hydra cell. Sequoia has
+two separate values that must not be conflated: Sequoia reign gates request
+compatibility, whereas ground reign controls explicit ground-state migrations.
+
+Some reusable Hydra-backed libraries also define narrower reigns, notably the
+transaction supervisor and lease manager. These are implementation-level
+versions embedded in the owning automaton rather than independently deployed
+components, so operators normally reason about the enclosing master, tablet,
+chaos, or clock reign instead.
+
+For example, inspect the externally exposed non-master values with:
+
+```bash
+# Reign of the tablet-cell automaton running in this slot.
+yt get //sys/tablet_nodes/<address>/orchid/tablet_cells/<cell-id>/reign
+
+# Version used for newly written controller-agent operation snapshots.
+yt get //sys/controller_agents/instances/<address>/orchid/controller_agent/snapshot_version
+
+# Compare the Sequoia ground schema deployed on the ground cluster with the
+# version expected by a master. Run the first command against the ground cluster.
+yt get <sequoia-root>/@ground_reign
+yt get //sys/primary_masters/<address>/orchid/ground_reign
+```
+
+These counters belong to different compatibility domains and their numeric
+values are not comparable. During an upgrade, compare like with like across
+peers or binaries of the same component. A higher number in one component does
+not imply that it is newer than a lower number in another component.
 
 ### Two-thread model
 
