@@ -42,6 +42,31 @@ Mutations are the **only** way to modify durable (persistent) state. Any variabl
 
 In contrast, *transient* state lives only in the process memory and is rebuilt after every restart. Examples of transient state include the chunk refresh queue, replication queues, and in-flight job tracking. A mutation is allowed to modify transient state as a side-effect, but transient code paths must never modify persistent state.
 
+### Master reign
+
+The master **reign** is the integer version of the master's persistent automaton
+format. It is bumped when a master change requires version-aware snapshot or
+mutation loading, and is therefore useful when checking upgrade compatibility.
+
+For a running primary-master peer, read it through that peer's Orchid node in
+Cypress (replace `<address>` with an entry from `//sys/primary_masters`):
+
+```bash
+yt get //sys/primary_masters/<address>/orchid/reign
+```
+
+The value compiled into a master binary can be inspected without starting the
+server:
+
+```bash
+ytserver-master --compatibility-info
+ytserver-master --compatibility-info --yson  # machine-readable output
+```
+
+In a multi-cell cluster, the same per-peer Orchid value is available at
+`//sys/secondary_masters/<cell-tag>/<address>/orchid/reign` for secondary
+masters.
+
 ### Two-thread model
 
 Inside each Hydra peer there are two dedicated execution contexts:
