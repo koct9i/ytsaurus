@@ -677,3 +677,5 @@ items:
           href: draft/audit-logging-draft-20.md
         - name: Configuring cross-cluster communication (draft-21)
           href: draft/cross-cluster-communication-draft-21.md
+        - name: CRI job execution environment setup (draft-22)
+          href: draft/exec-node-cri-job-environment-draft-22.md
