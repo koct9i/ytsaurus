@@ -213,14 +213,16 @@ void Schedule(IInvokerPtr invoker, TString path)
 
 ## `BIND` { #bind }
 
-`BIND` creates a `TCallback` and captures arguments. It is preferred over raw lambdas when passing work to framework APIs because it integrates with:
+`BIND` turns a function, method, or lambda plus bound arguments into a `TCallback` with framework lifetime and context semantics. Its developer-facing contract is:
 
-- reference-counting helpers (`MakeStrong`, `MakeWeak`, `Unretained`);
-- ownership wrappers (`Owned`, `Passed`, `ConstRef`);
-- source-location tracking when enabled;
-- propagation of the current async context.
+- bound values are owned by the callback unless an explicit wrapper says otherwise;
+- `MakeStrong(this)` keeps an object alive, while `MakeWeak(this)` skips a `void` method call when the object is already gone;
+- `Unretained`, `ConstRef`, and similar non-owning wrappers require the referenced object to outlive every invocation;
+- the propagating context that is current **when `BIND` is evaluated** is captured with the callback;
+- on every invocation that captured context is installed for the callback body and the caller's ambient context is restored afterward;
+- copying the callback copies its callable state and captured-context handle; it does not recapture the context of the copying site.
 
-Typical patterns:
+These semantics are the reason to use `BIND` rather than a raw stored lambda at framework boundaries. Whether an invoker runs the callback inline or later does not change which bind-time context its body observes.
 
 ```cpp
 invoker->Invoke(BIND(&TComponent::DoWork, MakeStrong(this), requestId));
@@ -232,87 +234,94 @@ future.Subscribe(BIND([weakThis = MakeWeak(this)] (const TError& error) {
 }));
 ```
 
-Use `MakeStrong(this)` when the callback must keep the object alive until execution. Use `MakeWeak(this)` for background/shutdown-sensitive callbacks that should silently stop if the owner is destroyed.
+Source-location tracking may additionally record where the callback was bound. Ownership wrappers such as `Owned`, `Passed`, and `ConstRef` alter argument storage or delivery and should be used only when their one-shot or non-owning semantics are intentional.
 
 ## `BIND_NO_PROPAGATE` { #bind-no-propagate }
 
-`BIND` captures the current propagating storage at bind time. `BIND_NO_PROPAGATE` creates the same kind of callback but deliberately does **not** capture that ambient context.
+`BIND_NO_PROPAGATE` has the same callable, argument-ownership, reference-counting, and source-location behavior as `BIND`, but it does not capture or install the bind-time propagating context. Its body observes whatever ambient context exists at the invocation site. It therefore means **do not carry context from here**, not **force an empty context when called**.
 
-Use `BIND_NO_PROPAGATE` for:
-
-- component shutdown hooks and finalizers;
-- timer internals and background maintenance loops where the caller's request trace must not leak into future iterations;
-- cancellation handlers that should not resurrect stale request context;
-- infrastructure code that explicitly installs its own trace or null trace guard.
-
-As a rule of thumb: use `BIND` for request work and continuations; use `BIND_NO_PROPAGATE` for framework plumbing and long-lived background callbacks.
+Use it for component shutdown hooks, cancellation plumbing, timer internals, and long-lived maintenance loops where a request's trace must not escape its lifetime. If detached work needs tracing, create and install a fresh trace context inside that work. Use ordinary `BIND` for request-scoped work and continuations that logically remain part of the current operation.
 
 ## Futures and promises { #futures }
 
-`TFuture<T>` and `TPromise<T>` are the standard result channel. A promise is held by the producer; a future is handed to consumers. The result type is effectively `TErrorOr<T>` (`TError` for `void`), so errors and values travel through the same channel.
-
-Common operations:
+`TFuture<T>` and `TPromise<T>` are thread-safe handles to shared result state. The producer owns a promise and consumers receive futures. A result is `TErrorOr<T>` (`TError` for `void`), so every completion is exactly one value or one structured error. If the last promise disappears before setting a result, the state is completed with `EErrorCode::Canceled`; producers must retain a promise until they either complete or deliberately abandon the operation.
 
 ```cpp
 auto promise = NewPromise<TValue>();
-TFuture<TValue> future = promise.ToFuture();
-
-future.Subscribe(BIND([] (const TErrorOr<TValue>& result) {
-    if (!result.IsOK()) {
-        // Handle error.
-        return;
-    }
-    // Use result.Value().
+auto future = promise.ToFuture();
+StartOperation(BIND([promise] (TErrorOr<TValue> result) {
+    promise.TrySet(std::move(result));
 }));
-
-promise.Set(value);
+return future;
 ```
 
-Practical rules:
+Use `Set` when the producer exclusively owns completion and a second completion is a bug. Use `TrySet` when normal completion races with cancellation, timeout, shutdown, or another producer. `MakeFuture(value)` and `MakeFuture(TError(...))` represent already-known results.
 
-- Return futures from asynchronous APIs; do not hide async work behind blocking calls.
-- Use `MakeFuture(value)` or `MakeFuture(TError(...))` for already-known results.
-- Use aggregation helpers such as `AllSet`/`AllSucceeded` where the caller needs to join several futures.
-- Handle cancellation deliberately. Future cancellation is advisory: it tells the producer that the value is no longer needed, but cleanup still depends on producer-side cancellation handlers.
-- Avoid `WaitFor` in library code unless the function is explicitly fiber-only or has clear invoker semantics. Prefer returning a future and composing with continuations.
+### Handling errors from futures { #future-errors }
+
+Choose error handling according to the composition style:
+
+- `Subscribe` is a terminal observer. Its callback receives the complete `TErrorOr<T>` and must inspect `IsOK()` before reading `Value()`.
+- An `Apply` callback taking `const T&` runs only for a successful input; an input error bypasses it and completes the returned future with that error.
+- An `Apply` callback taking `const TErrorOr<T>&` sees both success and failure and can recover, translate, or enrich an error.
+- `WaitFor` returns `TErrorOr<T>`/`TError`; check it or call `ThrowOnError` when exception-style fiber code is intentional.
+- At an API boundary, return the original error or wrap it with operation-specific context. Do not replace it with an unstructured message and do not log it at every intermediate layer.
+
+```cpp
+return FetchRow().Apply(BIND([] (const TErrorOr<TRow>& result) -> TErrorOr<TValue> {
+    if (!result.IsOK()) {
+        return TError("Failed to fetch source row") << result;
+    }
+    return Convert(result.Value());
+}));
+```
+
+A continuation that throws is converted by the future machinery into a failed returned future. This is useful for local validation, but explicit `TErrorOr` flow makes recovery paths and expected failures clearer.
 
 ## Synchronous waiting { #synchronous-waiting }
 
-`TFuture::Get` and related blocking waits park the current OS thread. Reserve them for process edges such as tests, command-line tools, startup code before scheduler activity, or integration with a foreign blocking API. They can deadlock when called on an invoker whose queue must run the callback that completes the future.
+`BlockingGet` and `BlockingWait` park the current OS thread. Reserve them for process edges such as tests, command-line tools, startup before scheduler activity, or foreign blocking APIs. They can deadlock on an invoker whose queue must run the callback that completes the future.
 
-Inside scheduler-managed code use fiber-aware `WaitFor`, not a thread-blocking wait. Even then, synchronous-looking waits should be local and documented: returning the future usually composes better and avoids retaining a fiber stack.
+Inside scheduler-managed code use fiber-aware `WaitFor`, not a thread-blocking wait. Even then, returning and composing a future usually scales better than retaining a suspended fiber stack.
 
 ## Asynchronous waiting and continuations { #asynchronous-waiting }
 
-Prefer callbacks and continuation composition when the caller does not need synchronous-looking control flow. `Subscribe` observes completion and receives `TErrorOr<T>` (or `TError` for `void`); it does not transform the result. `Apply` transforms a successful value or complete result and returns a new future, flattening a callback result that is itself a future.
+`Subscribe` observes completion without producing another future. `Apply` transforms a result and returns a future; when the callback returns a future, `Apply` flattens it rather than creating a nested future.
 
 ```cpp
 return Fetch().Apply(BIND([] (const TValue& value) {
-    return Store(Convert(value)); // TFuture<void> is flattened.
+    return Store(Convert(value));
 }).AsyncVia(invoker));
 ```
 
-Use `Via`/`AsyncVia` deliberately to select where the callback runs. Without an explicit invoker, a completion callback may run inline on the producer's thread; callback bodies must therefore be short and must not silently rely on caller affinity.
+Use `Via`/`AsyncVia` deliberately to select execution affinity. Without an explicit invoker, completion callbacks may run inline on the thread that sets the promise. Keep callback bodies short and never rely on accidental producer affinity.
 
 ## Future cancellation and timeouts { #future-cancellation }
 
-Cancellation is advisory. `future.Cancel(error)` completes or requests cancellation of shared state and invokes producer-side cancellation handlers registered through the promise, but it cannot forcibly stop code already running. Producers must define safe cancellation points, release resources, and tolerate a race between normal completion and cancellation; use `TrySet` where either side may win.
+Cancellation is a request flowing from consumer to producer, not forced interruption. `future.Cancel(error)` returns whether it won the race to cancel an unset state. With no promise cancellation handler, cancellation sets the shared state to a cancellation error. When the producer registered `promise.OnCanceled(handler)`, cancellation invokes that handler instead; the handler must stop or detach underlying work as appropriate and eventually call `TrySet` on the promise. Merely returning from the handler leaves the future unresolved.
 
-`WithTimeout` creates a derived future that fails after a deadline and propagates cancellation according to its options. A timeout does not prove that remote or underlying work stopped. Keep cancellation errors structured, normally with an appropriate cancellation or timeout code, and make cleanup idempotent.
+Cancellation races with success and failure. Producer cleanup must be idempotent, and both the normal callback and cancellation handler should use `TrySet`. Code already executing may continue after consumers observe cancellation. `ToUncancelable` shields an operation from downstream cancellation; `ToImmediatelyCancelable` gives consumers prompt cancellation while optionally forwarding the request to the source.
 
-Do not use cancellation as object-lifetime management. Hold an explicit strong reference for work that must finish, or use a weak reference for work that may disappear during shutdown.
+Cancellation also follows continuation relationships. Canceling a derived future normally asks the upstream cancelable state to cancel; if a continuation has already produced an inner future, cancellation can be forwarded to that active operation. Treat this as cooperative propagation: each layer still owns its cleanup and may finish concurrently.
+
+`WithTimeout`/`WithDeadline` create derived futures. When the deadline wins, the derived future receives a timeout error and cancellation is forwarded to the underlying operation by the helper. This does not prove that remote work stopped. Use `TFutureTimeoutOptions::Error` to wrap timeout/cancellation with operation context and `Invoker` when timeout handling needs explicit affinity.
 
 ## Combining futures { #future-combining }
 
-Use combiners rather than counters and hand-written promise fan-in:
+Combiners encode both result and cancellation policy:
 
-- `AllSucceeded` completes successfully only if every input succeeds and fails according to combiner options when an input fails;
-- `AllSet` waits for every input and returns every `TErrorOr<T>`, which is useful for best-effort batches and cleanup;
-- `AnySet` completes when one input is set;
-- `AnySetMatching` waits for an input selected by a predicate;
-- timeout and bounded-concurrency variants should be preferred when the operation needs those policies.
+- `AllSucceeded` preserves input order, but the first failed input fails the combined future immediately;
+- `AllSet` waits for every input and returns each `TErrorOr<T>`, so individual errors are data rather than a shortcut;
+- `AnySucceeded` ignores individual failures until one input succeeds, and reports a combined error if all fail;
+- `AnySet` returns the first completion, whether value or error;
+- `AnySetMatching` returns when its thread-safe, side-effect-free predicate accepts a result, or after all inputs complete without a match;
+- `AnyNSucceeded` and `AnyNSet` provide the corresponding N-result forms.
 
-An empty input, error propagation, input cancellation, and ordering are part of each helper's contract; consult its declaration rather than reproducing assumed behavior. Keep the input futures alive when required and avoid capturing a fan-in promise strongly from callbacks that it owns.
+`TFutureCombinerOptions` controls two separate directions. `PropagateCancelationToInput` (true by default) means canceling the **combined output** cancels all still-relevant input futures. `CancelInputOnShortcut` (also true by default) means that once a shortcut determines the output—an `Any*` winner or an `AllSucceeded` failure—the combiner cancels inputs whose results are no longer needed. Disable the first when the inputs are shared with other consumers; disable the second when losing operations must still finish for side effects or cache warming.
+
+Input cancellation is otherwise just an input result. For `AllSucceeded` it is a failure and may shortcut the combiner; for `AllSet` it is collected and the combiner still waits; for `AnySet` it can win as the first set result; for `AnySucceeded` it is accumulated as an error while other inputs may still succeed. Cancellation generated by a shortcut uses a structured combiner-shortcut error, so producers can distinguish lost fan-in races from external cancellation.
+
+Empty-input behavior differs: all-of combiners complete with an empty success, while any-of combiners fail because no winner can exist. Prefer these helpers over hand-written counters so result races, callback unsubscription, and bidirectional cancellation remain consistent.
 
 ## Fibers and fiber-aware waiting { #fibers }
 
@@ -382,13 +391,21 @@ Use RAII for temporary ambient values. `TPropagatingValueGuard<T>` exchanges one
 
 ## Trace context and propagation { #trace-context }
 
-Trace context is the ambient span/request context used by tracing, logging, and diagnostics. The current trace context is installed with RAII guards such as `TTraceContextGuard` or `TCurrentTraceContextGuard`. `BIND` captures propagating storage, so the continuation sees the same logical trace context even if it runs later or on another invoker.
+A trace groups related spans under one trace id. Each span has a fresh span id and normally refers to its parent span. The current `TTraceContext` also carries sampling/debug state, request id, target endpoint, logging tag, baggage, trace/profiling tags, allocation tags, and timing/accounting state.
 
-Example:
+### When identifiers are created { #trace-id-creation }
+
+- `TTraceContext::NewRoot(name)` starts a trace and generates a new trace id unless the caller supplies one. It also generates the root span id.
+- `CreateTraceContextFromCurrent(name)` creates a child of the current context when one exists: the child keeps the trace id and gets a new span id. With no current context it creates a new root and therefore a new trace id.
+- `GetOrCreateTraceContext(name)` returns the current context unchanged when present; only the no-current-context case creates a new root and trace id. It does **not** create a child span for every call.
+- An incoming RPC trace extension supplies the trace id, parent span id, sampled/debug flags, baggage, and target endpoint for a server-side child. If no trace id arrives, tracing can remain absent; when RPC code forces tracing, it creates a new recorded root trace.
+- Detached work that is not logically part of a request should create a root rather than a child. Ordinary nested operations should create a child so spans remain in the same trace.
+
+Installing a context with `TCurrentTraceContextGuard` makes it current for the dynamic scope. `TNullTraceContextGuard` temporarily removes it. Creating a context does not make it current by itself.
 
 ```cpp
-auto traceContext = NTracing::GetOrCreateTraceContext("MyOperation");
-NTracing::TTraceContextGuard traceGuard(traceContext);
+auto traceContext = NTracing::CreateTraceContextFromCurrent("MyOperation");
+NTracing::TCurrentTraceContextGuard traceGuard(traceContext);
 
 return asyncStep.Apply(BIND([] (const TStepResult& step) {
     YT_LOG_DEBUG("Step finished");
@@ -396,27 +413,31 @@ return asyncStep.Apply(BIND([] (const TStepResult& step) {
 }).AsyncVia(invoker));
 ```
 
-When code intentionally starts a detached background operation, use a fresh trace context or `TNullTraceContextGuard` and `BIND_NO_PROPAGATE` to prevent the parent RPC trace from accumulating unrelated work.
+### Capture points { #trace-capture-points }
 
-### What `BIND` propagates and how { #propagated-context }
+Trace data is observed at several different times; confusing these points causes accidental parentage and stale request context:
 
-`BIND` does not maintain a hard-coded list of fields. It copies the current `TPropagatingStorage` into the callback's bind state. The storage is a fiber-local, copy-on-write map keyed by C++ type (`std::type_index`) with type-erased values (`std::any`). Copying a callback is therefore cheap until one copy changes a value. Immediately before the callback body runs, the callback installs its captured storage with `TPropagatingStorageGuard`; the guard restores the previous storage after the call. Fiber switches use the same storage-switch machinery.
+| Boundary | What is captured or read | When |
+| --- | --- | --- |
+| `BIND` | The current propagating-storage snapshot, including its `TTraceContextPtr`. | When the `BIND` expression executes, not when the callback is queued or invoked. |
+| Callback invocation | The bind-time snapshot is installed for the body and the previous invocation-site context is restored afterward. | On every call. |
+| `BIND_NO_PROPAGATE` | Nothing from the bind site; the body sees the invocation site's current context. | At invocation. |
+| Child-span creation | Parent span context and inheritable fields from the current/explicit parent; a new span id is generated. | When `CreateChild`/`CreateTraceContextFromCurrent` runs. |
+| Logging | Trace id, request id, and logging tag from the then-current context. | At each log call. |
+| Outgoing RPC serialization | The trace/span identity, sampled/debug flags, endpoint, and optionally baggage from the context attached to that request. | When RPC tracing metadata is populated for the request. |
+| Allocator profiling | Allocation tags reachable from the then-current trace context. | At allocation-hook execution. |
 
-The framework currently puts `TTraceContextPtr` in this map. Consequently, all state reachable from that trace-context object follows a normal `BIND` callback:
+Thus moving a prebuilt callback to another invoker does not recapture the destination's trace. Conversely, constructing `BIND` before installing a guard captures the old context. Put the guard around callback construction when the callback should belong to the new span.
 
-- trace, span, and parent-span identities, sampling/debug state, and span name;
-- request id, target endpoint, logging tag, and baggage;
-- trace tags and profiling tags;
-- allocation tags used by allocator profiling;
-- timing, CPU-time, and async-child accounting kept by the context.
+### Propagating storage behind the contract { #propagated-context }
 
-A child trace context inherits request id, target endpoint, logging tag, baggage, profiling tags, and allocation tags from its parent. This is distinct from merely copying propagating storage: the latter shares the current `TTraceContextPtr`, while `CreateChild` constructs a new span linked to its parent.
+The public semantic contract is the bind-time capture described above. Internally, `BIND` stores the current `TPropagatingStorage`, a fiber-local copy-on-write map keyed by C++ type with type-erased values. Before invoking the callable it installs that snapshot with `TPropagatingStorageGuard`, then restores the previous snapshot. The trace entry is a `TTraceContextPtr`, so callbacks share that context object rather than copying each field separately.
 
-Other subsystems may place their own type in propagating storage by using `TPropagatingValueGuard<T>`. A type has at most one value in a storage snapshot. The guard temporarily exchanges the value and restores or removes it on scope exit. Do not put mutable request state there merely for convenience: callback copies can share the stored object, and ambient dependencies are harder to audit than explicit parameters.
+Other subsystems may propagate one value per type with `TPropagatingValueGuard<T>`. Values reachable through a snapshot may therefore be shared and mutable; prefer explicit parameters for business state. Codicil stacks, minimum log level, and thread-message tags use dedicated fiber-local facilities and are not automatically entries in this map.
 
-Not every fiber-local diagnostic is part of propagating storage. For example, codicil stacks, the minimum log level, and the thread-message tag are fiber-local facilities with their own switching behavior; do not assume that adding one of these guards before `BIND` makes it part of the callback's captured map. Use the subsystem's dedicated guarded invoker or install its guard in the callback when a value must cross that boundary.
+`BIND_NO_PROPAGATE` omits the snapshot and guard. Scheduler queues commonly have empty ambient storage for detached callbacks, but inline or custom invocation can have a context; “not propagated” must not be interpreted as “guaranteed null”.
 
-`BIND_NO_PROPAGATE` stores no snapshot and installs no propagation guard. It preserves the callable and bound arguments, but does not bring any typed values from the bind-time storage. The callback therefore sees whatever ambient storage is already installed at its execution site; scheduler queues normally invoke detached callbacks with empty storage, but infrastructure that invokes one inline should not mistake “not captured” for “forced to null”.
+A child context inherits request id, target endpoint, logging tag, baggage, profiling tags, and allocation tags from its parent, while retaining a parent link and receiving a new span id. Trace tags and timing data then evolve on the relevant context. When starting long-lived background work, use `BIND_NO_PROPAGATE` and explicitly install a new root if the work needs its own trace.
 
 ## Common pitfalls { #pitfalls }
 
