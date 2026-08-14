@@ -67,6 +67,12 @@ In a multi-cell cluster, the same per-peer Orchid value is available at
 `//sys/secondary_masters/<cell-tag>/<address>/orchid/reign` for secondary
 masters.
 
+Masters are not the only components with persistence compatibility counters.
+Tablet and chaos cells have their own reigns, controller agents version operation
+snapshots, and several services version the schemas of their system dynamic
+tables. See [Component compatibility and persistent-state versions](components-compatibility-draft-22.md)
+for the complete inventory and upgrade checklist.
+
 ### Two-thread model
 
 Inside each Hydra peer there are two dedicated execution contexts:
