@@ -37,6 +37,32 @@ During operation:
 3. Remount after changing mount- or reader-related options.
 4. Use forced operations (for example, forced compaction) only as an explicit operational intervention.
 
+### Tablet-cell reign during upgrades and movement
+
+Tablet cells have a **tablet reign**, the tablet automaton's persistence
+compatibility version. It is analogous to master reign, but it versions
+tablet-cell snapshots and mutations and has its own numeric range. Inspect the
+current reign on the tablet node that hosts a cell:
+
+```bash
+yt get //sys/tablet_nodes/<address>/orchid/tablet_cells/<cell-id>/reign
+```
+
+For an individual tablet, `yt get #<tablet-id>/orchid/reign` reports the reign
+associated with that tablet. Prefer the cell-slot path when checking which
+binary/reign is running on a particular node; the tablet path is useful when
+diagnosing a specific tablet or smooth-movement action.
+
+Reign matters operationally during tablet movement. Source and target servants
+exchange reign-bearing state, and smooth movement rejects incompatible content
+instead of applying it under a different persistent format. During a rolling
+upgrade, compare the source and target cell reigns when movement is aborted or
+stalls around a node restart. Do not compare tablet-reign numbers with master or
+chaos reigns: each is a separate compatibility domain.
+
+For the other reigns and system-table schema versions used by cluster
+components, see [Component compatibility and persistent-state versions](components-compatibility-draft-22.md).
+
 ### Corner cases to account for in design
 
 - A committed transaction does not always imply immediate visibility of writes to all readers (depends on table type, whether the commit is local or distributed across multiple tablet cells, and read mode).
