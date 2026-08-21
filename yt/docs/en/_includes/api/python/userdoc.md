@@ -54,26 +54,41 @@ You can find an example in this [section](../../../api/python/examples.md#gevent
 
 ### Configuring { #configuration }
 
-The library supports rich configuration options determining its behavior in different scenarios. For example, you can change the path in Cypress where your temporary tables will be created by default: `yt.config["remote_temp_tables_directory"] = "//home/my_home_dir/tmp"`.
-To learn about options and their detailed descriptions, see the [code](http://pydoc.ytsaurus.tech/_modules/yt/wrapper/default_config.html).
+YTsaurus-client configuration is constructed by merging layers from several sources.
+When each configuration layer is applied, all dict nodes are merged rather than overwritten.
 
-The library is configured via one of the following methods:
-- Updating the `yt.config` object: `yt.config["proxy"]["url"] = "<cluster_name>"`.
-- Calling the function `yt.update_config`: `yt.update_config({"proxy": {"url": "<cluster_name>"}})`.
-- Setting an environment variable: `export YT_CONFIG_PATCHES='{url="<cluster_name>"}'`;
-- Using the file whose path is stored in the `YT_CONFIG_PATH` environment variable, the default value is `~/.yt/config`. The file should be in the [YSON](../../../user-guide/storage/formats.md#yson) format  (using the  `YT_CONFIG_FORMAT` environment variable, you can change this behavior; the YSON and JSON  formats are supported). Sample file contents: `{proxy={url="<cluster_name>"}}`.
+* `default_config` (`yt.wrapper.default_config`) — built-in configuration schema and default values.
+* `get_default_config()` — creates a fresh mutable config object initialized from built-in defaults and forced environment vars (`YT_HTTP_PROXY_ROLE`, `YT_RPC_PROXY_ROLE`, `YT_BASE_LAYER`).
+* `update_config_from_env(config, config_profile=None)` — applies environment/file sources to the provided config in this order:
+   1. `YT_CONFIG_PATCHES` (list_fragment; patches are applied from last to first).
+   2. Shared Python SDK/CLI configuration file:
+      - Path selection: `YT_CONFIG_PATH` if it points to an existing file; otherwise `~/.yt/config` if it exists; otherwise `/etc/ytclient.conf`.
+      - If the selected file is unreadable, the loader does not fall back to the next candidate. If `YT_CONFIG_PATH` points to an existing but unreadable file, loading fails with `YtConfigError`; otherwise this source is skipped.
+      - Format selection: `YT_CONFIG_FORMAT` (`yson` or `json`), by default `yson`.
+      - For `config_version=2`, profile selection uses (in order): explicit `config_profile` argument, `YT_CONFIG_PROFILE`, then `default_profile` from the file.
+   3. `YT_*` environment variables from default-config shortcuts (`YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`, `YT_LOG_LEVEL`, and others).
+* `get_config_from_env(config_profile=None)` — shorthand for `update_config_from_env(get_default_config(), config_profile=...)`.
+* Cypress remote client configuration (`//sys/client_config/default`) — applied on top of local configuration during client initialization (unless disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`).
 
-You can change some configuration options using environment variables. Such variables are: `YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`. And also options for setting up the logging options (that are separate from the config): `YT_LOG_LEVEL` and `YT_LOG_PATTERN`.
+Configuration sources for the **global client** (`yt.get(...)`, `yt.list(...)`, etc.):
 
-When using [CLI](../../../api/cli/cli.md), you can pass the configuration patch using the `--config` option.
+1. `get_default_config()`.
+2. `update_config_from_env(...)` — `YT_*` environment variables and configuration file.
+3. Runtime in-place overrides via `yt.config[...] = ...` and `yt.update_config({...})` (last write wins); in CLI `--config` adds a command-local override.
+4. Cypress remote client configuration (`//sys/client_config/default`) is attached as a lazy `RemotePatchable` layer at global-client initialization. It is fetched and merged on first access to remote-patchable fields; this behavior is disabled with `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
-Some options can be specified in the [cluster client config](#remote_client_config).
+Configuration sources for an **explicitly created `YtClient(proxy, token, config)`**:
 
-Note that the library configuration doesn't affect the client configuration: by default, a config with the default values will be used when you're creating a client. To pass a config based on environment variables to the client: `client = yt.YtClient(..., config=yt.default_config.get_config_from_env())`. You can also update an existing config with values from the environment variables using the `update_config_from_env(config)` function.
+1. `get_default_config()`.
+2. Constructor `config` (merged into current configuration).
+3. Constructor `proxy` and `token` (override corresponding fields).
+4. Cypress remote client configuration (`//sys/client_config/default`):
+   - `apply_remote_patch_at_start=true`: fetched and merged during client initialization.
+   - `apply_remote_patch_at_start=false`: attached as a lazy `RemotePatchable` layer and fetched on first access to remote-patchable fields.
+   - `YT_APPLY_REMOTE_PATCH_AT_START=none`: disabled.
 
-Keep an eye on the priority order. When you import the library, the configurations transmitted through `YT_CONFIG_PATCHES` are applied. This environment variable expects list_fragment: you can pass multiple configurations separated by a semicolon. These patches are applied last-to-first. Then, the values of the options specified by specific environment variables are applied. For example, this can be done using `YT_PROXY`. Only after that, the configurations explicitly specified in the code (or passed in the `--config` option) are applied.
-
-When the config is applied, all the dict nodes are merged rather than overwritten.
+To construct `YtClient` using environment/file sources use `get_config_from_env` or `update_config_from_env` explicitly:
+`yt.YtClient(config=yt.default_config.get_config_from_env(...))`.
 
 Setting up a global configuration to work with a cluster in your home directory.
 
@@ -147,11 +162,11 @@ Example of a configuration with profiles in YSON format:
 }
 ```
 
-You can specify a profile in several ways:
+You can specify a profile in the following order of priority (from highest to lowest):
 
-1. Via the `YT_CONFIG_PROFILE` environment variable.
-2. In the python sdk `client = yt.YtClient(..., config=yt.default_config.get_config_from_env(profile="my_profile"))`.
-3. The `default_profile` key value is used by default.
+1. The `config_profile` argument passed explicitly to `yt.default_config.get_config_from_env(config_profile="my_profile")` (Python SDK only). Does not apply when the global client configuration is loaded automatically on module import.
+2. The `YT_CONFIG_PROFILE` environment variable (works for both Python SDK and CLI).
+3. The `default_profile` key in the config file. If neither of the above is set and `default_profile` is absent, profile-based loading fails with an error.
 
 
 #### Logging setup { #configuration_logging }
@@ -1639,11 +1654,27 @@ C++ bindings are delivered as Debian and pip packages.
 
 The packages are built as a universal .so library with libcxx compiled into it: that's why they should work in any Debian-based system.
 
-#### Cluster client config { #remote_client_config }
+#### Cypress client config { #remote_client_config }
 
-Some client settings are received from the cluster during its initialization.
+Some client settings are fetched from the cluster during its initialization. The client reads the document at `//sys/client_config/default` in Cypress and applies it as a patch over the local configuration.
 
-+ To see what exactly is received from the cluster: `yt show-default-config --proxy <proxy> --only-remote-patch`.
+The following options can be set via the Cypress client config (all others are ignored):
+
+| Python SDK config path | Remote key (Cypress document) | Description |
+|---|---|---|
+| `proxy/enable_proxy_discovery` | `enable_proxy_discovery` | Whether to use heavy proxy discovery |
+| `proxy/proxy_discovery_url` | `http_proxy_discovery_url` | URL path to get the list of heavy proxies (deprecated, use `http_proxy_role` instead) |
+| `proxy/operation_link_pattern` | `operation_link_template` | Link pattern to an operation in the web UI |
+| `proxy/query_link_pattern` | `query_link_template` | Link pattern to a query in the web UI |
+| `pickling/dynamic_libraries/enable_auto_collection` | `python_pickling_dynamic_libraries_enable_auto_collection` | Enable auto-collection of dynamic library dependencies for Python jobs |
+| `pickling/ignore_system_modules` | `python_pickling_ignore_system_modules` | Ignore system Python modules when pickling jobs |
+| `pickling/encrypt_pickle_files` | `python_encrypt_pickle_files` | Enable encryption of pickle files (`None` — disabled, `1` — enabled, `2` — enabled with key in secure vault) |
+| `max_replication_factor` | `max_replication_factor` | Maximum replication factor used by the client when uploading files and tables |
+| `strawberry_ctl_address` | `strawberry_ctl_address` | Strawberry controller address template |
+| `strawberry_cluster_name` | `strawberry_cluster_name` | Cluster name used in the Strawberry controller (defaults to proxy URL) |
+| `enable_password_strength_validation` | `python_enable_password_strength_validation` | Validate password strength on the client side when calling `set_user_password` |
+
++ To see what the cluster currently provides: `yt show-default-config --proxy <proxy> --only-remote-patch`.
 + You can completely disable the application of cluster settings via the environment variable: `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
 How to add a config to the cluster:

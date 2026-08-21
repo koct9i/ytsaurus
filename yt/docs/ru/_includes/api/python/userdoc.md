@@ -57,25 +57,40 @@ print(client.list("/"))
 Библиотека поддерживает богатые возможности по конфигурации своего поведения в разных местах. Например, вы можете изменить путь в Кипарисе, где будут по умолчанию создаваться временные таблицы: `yt.config["remote_temp_tables_directory"] = "//home/my_home_dir/tmp"`.
 Опции и их подробные описания проще всего посмотреть [в коде](http://pydoc.ytsaurus.tech/_modules/yt/wrapper/default_config.html).
 
-Конфигурация библиотеки выполняется одним из следующих способов:
-  - Изменение объекта `yt.config`: `yt.config["proxy"]["url"] = "<cluster_name>"`;
-  - Вызов функции `yt.update_config`: `yt.update_config({"proxy": {"url": "<cluster_name>"}})`;
-  - Установка переменной окружения: `export YT_CONFIG_PATCHES='{url="<cluster_name>"}'`;
-  - Через файл, путь к которому указан в переменной окружения `YT_CONFIG_PATH`, по умолчанию `~/.yt/config`. Файл должен быть в формате [YSON](../../../user-guide/storage/formats.md#yson) (с помощью переменной окружения `YT_CONFIG_FORMAT` можно изменить это поведение; поддерживаются форматы YSON и JSON). Пример содержания файла: `{proxy={url="<cluster_name>"}}`.
+Разрешение конфигурации в Python SDK построено на следующей цепочке (по порядку):
 
-Часть опций конфигурации можно изменять через переменные окружения. К таким относятся `YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`. А также опции для конфигурации логирования (которые находятся отдельно от конфига): `YT_LOG_LEVEL` и `YT_LOG_PATTERN`.
+1. `default_config` (`yt.wrapper.default_config`) — встроенная схема конфигурации и значение по умолчанию.
+2. `get_default_config()` — создает новый изменяемый объект конфига, инициализированный встроенными значениями по умолчанию и принудительными env-переменными (`YT_HTTP_PROXY_ROLE`, `YT_RPC_PROXY_ROLE`, `YT_BASE_LAYER`).
+3. `update_config_from_env(config, config_profile=None)` — применяет env/file-источники к переданному конфигу в таком порядке:
+   1. `YT_CONFIG_PATCHES` (list_fragment; патчи применяются от последнего к первому).
+   2. Общий для Python SDK и CLI конфигурационный файл:
+      - Выбор пути: `YT_CONFIG_PATH`, если он указывает на существующий файл; иначе `~/.yt/config`, если этот файл существует; иначе `/etc/ytclient.conf`.
+      - После выбора пути fallback при нечитаемом файле не выполняется: слой просто не применяется. Если `YT_CONFIG_PATH` указывает на существующий, но нечитаемый файл, чтение завершается с `YtConfigError`.
+      - Выбор формата: `YT_CONFIG_FORMAT` (`yson` или `json`).
+      - Для `config_version=2` профиль выбирается так (по порядку): явный аргумент `config_profile`, `YT_CONFIG_PROFILE`, затем `default_profile` из файла.
+   3. Переменные окружения `YT_*` из shortcut-ов дефолтного конфига (`YT_TOKEN`, `YT_PROXY`, `YT_PREFIX`, `YT_LOG_LEVEL` и другие).
+4. `get_config_from_env(config_profile=None)` — сокращение для `update_config_from_env(get_default_config(), config_profile=...)`.
+5. Cypress-конфиг клиента (`//sys/client_config/default`) — ленивый `RemotePatchable`-слой, который применяется поверх локального конфига при инициализации клиента (если не отключен через `YT_APPLY_REMOTE_PATCH_AT_START=none`).
 
-При использовании [CLI](../../../api/cli/cli.md) патч к конфигурации можно передать с помощью опции `--config`.
+Что применяется для **глобального клиента** (`yt.get(...)`, `yt.list(...)` и т.д.):
 
-Часть опций можно указать в ["кластерном клиентском конфиге"](#remote_client_config).
+1. `get_default_config()`.
+2. `update_config_from_env(...)`.
+3. Рантайм-переопределения через `yt.config[...] = ...` и `yt.update_config({...})` (побеждает последнее); в CLI `--config` добавляет переопределение только для текущей команды.
+4. Cypress-конфиг клиента (`//sys/client_config/default`) подключается как ленивый `RemotePatchable`-слой при инициализации глобального клиента. Данные подтягиваются и мержатся при первом обращении к remote-patchable полям; поведение отключается через `YT_APPLY_REMOTE_PATCH_AT_START=none`.
 
-{% note warning "Внимание" %}
+Что применяется для **явно созданного `YtClient(proxy, token, config)`**:
 
-Обратите внимание, что конфигурация библиотеки не влияет на конфигурацию клиента и по умолчанию при создании клиента используется конфиг с дефолтными значениями. Вы можете передать в клиент конфиг, построенный на основе переменных окружения следующим образом `client = yt.YtClient(..., config=yt.default_config.get_config_from_env())`, также вы можете обновить имеющийся у вас конфиг значениями из переменных окружения с помощью функции `update_config_from_env(config)`.
+1. `get_default_config()`.
+2. Конструкторный `config` (мержится в текущий конфиг).
+3. Конструкторные `proxy` и `token` (перекрывают соответствующие поля).
+4. Cypress-конфиг клиента (`//sys/client_config/default`):
+   - `apply_remote_patch_at_start=true`: подтягивается и мержится при инициализации клиента.
+   - `apply_remote_patch_at_start=false`: подключается как ленивый `RemotePatchable`-слой и подтягивается при первом обращении к remote-patchable полям.
+   - `YT_APPLY_REMOTE_PATCH_AT_START=none`: отключен.
 
-{% endnote %}
-
-Также обратите внимание на порядок приоритетов. При импорте библиотеки применяются конфигурации, переданные через `YT_CONFIG_PATCHES`. В данной переменной окружения ожидается list_fragment, то есть может быть передано несколько конфигураций, разделенных точкой с запятой. Указанные патчи накладываются от последнего к первому. Дальше накладываются значения опций, указанные через конкретные переменные окружения, например через `YT_PROXY`. И лишь затем накладываются конфигурации, указанные явно в коде, или переданные через опцию `--config` при использовании CLI.
+Чтобы собрать явный `YtClient` из тех же env/file-источников, что и при глобальной инициализации, передайте:
+`yt.YtClient(config=yt.default_config.get_config_from_env(...))`.
 
 При накладывании конфига все узлы, являющиеся dict-ами, мержатся, а не перезаписываются.
 
@@ -150,11 +165,11 @@ client = yt.YtClient(config=my_config)
 }
 ```
 
-Указать профиль можно несколькими способами:
+Указать профиль можно следующими способами (в порядке убывания приоритета):
 
-1. Через переменную окружения `YT_CONFIG_PROFILE`.
-2. В python sdk `client = yt.YtClient(..., config=yt.default_config.get_config_from_env(profile="my_profile"))`.
-3. В качестве заначения по умолчанию используется значение ключа `default_profile`.
+1. Аргумент `config_profile`, явно переданный в `yt.default_config.get_config_from_env(config_profile="my_profile")` (только Python SDK). Не применяется при автоматической загрузке глобальной конфигурации при импорте модуля.
+2. Переменная окружения `YT_CONFIG_PROFILE` (работает и для Python SDK, и для CLI).
+3. Ключ `default_profile` в файле конфигурации. Если ни один из вышеперечисленных вариантов не задан и `default_profile` отсутствует, загрузка профиля завершается ошибкой.
 
 
 #### Настройка логирования { #configuration_logging }
@@ -1662,9 +1677,25 @@ C++-биндинги поставляются в виде debian- и pip-пак�
 
 Пакеты собираются в виде универсальной .so библиотеки, в которую вкомпилена libcxx, поэтому должны работать в любой debian-системе.
 
-#### Кластерный клиентский конфиг { #remote_client_config }
+#### Cypress-конфиг клиента { #remote_client_config }
 
-Некоторые настройки клиента приезжают с кластера в момент его инициализации.
+Некоторые настройки клиента загружаются с кластера в момент его инициализации. Клиент читает документ `//sys/client_config/default` в Cypress и применяет его как патч поверх локальной конфигурации.
+
+Следующие опции можно задать через Cypress-конфиг клиента (остальные игнорируются):
+
+| Путь в конфиге Python SDK | Ключ в Cypress-документе | Описание |
+|---|---|---|
+| `proxy/enable_proxy_discovery` | `enable_proxy_discovery` | Включить обнаружение тяжёлых прокси |
+| `proxy/proxy_discovery_url` | `http_proxy_discovery_url` | URL-путь для получения списка тяжёлых прокси (устарело, рекомендуется `http_proxy_role`) |
+| `proxy/operation_link_pattern` | `operation_link_template` | Шаблон ссылки на операцию в веб-интерфейсе |
+| `proxy/query_link_pattern` | `query_link_template` | Шаблон ссылки на запрос в веб-интерфейсе |
+| `pickling/dynamic_libraries/enable_auto_collection` | `python_pickling_dynamic_libraries_enable_auto_collection` | Автоматически собирать зависимости динамических библиотек для Python-джобов |
+| `pickling/ignore_system_modules` | `python_pickling_ignore_system_modules` | Игнорировать системные Python-модули при пиклинге джобов |
+| `pickling/encrypt_pickle_files` | `python_encrypt_pickle_files` | Шифровать pickle-файлы (`None` — выключено, `1` — включено, `2` — включено с ключом в secure vault) |
+| `max_replication_factor` | `max_replication_factor` | Максимальный коэффициент репликации при загрузке файлов и таблиц клиентом |
+| `strawberry_ctl_address` | `strawberry_ctl_address` | Шаблон адреса Strawberry-контроллера |
+| `strawberry_cluster_name` | `strawberry_cluster_name` | Имя кластера в Strawberry-контроллере (по умолчанию — URL прокси) |
+| `enable_password_strength_validation` | `python_enable_password_strength_validation` | Проверять надёжность пароля на стороне клиента при вызове `set_user_password` |
 
 + Посмотреть, что именно приезжает с кластера: `yt show-default-config --proxy <proxy> --only-remote-patch`.
 + Полностью выключить применение кластерных настроек можно через переменную окружения: `YT_APPLY_REMOTE_PATCH_AT_START=none`.
