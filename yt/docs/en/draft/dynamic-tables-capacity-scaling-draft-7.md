@@ -37,6 +37,145 @@ Before opening production traffic on a new table:
 
 If the workload is bursty, size for the burst, not for the average.
 
+## Dynamic table memory management
+
+Tablet-node RAM is not a single interchangeable pool. It is divided between dynamic
+stores, in-memory tables, read caches, versioned chunk metadata, the lookup row
+cache, queries, and memory reserved for the process itself. Capacity planning must
+therefore set both the amount of RAM available to a tablet-node instance and the
+limits of the consumers inside that amount. Adding RAM to an instance without
+changing these limits does not give the corresponding consumer more memory.
+
+Choose one owner for these limits:
+
+- For a bundle managed by the Bundle controller, configure
+  `bundle_controller_target_config.memory_limits`. The controller propagates the
+  limits to the assigned tablet nodes.
+- Without the Bundle controller, configure the tablet nodes themselves and keep
+  the configuration identical on every node that can host the bundle.
+
+Do not configure both mechanisms independently. Otherwise a controller update can
+replace a manually selected limit.
+
+### Defaults that must not be used as production sizing
+
+Several built-in defaults only make a node start successfully; they are not a
+memory allocation policy:
+
+- The cluster-node `resource_limits.total_memory` default is **5 GB** and is
+  intentionally very low. Set it to the memory actually available to the process.
+- `tablet_node.resource_limits.tablet_static_memory` and
+  `tablet_node.resource_limits.tablet_dynamic_memory` both default to the maximum
+  64-bit integer. Set finite limits when the Bundle controller does not manage the
+  node.
+- `tablet_node.versioned_chunk_meta_cache.capacity` defaults to **10 GB**. This is
+  an upper bound for the cache, not an instruction to reserve 10 GB of physical
+  memory. Nevertheless, leaving it unchanged on a smaller node permits the cache
+  to compete with dynamic stores and the process reserve, so set it explicitly.
+- The per-bundle memory categories (`tablet_dynamic`, `tablet_static`, block
+  caches, `versioned_chunk_meta`, and `lookup_row_cache`) are optional in the
+  low-level configuration. An omitted category is therefore not a safe production
+  default; give each enabled consumer an explicit budget.
+
+### Bundle Controller configuration
+
+For managed bundles, the following options must be set:
+
+1. `tablet_node_resource_guarantee.memory`: physical RAM assigned to each tablet
+   node instance.
+2. `bundle_controller_target_config.memory_limits`: the per-node distribution of
+   that RAM.
+3. The bundle's `resource_limits.memory`: the total memory quota for all instances
+   assigned to the bundle.
+
+Set at least these memory categories in `memory_limits` (all values are bytes):
+
+| Option | Purpose | Sizing guidance |
+| --- | --- | --- |
+| `tablet_dynamic` | Active and passive dynamic stores before flush. | Size from sustained and burst write rates and measured flush latency. This is the main write buffer. |
+| `tablet_static` | Preloaded data for tables whose `in_memory_mode` is not `none`. | Use zero if there are no in-memory tables; otherwise cover the resident data plus relocation/preload headroom. |
+| `compressed_block_cache` | Compressed blocks used by reads. | Prefer it when RAM efficiency matters. |
+| `uncompressed_block_cache` | Decoded blocks used by reads. | Allocate it only when avoiding decompression is worth the larger footprint. |
+| `versioned_chunk_meta` | Accounted memory for versioned chunk metadata. | Keep it consistent with `tablet_node.versioned_chunk_meta_cache.capacity`; see below. |
+| `lookup_row_cache` | Row-level lookup cache. | Use zero unless tables enable and benefit from the lookup row cache. |
+| `reserved` | Tablet-node process overhead and memory not covered by the categories above. | Always leave a non-zero reserve; do not distribute all instance RAM to caches and stores. |
+
+The sum of the categories must not exceed
+`tablet_node_resource_guarantee.memory`. It should normally be smaller, leaving a
+margin for the operating system and transient allocations. If the zone supplies a
+`default_config.memory_limits`, treat those values only as defaults for new
+bundles and override them for the workload.
+
+Example target configuration for a node with 64 GiB of RAM (illustrative rather
+than universal):
+
+```yson
+{
+    tablet_node_resource_guarantee = {
+        memory = 68719476736;
+        vcpu = 16000;
+        net_bytes = 0;
+    };
+    memory_limits = {
+        tablet_dynamic = 21474836480;
+        tablet_static = 0;
+        compressed_block_cache = 10737418240;
+        uncompressed_block_cache = 4294967296;
+        versioned_chunk_meta = 8589934592;
+        lookup_row_cache = 0;
+        reserved = 12884901888;
+    };
+}
+```
+
+Also set `//sys/tablet_cell_bundles/<bundle>/@resource_limits/memory` high enough
+for the requested node count. See [Bundle controller](../admin-guide/bundle-controller.md)
+for the complete target configuration, including CPU limits and node count.
+
+### `versioned_chunk_meta_cache`
+
+Sorted-table reads need parsed metadata for versioned chunks. The tablet node keeps
+it in an SLRU cache configured at:
+
+```yson
+tablet_node = {
+    versioned_chunk_meta_cache = {
+        capacity = 8589934592;
+    };
+};
+```
+
+`capacity` is in bytes and can be changed through tablet-node dynamic
+configuration. For a Bundle-controller-managed node, use the same value as the
+bundle's `memory_limits.versioned_chunk_meta`. The former controls cache eviction;
+the latter is the memory-accounting limit. Setting only one of them produces a
+misleading budget: a smaller cache wastes the bundle allocation, while a larger
+cache is constrained by memory accounting and can cause repeated eviction or
+memory-pressure errors.
+
+Increase the cache only when its hit/miss and weight metrics show that metadata is
+being repeatedly reloaded and the node has reserve. Do not increase it merely
+because a table contains many chunks: first reduce excessive chunk counts with
+compaction. After changing it, inspect
+`/orchid/tablet_node/effective_config/versioned_chunk_meta_cache/capacity` on each
+tablet node to confirm that the dynamic configuration was applied.
+
+### Operating without the Bundle controller
+
+For manually managed nodes, explicitly set:
+
+- `resource_limits.total_memory` in the cluster-node configuration;
+- finite `tablet_node.resource_limits.tablet_dynamic_memory` and
+  `tablet_node.resource_limits.tablet_static_memory` values;
+- capacities for `tablet_node.versioned_chunk_meta_cache` and the compressed and
+  uncompressed block caches used by the node;
+- a process/OS reserve outside those limits.
+
+Apply the same policy to every eligible tablet node. A bundle can move tablets to
+any of them, so one node left at the built-in defaults makes bundle behavior depend
+on placement. Roll out one category at a time, verify the effective configuration,
+and watch memory pressure and flush latency before increasing traffic.
+
 ## Scaling writes
 
 Write scaling is usually limited by one of three things:
