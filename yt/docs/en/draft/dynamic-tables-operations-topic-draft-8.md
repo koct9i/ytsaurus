@@ -63,6 +63,105 @@ chaos reigns: each is a separate compatibility domain.
 For the other reigns and system-table schema versions used by cluster
 components, see [Component compatibility and persistent-state versions](components-compatibility-draft-22.md).
 
+### Decommissioning and removing a tablet cell
+
+Removing a tablet-cell object normally starts an asynchronous, graceful
+decommission; it does not immediately destroy the cell. Use either of the
+equivalent object paths:
+
+```bash
+yt remove //sys/tablet_cells/<cell-id>
+# or
+yt remove '#<cell-id>'
+```
+
+The master first stops treating the cell as an active placement target and
+moves each of its tablets through tablet actions. Once every master reports
+that the cell is decommissioned and the aggregate tablet count is zero, the
+primary master asks the tablet node to decommission the cell. After the node
+acknowledges this step, the master removes the cell object automatically. An
+unfinished tablet action involving the cell delays this workflow: resolve or
+wait for the action rather than repeatedly issuing `remove`.
+
+Avoid `yt remove --force` during routine operations. Force removal skips the
+normal node-side completion gate and is intended for recovery when graceful
+decommission cannot finish. In particular, it can discard cell transaction
+leases instead of waiting for the normal handoff.
+
+#### Status and progress
+
+The cell remains addressable by object ID while decommission is in progress.
+Inspect these attributes together:
+
+```bash
+yt get '#<cell-id>/@tablet_cell_life_stage'
+yt get '#<cell-id>/@tablet_count'
+yt get '#<cell-id>/@status'
+yt get '#<cell-id>/@multicell_status'
+yt get '#<cell-id>/@peers'
+```
+
+`@tablet_cell_life_stage` is the clearest phase indicator:
+
+| Value | Meaning |
+| --- | --- |
+| `running` | No removal is in progress. |
+| `decommissioning_on_master` | The masters are draining tablets and converging multicell status. |
+| `decommissioning_on_node` | The drain is complete at the masters and the tablet node has been asked to finish decommissioning. |
+| `decommissioned` | The node acknowledged decommission; automatic object removal may still be pending. |
+
+Use `@tablet_count` as the drain-progress counter. It must reach zero before
+the cell can advance to node-side decommission. `@status` contains the
+cluster-wide `health` and `decommissioned` result; on a multicell cluster,
+`@multicell_status` exposes each master's contribution and helps identify a
+lagging secondary master. `@peers` is useful when the lifecycle is stuck on
+the node side: check peer addresses, states, and last-seen information. The
+final successful state is usually disappearance of the object:
+
+```bash
+yt exists '#<cell-id>'
+```
+
+Do not interpret a healthy cell as a completed drain. Health, lifecycle,
+tablet count, and multicell decommission status describe different gates.
+
+#### Decommissioner controls and throttlers
+
+The dynamic master configuration is under
+`//sys/@config/tablet_manager/tablet_cell_decommissioner`. The principal
+settings are:
+
+| Setting | Purpose | Default |
+| --- | --- | --- |
+| `enable_tablet_cell_decommission` | Enables creation of tablet-move actions for retiring cells and transition to node-side decommission. | `%true` |
+| `enable_tablet_cell_removal` | Enables automatic removal after decommission completes. | `%true` |
+| `decommission_check_period` | Periodic scan interval for retiring cells. | 10 seconds |
+| `orphans_check_period` | Periodic scan interval for retrying orphaned tablet actions. | 10 seconds |
+| `decommission_throttler` | Limits tablet-move actions created by decommissioning; one acquired unit corresponds to one tablet action. | limit 200 |
+| `kick_orphans_throttler` | Limits orphaned actions restarted after their bundle becomes healthy; one acquired unit corresponds to one action. | limit 200 |
+
+For example, inspect the live configuration before changing it:
+
+```bash
+yt get //sys/@config/tablet_manager/tablet_cell_decommissioner
+yt get //sys/@config/tablet_manager/tablet_cell_decommissioner/decommission_throttler
+yt get //sys/@config/tablet_manager/tablet_cell_decommissioner/kick_orphans_throttler
+```
+
+A tight `decommission_throttler` makes `@tablet_count` fall slowly because
+only a limited number of moves can be submitted. A tight
+`kick_orphans_throttler` limits recovery progress after move actions become
+orphaned; it does not limit the initial moves. Before raising either limit,
+check bundle health, pending tablet actions, tablet-node capacity, and the
+load caused by moves. Throttling protects the cluster from a burst of work;
+disabling it or shortening scan periods does not repair an unhealthy bundle.
+
+If `enable_tablet_cell_decommission` is false, a requested removal can remain
+at `decommissioning_on_master`. If `enable_tablet_cell_removal` is false, a
+fully decommissioned object is deliberately retained. These switches are
+useful for controlled testing and incident response, but operators should
+record the override and restore it after resolving the issue.
+
 ### Corner cases to account for in design
 
 - A committed transaction does not always imply immediate visibility of writes to all readers (depends on table type, whether the commit is local or distributed across multiple tablet cells, and read mode).
