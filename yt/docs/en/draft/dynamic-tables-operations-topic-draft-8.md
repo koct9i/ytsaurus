@@ -63,6 +63,106 @@ chaos reigns: each is a separate compatibility domain.
 For the other reigns and system-table schema versions used by cluster
 components, see [Component compatibility and persistent-state versions](components-compatibility-draft-22.md).
 
+### Tablet actions
+
+A tablet action is a master object under `//sys/tablet_actions` that coordinates
+a multi-step change while keeping the participating tablets locked to one
+operation. Balancers and the cell decommissioner create actions, and operators
+can inspect them when a move or reshard does not finish. A tablet cannot join a
+second action until the first action reaches a terminal state and is unbound.
+
+#### Action types
+
+| `@kind` | Operation | Important constraints |
+| --- | --- | --- |
+| `move` | Moves one or more tablets to specified cells, or lets the master choose healthy destination cells. | Tablets remain logically unchanged, but the ordinary path freezes and unmounts them before mounting them at the destination. |
+| `reshard` | Replaces a consecutive tablet range using `pivot_keys` or `tablet_count`. | All tablets belong to one table; `inplace_reshard` keeps the result in the same cell and can retain preloaded chunks. |
+| `smooth_move` | Moves one mounted tablet by creating an auxiliary servant and switching service to it. | Requires exactly one destination cell, avenues, and smooth movement enabled; it is unavailable for replicated tables and tables linked to hunk storage. |
+
+For a user-created action, required and optional creation attributes include
+`kind`, `tablet_ids`, `cell_ids`, `pivot_keys`, `tablet_count`,
+`skip_freezing`, `inplace_reshard`, and `correlation_id`. Use the normal table
+commands for routine move and reshard operations; direct action creation is
+primarily useful to control or diagnose an advanced workflow. The resulting
+object exposes those inputs together with `@state`, `@error`, and retention
+attributes:
+
+```bash
+yt list //sys/tablet_actions --attributes kind,state,tablet_ids,cell_ids,error
+yt get //sys/tablet_actions/<action-id>/@
+```
+
+`@correlation_id` connects an action to tablet-balancer logs. On failure,
+inspect `@error` before retrying; also inspect the tablets and target cells
+rather than assuming that a stationary state is a scheduler delay.
+
+#### Execution sequence and states
+
+An ordinary `move` or `reshard` normally follows:
+
+```text
+preparing
+  -> [provisionally_flushing -> provisionally_flushed]
+  -> [freezing] -> frozen
+  -> unmounting -> unmounted
+  -> mounting -> mounted -> completed
+```
+
+Square brackets mark conditional stages. A provisional flush is requested only
+when required for the action. `skip_freezing` advances directly to `frozen`,
+but does not skip unmount and mount. At `unmounted`, a reshard replaces the old
+tablet range and the master validates mount settings; a move only computes or
+uses its destination assignment. If the action has no explicit `cell_ids` and
+the bundle has no healthy cells, it becomes `orphaned` instead of mounting.
+Once the bundle is healthy, the decommissioner's orphan scan kicks the action
+back into the sequence at `unmounted`.
+
+A `smooth_move` uses a separate sequence and does not freeze or unmount the
+main servant:
+
+```text
+preparing -> mounting_auxiliary -> waiting_for_smooth_move -> completed
+```
+
+If smooth movement fails after it starts, the action enters
+`aborting_smooth_move`, removes or aborts the auxiliary servant as appropriate,
+and ends in `failed`. Other action errors normally lead through `failing` to
+`failed`; the manager attempts to remount tablets missed by the action before
+unbinding it. `completed` and `failed` are terminal states. Do not remove a
+running `smooth_move` action: the master rejects that removal because the
+servant handoff must first finish or abort.
+
+#### Controls, retention, and throttling
+
+Finished actions are reference-counted and normally disappear automatically.
+Creation attributes `keep_finished`, `expiration_time`, and
+`expiration_timeout` control retention and are mutually exclusive.
+`keep_finished=%true` retains the result indefinitely; `expiration_time` uses
+an absolute deadline; `expiration_timeout` starts when the action finishes.
+The master scans finished actions according to:
+
+```bash
+yt get //sys/@config/tablet_manager/tablet_action_manager/tablet_actions_cleanup_period
+```
+
+The default cleanup period is one minute. Retention affects observability, not
+execution: keeping a finished object does not keep its tablets locked or count
+it as an active action. Smooth movement has an additional master switch:
+
+```bash
+yt get //sys/@config/tablet_manager/enable_smooth_tablet_movement
+```
+
+There is no single global tablet-action execution throttler. The producer of
+an action controls admission. In particular, tablet-cell decommission uses
+`decommission_throttler` to limit newly created move actions and
+`kick_orphans_throttler` to limit restarts of orphaned actions. Tablet
+balancers have their own schedules and concurrency controls, while explicitly
+created user actions are validated and start immediately. Consequently, tune
+the component generating excess actions rather than treating action state
+transitions as a throughput queue. The decommission-specific throttlers are
+described below.
+
 ### Decommissioning and removing a tablet cell
 
 Removing a tablet-cell object normally starts an asynchronous, graceful
