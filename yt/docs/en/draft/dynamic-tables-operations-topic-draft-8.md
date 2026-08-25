@@ -163,6 +163,51 @@ the component generating excess actions rather than treating action state
 transitions as a throughput queue. The decommission-specific throttlers are
 described below.
 
+#### What limits tablet-action concurrency
+
+Distinguish **admission rate**, **number of active actions**, and **execution
+throughput**. They are limited at different layers:
+
+* **Tablet exclusivity.** A tablet can be bound to only one unfinished action.
+  An overlapping move or reshard is rejected rather than queued. Actions also
+  require tablets of one owner in stable, compatible states; reshard inputs
+  must form a consecutive range. These checks often impose the first practical
+  concurrency limit on repeated operations against one table.
+* **Producer budgets.** Parameterized tablet-balancer groups can limit the
+  number of actions selected in a balancing pass with `max_action_count` under
+  the bundle's `@tablet_balancer_config/groups` settings. Balancer schedules
+  determine how frequently another batch is planned. The legacy master
+  balancer also avoids some bundle or table balancing work while relevant
+  actions are active. These are producer policies, not a master-wide cap on
+  actions created by every source.
+* **Decommission admission.** `decommission_throttler` is shared by the
+  tablet-cell decommissioner and charges one unit for each move action it
+  creates. It limits the rate at which decommission work is admitted, but it
+  is not a ceiling on actions already active. `kick_orphans_throttler`
+  similarly limits how many orphaned actions are restarted.
+* **Destination availability.** A move without explicit `cell_ids` needs a
+  healthy cell with usable tablet capacity in the same bundle. If none is
+  available, the action becomes `orphaned`. Explicit targets must be active
+  and in the same bundle. Thus adding action admission capacity cannot overcome
+  an unhealthy bundle or a lack of target slots.
+* **Per-tablet execution.** Freeze, flush, unmount, mount, snapshot, preload,
+  and smooth-servant handoff are asynchronous tablet-node work. Node CPU,
+  memory, store flush bandwidth, network, and the capacity of destination
+  cells determine how quickly admitted actions cross these barriers. One slow
+  participant keeps a multi-tablet action in its current state.
+* **Master serialization and validation.** State changes are Hydra mutations,
+  and the master validates mount configuration and assignment before mounting.
+  Under master load, mutation throughput can therefore become another bound,
+  even when tablet nodes have spare capacity.
+
+For diagnosis, compare the number of unfinished objects in
+`//sys/tablet_actions` with the rate at which their `@state` changes. A stable,
+small action population usually points to producer admission or schedule
+limits. A growing population whose states do not advance points instead to
+tablet-node work, destination health/capacity, or master mutation throughput.
+Do not raise a producer limit until identifying which of these layers is the
+bottleneck.
+
 ### Decommissioning and removing a tablet cell
 
 Removing a tablet-cell object normally starts an asynchronous, graceful
@@ -261,6 +306,45 @@ at `decommissioning_on_master`. If `enable_tablet_cell_removal` is false, a
 fully decommissioned object is deliberately retained. These switches are
 useful for controlled testing and incident response, but operators should
 record the override and restore it after resolving the issue.
+
+#### What limits concurrent cell decommissioning
+
+There is no `max_concurrent_tablet_cell_decommissions` setting. On every
+`decommission_check_period`, the master scans all eligible retiring cells. The
+amount of useful parallel drain work is nevertheless bounded by the following
+gates:
+
+1. **The shared move-action budget.** All retiring cells consume the same
+   `decommission_throttler`; each tablet costs one unit when its move action is
+   created. With many cells draining at once, they compete for this admission
+   budget. The configured limit therefore controls aggregate action creation
+   rate, not a guaranteed per-cell share or a fixed count of concurrent cells.
+2. **Existing tablet actions.** If an unfinished action contains a mounted
+   tablet from a retiring cell, or names the retiring cell as a target, the
+   decommissioner postpones that cell. It does not create competing actions for
+   those tablets. Large or stuck actions can consequently serialize progress
+   for an entire cell.
+3. **Bundle placement capacity.** Every tablet still needs a healthy
+   destination in its bundle. Too few healthy cells, tablet slots, or node
+   resources turns moved tablets into orphaned actions or makes mount phases
+   slow. Orphan recovery is additionally paced by `kick_orphans_throttler`.
+4. **Multicell convergence.** The primary master waits until all masters report
+   `decommissioned` and the aggregate `@tablet_count` is zero before requesting
+   node-side decommission. A lagging secondary therefore holds the cell at
+   `decommissioning_on_master` even after local tablets appear drained.
+5. **Node-side completion.** After the master-side gates pass, the tablet node
+   must finish its own decommission protocol and acknowledge it. Bundle dynamic
+   option `suppress_tablet_cell_decommission` deliberately prevents this
+   completion and leaves the cell at `decommissioning_on_node`.
+6. **Automatic removal.** `enable_tablet_cell_removal` controls cleanup after
+   completion. Disabling it retains decommissioned objects, but does not by
+   itself reduce the concurrency of earlier tablet moves.
+
+When several cells make uneven progress, compare their remaining
+`@tablet_count`, unfinished actions and action states, `@multicell_status`, and
+peer/node health. Increasing `decommission_throttler` helps only when action
+admission is the limiting gate; it can worsen flush, mount, network, or master
+pressure when execution is already saturated.
 
 ### Corner cases to account for in design
 
