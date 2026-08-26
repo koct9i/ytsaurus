@@ -152,6 +152,170 @@ Do not treat the fork phase itself as free. A large master has a large virtual a
 
 ## Administration
 
+### Master snapshot and changelog storage rotation { #storage-rotation }
+
+Each master **peer** has its own local Hydra persistence. Changelogs and
+snapshots use the same monotonically increasing segment ID: a peer appends
+mutations to one active changelog, closes it at a checkpoint, starts the next
+segment, and writes a snapshot for the checkpoint ID. Old files are not removed
+as part of that rotation. A separate local janitor scans both directories and
+removes complete obsolete generations after a newer snapshot makes them
+unnecessary for recovery. Consequently, rotation limits control file size and
+snapshot frequency, whereas janitor limits control retained disk usage; neither
+set is a substitute for the other.
+
+#### Static storage configuration
+
+The peer-local stores are selected in each master process's static configuration.
+They cannot be moved with `//sys/@config`; changing them requires updating every
+peer's process configuration and restarting it according to the master
+maintenance procedure.
+
+| Static path | Options relevant to persistence |
+|---|---|
+| `changelogs` | Required `path`; `io_engine_type` and optional `io_engine`; `data_flush_size` (default 16 MB, legacy alias `flush_buffer_size`), `index_flush_size` (16 MB), `flush_period` (10 ms), optional `preallocate_size`, `recovery_buffer_size` (16 MB), `flush_quantum` (10 ms), and `changelog_reader_cache`. These settings control the local `.log` and `.log.index` files and their I/O, not segment retention. |
+| `snapshots` | Required `path`; `store_type` (`local` for masters), `codec` (`lz4`), `use_headerless_writer` (`false`), and `clean_temporary_files_on_store_initialize` (`true`). These settings control snapshot representation and initialization, not when snapshots are made. |
+| `hydra_manager` | All cadence, rotation, recovery-tail, and local-janitor options in the tables below may be supplied here as static defaults. `snapshot_background_thread_count` (default `0`) is master-specific. `close_changelogs` (default `true`) is a compatibility option no longer used by Hydra2 and should not be used as a rotation control. |
+
+Keep `changelogs/path` on low-latency durable storage: a mutation cannot commit
+until the changelog write quorum has persisted it. The snapshot path may be on a
+different filesystem. The janitor correlates files by numeric ID even when the
+directories differ, so do not independently delete or renumber files in either
+directory.
+
+#### Rotation and automatic snapshot triggers
+
+The active leader checks whether it should establish a checkpoint every
+`checkpoint_check_period`. A checkpoint rotates the changelog; the snapshot is
+built asynchronously from the corresponding automaton state. Only one snapshot
+build can be active at once.
+
+| `hydra_manager` option | Default | Dynamic | Effect |
+|---|---:|:---:|---|
+| `snapshot_build_period` | 60 min | Yes | Maximum periodic interval before requesting a snapshot. The leader schedules the request with the splay below; the periodic trigger is skipped in read-only mode. |
+| `snapshot_build_splay` | 5 min | Yes | Random delay added to periodic snapshot scheduling, preventing peers/cells from forking simultaneously. |
+| `checkpoint_check_period` | 15 s | Yes | Period for checking periodic and changelog-limit checkpoint conditions. It bounds detection delay; it is not a snapshot interval. |
+| `max_changelog_record_count` | 1,000,000 | Yes | Requests a checkpoint when the active segment reaches this many records. |
+| `max_changelog_data_size` | 1 GB | Yes | Requests a checkpoint when the active segment reaches this payload size. The file can overshoot by the last batch and filesystem/index overhead. |
+| `snapshot_build_timeout` | 5 min | Yes | Fails a snapshot build that takes too long. |
+| `snapshot_fork_timeout` | 2 min | Yes | Terminates the process if `fork()` itself does not finish in time. This is a safety bound, not a scheduling setting. |
+| `alert_on_snapshot_failure` | `true` | Yes | Publishes an alert after snapshot construction fails. |
+
+The two changelog limits are OR conditions. Lowering either value increases the
+number of checkpoints and snapshots and normally produces smaller recovery
+tails, but also increases fork and snapshot I/O frequency. Increasing them does
+not override `snapshot_build_period`. Manual `build_master_snapshots` and
+recovery-driven snapshots are additional triggers.
+
+After leader recovery, Hydra also requests a snapshot if **any** accumulated tail
+limit is reached:
+
+| `hydra_manager` option | Default | Dynamic | Tail measured since the last successful snapshot |
+|---|---:|:---:|---|
+| `max_changelogs_for_recovery` | 20 | Yes | Number of changelog segments. |
+| `max_changelog_mutation_count_for_recovery` | 20,000,000 | Yes | Number of mutations. |
+| `max_total_changelog_size_for_recovery` | 20 GB | Yes | Total mutation payload size. |
+
+These recovery limits do not delete files and do not rotate the live segment by
+themselves during ordinary leading. They force a new snapshot immediately after
+leader recovery so that the next restart is not repeatedly burdened by an
+excessive tail.
+
+#### Retention and janitor behavior
+
+The local janitor runs independently in every master process. Its six options
+are members of the same static `hydra_manager` section and are all dynamically
+overridable:
+
+| `hydra_manager` option | Default | Meaning |
+|---|---:|---|
+| `enable_local_janitor` | `true` | Starts peer-local cleanup. Turning it off stops future passes but does not restore removed files. |
+| `cleanup_period` | 10 s | Interval between directory scans. |
+| `max_snapshot_count_to_keep` | 10 | Snapshot count target. The newest snapshot is nevertheless always preserved. |
+| `max_snapshot_size_to_keep` | unset | Optional byte target for retained snapshots. |
+| `max_changelog_count_to_keep` | unset | Optional changelog count target. |
+| `max_changelog_size_to_keep` | unset | Optional byte target for retained changelogs. |
+
+An unset optional limit does not constrain that dimension. If both count and
+size are set, the stricter threshold wins; `0` is allowed but still cannot make
+the janitor remove the newest snapshot or files needed after it. The janitor
+computes one safe threshold from the snapshot and changelog listings, then
+removes `.snapshot`, `.log`, and matching `.log.index` files whose IDs are
+strictly below it. Important safeguards are:
+
+- with no snapshot present, it removes nothing;
+- it never advances cleanup beyond the newest snapshot ID, so the changelog tail
+  after that snapshot remains recoverable;
+- it retains at least the newest snapshot regardless of a zero count or size
+  target;
+- changelog `0` is retained conservatively until the configured threshold and
+  available snapshots permit removing its generation.
+
+Thus, a count is a target rather than a promise that exactly that many files will
+remain. A large tail after the newest snapshot, files created between cleanup
+passes, malformed filenames (which are warned about and skipped), and deletion
+errors can all leave more files. Retention is also peer-local: do not infer that
+all peers have identical files merely because they use identical limits.
+
+To change the live settings cluster-wide, write the dynamic master config under
+`hydra_manager`; the config is replicated to secondary master cells and each
+peer reconfigures its local janitor and Hydra manager:
+
+```bash
+yt set //sys/@config/hydra_manager '{
+  snapshot_build_period = "90m";
+  snapshot_build_splay = "10m";
+  max_changelog_record_count = 1500000;
+  max_changelog_data_size = "2GB";
+  max_snapshot_count_to_keep = 8;
+  max_snapshot_size_to_keep = "500GB";
+  max_changelog_count_to_keep = 40;
+  max_changelog_size_to_keep = "200GB";
+  cleanup_period = "30s";
+  enable_local_janitor = %true;
+}'
+```
+
+This replaces the `hydra_manager` dynamic-config map; preserve unrelated
+existing keys when using `yt set`. Optional dynamic fields that are absent fall
+back to the process's static `hydra_manager` value. Store paths, snapshot codec,
+local changelog flush/index settings, `snapshot_background_thread_count`, and
+the compatibility `close_changelogs` option are static-only.
+
+#### Metrics, Orchid, and operational checks
+
+Query every peer of every primary and secondary master cell. Disk files and
+janitor execution are local, while snapshot initiation is leader-driven.
+
+| Signal | What it tells you |
+|---|---|
+| `yt_snapshots_available_space{service="yt-master"}` and `yt_snapshots_free_space{service="yt-master"}` | Filesystem headroom at the configured snapshot path. “Available” accounts for filesystem rules affecting the process; “free” is the raw free space. |
+| `yt_changelogs_available_space{service="yt-master"}` and `yt_changelogs_free_space{service="yt-master"}` | Equivalent headroom at the changelog path. Alert on available space. |
+| Hydra `/compressed_snapshot_size` and `/uncompressed_snapshot_size` gauges | Compressed bytes written and logical bytes serialized for the latest successful snapshot; use their ratio and trend for capacity planning. |
+| `/fork_executor/fork_duration` | Time spent creating the snapshot child, before asynchronous serialization. Growth indicates memory/page-table pressure and can threaten election timeouts. |
+| Changelog dispatcher `/changelog_flush_io_time`, `/changelog_close_io_time`, `/changelog_truncate_io_time`, `/changelog_read_io_time`, `/queue_count`, `/records`, and `/bytes` | Local changelog I/O latency, queued dispatcher work, and cumulative traffic. Exact exported metric names depend on the monitoring exporter prefix and tags. |
+
+The master monitoring Orchid `/hydra` does not expose directory byte totals or a
+janitor “last pass” field. It does expose the state needed to interpret rotation:
+
+- `building_snapshot`, `last_snapshot_id`, `last_snapshot_read_only`, and
+  `last_snapshot_id_used_for_recovery` show snapshot progress and provenance;
+- `automaton_version` gives `(segment_id, physical_record_id,
+  logical_record_id)`, while `automaton_sequence_number` shows applied mutation
+  progress;
+- `state`, `active_leader`, `active_follower`, `read_only`,
+  `entering_read_only_mode`, `catching_up`, and `acquiring_changelog` explain why
+  a peer may not currently rotate, snapshot, or serve traffic.
+
+Correlate `last_snapshot_id` with the segment ID in `automaton_version` and with
+the actual numeric filenames. A widening segment gap means the recovery tail is
+growing; a permanently true `building_snapshot`, repeated snapshot alerts, or a
+flat `last_snapshot_id` while the tail grows calls for checking snapshot space,
+fork duration, snapshot timeouts, and logs. Janitor actions are diagnosed in the
+master log through `Janitor is removing Hydra file`, broken-file warnings, and
+removal-failure warnings; there is currently no dedicated janitor metric or
+Orchid subtree.
+
 ### Snapshots and read-only mode
 
 Use `yt execute build_master_snapshots '{set_read_only=%false}'` to build master snapshots without changing write availability. Set `set_read_only=%true` only when the procedure requires a fully quiesced master state, for example before major updates or before adding new master cells. In read-only mode the master accepts no ordinary mutations; this ensures the snapshot captures a clean state with an empty subsequent changelog. A common quiescing command is:
