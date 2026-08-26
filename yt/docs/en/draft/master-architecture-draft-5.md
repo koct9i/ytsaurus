@@ -174,7 +174,7 @@ maintenance procedure.
 | Static path | Options relevant to persistence |
 |---|---|
 | `changelogs` | Required `path`; `io_engine_type` and optional `io_engine`; `data_flush_size` (default 16 MB, legacy alias `flush_buffer_size`), `index_flush_size` (16 MB), `flush_period` (10 ms), optional `preallocate_size`, `recovery_buffer_size` (16 MB), `flush_quantum` (10 ms), and `changelog_reader_cache`. These settings control the local `.log` and `.log.index` files and their I/O, not segment retention. |
-| `snapshots` | Required `path`; `store_type` (`local` for masters), `codec` (`lz4`), `use_headerless_writer` (`false`), and `clean_temporary_files_on_store_initialize` (`true`). These settings control snapshot representation and initialization, not when snapshots are made. |
+| `snapshots` | Required `path`; `codec` (`lz4`), `use_headerless_writer` (`false`), and `clean_temporary_files_on_store_initialize` (`true`). The master configuration uses a local snapshot store; these settings control snapshot representation and initialization, not when snapshots are made. |
 | `hydra_manager` | All cadence, rotation, recovery-tail, and local-janitor options in the tables below may be supplied here as static defaults. `snapshot_background_thread_count` (default `0`) is master-specific. `close_changelogs` (default `true`) is a compatibility option no longer used by Hydra2 and should not be used as a rotation control. |
 
 Keep `changelogs/path` on low-latency durable storage: a mutation cannot commit
@@ -257,30 +257,29 @@ passes, malformed filenames (which are warned about and skipped), and deletion
 errors can all leave more files. Retention is also peer-local: do not infer that
 all peers have identical files merely because they use identical limits.
 
-To change the live settings cluster-wide, write the dynamic master config under
-`hydra_manager`; the config is replicated to secondary master cells and each
-peer reconfigures its local janitor and Hydra manager:
+To change the live settings cluster-wide, write individual options below the
+dynamic `hydra_manager` map. The config is replicated to secondary master cells,
+and each peer reconfigures its local janitor and Hydra manager. Updating leaves
+unrelated options intact, unlike replacing the entire map:
 
 ```bash
-yt set //sys/@config/hydra_manager '{
-  snapshot_build_period = "90m";
-  snapshot_build_splay = "10m";
-  max_changelog_record_count = 1500000;
-  max_changelog_data_size = "2GB";
-  max_snapshot_count_to_keep = 8;
-  max_snapshot_size_to_keep = "500GB";
-  max_changelog_count_to_keep = 40;
-  max_changelog_size_to_keep = "200GB";
-  cleanup_period = "30s";
-  enable_local_janitor = %true;
-}'
+yt set //sys/@config/hydra_manager/snapshot_build_period '"90m"'
+yt set //sys/@config/hydra_manager/snapshot_build_splay '"10m"'
+yt set //sys/@config/hydra_manager/max_changelog_record_count 1500000
+yt set //sys/@config/hydra_manager/max_changelog_data_size '"2GB"'
+yt set //sys/@config/hydra_manager/max_snapshot_count_to_keep 8
+yt set //sys/@config/hydra_manager/max_snapshot_size_to_keep '"500GB"'
+yt set //sys/@config/hydra_manager/max_changelog_count_to_keep 40
+yt set //sys/@config/hydra_manager/max_changelog_size_to_keep '"200GB"'
+yt set //sys/@config/hydra_manager/cleanup_period '"30s"'
+yt set //sys/@config/hydra_manager/enable_local_janitor %true
 ```
 
-This replaces the `hydra_manager` dynamic-config map; preserve unrelated
-existing keys when using `yt set`. Optional dynamic fields that are absent fall
-back to the process's static `hydra_manager` value. Store paths, snapshot codec,
-local changelog flush/index settings, `snapshot_background_thread_count`, and
-the compatibility `close_changelogs` option are static-only.
+Optional dynamic fields that are absent fall back to the process's static
+`hydra_manager` value. Remove an individual dynamic override to return that
+option to its static value. Store paths, snapshot codec, local changelog
+flush/index settings, `snapshot_background_thread_count`, and the compatibility
+`close_changelogs` option are static-only.
 
 #### Metrics, Orchid, and operational checks
 
@@ -291,9 +290,9 @@ janitor execution are local, while snapshot initiation is leader-driven.
 |---|---|
 | `yt_snapshots_available_space{service="yt-master"}` and `yt_snapshots_free_space{service="yt-master"}` | Filesystem headroom at the configured snapshot path. “Available” accounts for filesystem rules affecting the process; “free” is the raw free space. |
 | `yt_changelogs_available_space{service="yt-master"}` and `yt_changelogs_free_space{service="yt-master"}` | Equivalent headroom at the changelog path. Alert on available space. |
-| Hydra `/compressed_snapshot_size` and `/uncompressed_snapshot_size` gauges | Compressed bytes written and logical bytes serialized for the latest successful snapshot; use their ratio and trend for capacity planning. |
-| `/fork_executor/fork_duration` | Time spent creating the snapshot child, before asynchronous serialization. Growth indicates memory/page-table pressure and can threaten election timeouts. |
-| Changelog dispatcher `/changelog_flush_io_time`, `/changelog_close_io_time`, `/changelog_truncate_io_time`, `/changelog_read_io_time`, `/queue_count`, `/records`, and `/bytes` | Local changelog I/O latency, queued dispatcher work, and cumulative traffic. Exact exported metric names depend on the monitoring exporter prefix and tags. |
+| `/hydra/compressed_snapshot_size` and `/hydra/uncompressed_snapshot_size` | Compressed bytes written and logical bytes serialized for the latest successful snapshot; use their ratio and trend for capacity planning. These Hydra gauges carry the cell ID tag. |
+| `/hydra/fork_executor/fork_duration` | Time spent creating the snapshot child, before asynchronous serialization. Growth indicates memory/page-table pressure and can threaten election timeouts. |
+| `/changelogs/changelog_flush_io_time`, `/changelogs/changelog_close_io_time`, `/changelogs/changelog_truncate_io_time`, `/changelogs/changelog_read_io_time`, `/changelogs/queue_count`, `/changelogs/records`, and `/changelogs/bytes` | Local changelog I/O latency, queued dispatcher work, and cumulative traffic. Exact exported metric names depend on the monitoring exporter prefix and tags. |
 
 The master monitoring Orchid `/hydra` does not expose directory byte totals or a
 janitor “last pass” field. It does expose the state needed to interpret rotation:
