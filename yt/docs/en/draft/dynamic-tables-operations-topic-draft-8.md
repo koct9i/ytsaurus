@@ -270,6 +270,42 @@ yt exists '#<cell-id>'
 Do not interpret a healthy cell as a completed drain. Health, lifecycle,
 tablet count, and multicell decommission status describe different gates.
 
+##### Why `@tablet_count` can rise at the start
+
+Treat `@tablet_count` as a progress observation, not as a monotonically
+decreasing counter. In particular, requesting decommission for every cell does
+not cancel tablet actions that were already running. The decommissioner first
+lets an unfinished action that uses a retiring cell become unlinked. This
+includes both an action whose tablet is still mounted in that cell and an
+action that already names the cell as a destination. Such an action can finish
+mounting its tablets before the decommissioner starts moving those tablets
+away, so the destination cell's count rises and only then begins to fall.
+
+A concurrent reshard can make the increase larger: when the action reaches
+`unmounted`, it replaces its input range with the requested number of output
+tablets. If those outputs are mounted in the retiring cell, `@tablet_count`
+reflects the new, larger tablet cardinality before the drain actions are
+created. This is why draining all cells simultaneously does not make the first
+sample a fixed upper bound on the remaining work.
+
+On a multicell cluster, `@tablet_count` is also an aggregate fetched from the
+primary and secondary masters rather than an atomic snapshot of all of them.
+Tablet-action changes can become visible between the individual master
+responses, adding short-lived jumps around action completion. Confirm the cause
+by inspecting actions that reference the cell:
+
+```bash
+yt list //sys/tablet_actions --attributes kind,state,tablet_ids,cell_ids,error
+yt get '#<cell-id>/@tablet_ids'
+yt get '#<cell-id>/@multicell_status'
+```
+
+Wait for pre-existing move and reshard actions to finish, then evaluate the
+trend across several decommission checks. A temporary increase followed by
+progressing move actions is expected convergence. A count that remains flat or
+keeps increasing warrants checking for repeatedly created balancer actions,
+orphaned moves, unhealthy destination capacity, or a lagging secondary master.
+
 #### Decommissioner controls and throttlers
 
 The dynamic master configuration is under
