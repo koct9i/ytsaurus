@@ -228,6 +228,18 @@ acknowledges this step, the master removes the cell object automatically. An
 unfinished tablet action involving the cell delays this workflow: resolve or
 wait for the action rather than repeatedly issuing `remove`.
 
+The component that requests removal is not necessarily the component that
+performs the drain. An operator can issue the remove request directly. The
+Bundle Controller can also request removal when automatic tablet-cell
+management is enabled and the bundle has more cells than its target. In that
+case the controller selects cells, removes their Cypress nodes transactionally,
+and records removal as in progress. It limits only the concurrency of these
+Cypress write requests and reports `stuck_tablet_cell_removal` if a cell does
+not disappear before the configured timeout. The controller does **not** move
+the tablets or run the cell protocol: the remove request reaches the primary
+master, whose tamed-cell manager changes the lifecycle state, and whose tablet
+cell decommissioner creates and supervises the evacuation actions.
+
 Avoid `yt remove --force` during routine operations. Force removal skips the
 normal node-side completion gate and is intended for recovery when graceful
 decommission cannot finish. In particular, it can discard cell transaction
@@ -254,6 +266,15 @@ yt get '#<cell-id>/@peers'
 | `decommissioning_on_master` | The masters are draining tablets and converging multicell status. |
 | `decommissioning_on_node` | The drain is complete at the masters and the tablet node has been asked to finish decommissioning. |
 | `decommissioned` | The node acknowledged decommission; automatic object removal may still be pending. |
+
+During `decommissioning_on_node`, the tablet node suspends the cell and puts
+its transaction manager into removing mode. It acknowledges completion only
+after the tablet map is empty, the transaction manager and transaction
+supervisor are decommissioned, and the lease manager is fully decommissioned.
+The node checks these predicates periodically (10 seconds by default). Thus a
+cell with `@tablet_count = 0` can legitimately remain in this stage while
+transactions or leases drain. `suppress_tablet_cell_decommission` bypasses
+neither condition; it deliberately prevents the check from completing.
 
 Use `@tablet_count` as the drain-progress counter. It must reach zero before
 the cell can advance to node-side decommission. `@status` contains the
@@ -343,6 +364,30 @@ fully decommissioned object is deliberately retained. These switches are
 useful for controlled testing and incident response, but operators should
 record the override and restore it after resolving the issue.
 
+Importantly, `enable_tablet_cell_decommission` controls more than automatic
+move-action creation. The same guarded scan performs the transition from
+`decommissioning_on_master` to `decommissioning_on_node`. If an operator
+disables the setting and manually moves every tablet away, the empty cell's
+local and multicell status can converge to decommissioned, but the graceful
+protocol still remains at `decommissioning_on_master`: the node-side request is
+not sent. A safe manual-evacuation workflow is:
+
+1. Disable automatic cell decommission and create explicit move actions with
+   healthy targets.
+2. Wait until the actions finish, the source `@tablet_count` is zero, and
+   multicell status has converged.
+3. Re-enable `enable_tablet_cell_decommission` so the master can request the
+   node-side transaction and lease drain and finish removal.
+
+Alternatively, move the tablets while the cell is still `running`, then issue
+the remove with the decommissioner enabled. Ensure that balancers cannot place
+new tablets back into the source during this interval. Leaving
+`enable_tablet_cell_removal` enabled does not compensate for a disabled
+decommissioner: automatic removal requires a cell whose lifecycle has already
+reached `decommissioned`. Avoid using force removal merely to bypass this
+stalled phase, since force marks the master-side cell complete without waiting
+for the tablet node's normal drain acknowledgement.
+
 #### What limits concurrent cell decommissioning
 
 There is no `max_concurrent_tablet_cell_decommissions` setting. On every
@@ -381,6 +426,47 @@ When several cells make uneven progress, compare their remaining
 peer/node health. Increasing `decommission_throttler` helps only when action
 admission is the limiting gate; it can worsen flush, mount, network, or master
 pressure when execution is already saturated.
+
+#### Removing every cell in a bundle
+
+Removing the last healthy cell is different from moving tablets between two
+available cells. The decommissioner still creates destination-free `move`
+actions. Each action freezes and unmounts its tablet, but at the assignment
+stage it finds no healthy destination and changes to `orphaned`. The tablet is
+therefore unmounted and temporarily unavailable; YTsaurus does not keep the
+last cell running solely to preserve availability.
+
+An orphaned action is pending recovery work, not a finished historical object.
+Only `completed` and `failed` actions are eligible for expiration cleanup, so
+an orphan remains visible in `//sys/tablet_actions` even though internally
+created decommission actions normally have immediate expiration. Once a new
+cell is healthy in the same bundle, the periodic orphan scan changes the action
+back to `unmounted`; destination selection and mounting resume. After the
+action reaches `completed`, it is normally removed immediately. The orphan
+scan is independent of `enable_tablet_cell_decommission`, although its retry
+rate is controlled by `orphans_check_period` and `kick_orphans_throttler`.
+
+The orphan does not keep the old cell alive after its tablet is unmounted. The
+decommissioner treats an unfinished action as blocking while its tablet is
+still mounted in the retiring cell, or while the action explicitly names that
+cell as a target. Once a destination-free action has unmounted the tablet, the
+source cell can reach zero tablets and finish decommissioning while the action
+waits for replacement capacity. Operationally, before removing every cell,
+either accept this unavailability or create replacement healthy cells first.
+
+#### Who removes finished tablet actions
+
+The primary master's tablet action manager owns action cleanup. When an action
+enters `completed` or `failed`, it is unbound from tablets and cells and no
+longer counts as active. If its expiration time has already passed (the normal
+case for an internally created decommission action), the manager immediately
+unreferences it through the master object manager. Retained actions are found
+by the periodic cleanup executor after `expiration_time` or
+`expiration_timeout`; the executor commits a destroy-actions Hydra mutation,
+which unbinds and unreferences each object. Consequently, an action that is
+`completed` but intentionally has `keep_finished=%true` is observability data,
+whereas an `orphaned` action is still live work and must not be deleted merely
+to tidy Cypress.
 
 ### Corner cases to account for in design
 
