@@ -150,6 +150,57 @@ Snapshot creation causes the master process to fork. During the fork, copy-on-wr
 
 Do not treat the fork phase itself as free. A large master has a large virtual address space, and the kernel must duplicate enough process metadata and page tables to create the snapshot child. That work can pause the master long enough to delay control RPC replies. The election manager is especially sensitive because its `PingFollower` RPC timeout is `follower_ping_rpc_timeout` (default **1 second**), followers abandon a stale leader after `leader_ping_timeout` (default **5 seconds**), and the leader stops leading if alive voting followers no longer form a quorum. Hydra's own lease pings then have `leader_lease_timeout` (default **5 seconds**) while building and maintaining the mutation quorum. The risk is highest when several master peers build snapshots at the same time or when the host is under memory pressure: delayed pings can consume these budgets, slow down mutation availability after failover, or trigger leader/lease loss. Track `/fork_executor/fork_duration`; if fork time grows, stagger snapshots, keep memory headroom, and investigate host memory pressure first. Timeout increases should be coordinated across election and Hydra settings and treated as a trade-off: they reduce false failovers caused by long forks, but also delay real failure detection. Hydra also enforces `snapshot_fork_timeout` (default **2 minutes**); exceeding it terminates the process rather than leaving the master stuck in an unbounded fork attempt.
 
+#### Snapshot performance tuning
+
+Treat snapshot construction as a pipeline with three potentially independent
+bottlenecks: deterministic serialization of the automaton, compression, and the
+write to the snapshot filesystem. Diagnose the limiting stage before changing a
+setting. In particular, a smaller output file does not imply a faster snapshot:
+a codec can save I/O while consuming more CPU, and additional serialization
+threads do not parallelize compression or the final file write.
+
+The local snapshot store supports `none`, `snappy`, and `lz4`; `lz4` is the
+default. Start with `lz4`, since it normally gives the useful compromise of low
+CPU cost and reduced write volume. Benchmark `none` when CPU is saturated and
+the snapshot device has ample sequential-write bandwidth. Benchmark `snappy`
+only against the actual master state: its result depends on the data and there
+is no general reason to assume it will beat `lz4`. Codec changes are static and
+affect newly written snapshots only. Compare both elapsed build time and the
+`compressed_snapshot_size / uncompressed_snapshot_size` ratio, and verify
+recovery time as well as save time before rolling a change to all peers.
+
+`hydra_manager/snapshot_background_thread_count` enables parallel serialization
+for the large chunk and chunk-list entity maps. A value of `0` disables that
+path; it does not mean “choose automatically”. This setting does **not** make all
+automaton parts concurrent: part order remains deterministic, and compression
+and local output are serial. Increase it gradually (for example, `0`, `2`, `4`,
+then `8`) while measuring wall time, child-process CPU, peak RSS, and device
+throughput. Stop when wall time flattens or CPU/memory contention grows. Parallel
+batches temporarily retain serialized buffers until earlier batches have been
+written in deterministic order, so a higher thread count can increase snapshot
+child memory and copy-on-write pressure. It is a static setting and requires a
+rolling master restart.
+
+Use the following symptoms to identify the likely constraint:
+
+| Observation during a snapshot | Likely bottleneck | Experiment |
+|---|---|---|
+| One child CPU is busy, snapshot disk is below its sustainable bandwidth, and chunk-heavy cells are slow | Serialization or compression | First test background threads; if scaling stops, compare `lz4` with `none`. |
+| Snapshot disk is saturated or has high write latency while child CPU has headroom | Snapshot storage | Keep `lz4`, move snapshots to faster/dedicated storage, and avoid concurrent snapshots on the same device. |
+| More background threads reduce CPU idle time but not elapsed time | Serial compression/output or another serial automaton part | Reduce the thread count to the knee of the curve; do not add threads merely because CPUs are available. |
+| Fork duration and host RSS rise, but serialization itself is not slow | Fork/copy-on-write pressure | Preserve more memory headroom, stagger cells/peers, and reduce mutation churn or snapshot concurrency. |
+| Compressed and uncompressed sizes are close | Poor compression benefit | Benchmark `none`; retain compression if lower I/O still improves end-to-end or recovery time. |
+
+Run comparisons on the same peer role and representative state, one variable at
+a time. Force a snapshot with completion waiting enabled, record start/end time,
+the two Hydra size gauges, `/fork_executor/fork_duration`, process CPU/RSS, and
+snapshot-device bytes/latency. Run at least three samples per configuration and
+compare medians; avoid mixing results from cells with substantially different
+chunk counts. Also confirm that the resulting build remains comfortably below
+`snapshot_build_timeout`. Schedule multicell experiments so that cells do not
+write to the same device simultaneously, otherwise storage contention can hide
+serialization gains.
+
 ## Administration
 
 ### Master snapshot and changelog storage rotation { #storage-rotation }
