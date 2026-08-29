@@ -1,10 +1,10 @@
-<!--
-Draft number: 7
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: user-guide/dynamic-tables
--->
+---
+type: Draft Article
+title: "Draft-7: Dynamic tables capacity planning and scaling"
+last_modified: 2026-05-27T00:00:00Z
+tags: [dynamic-tables, capacity-planning, scaling]
+status: draft
+---
 
 # Dynamic tables capacity planning and scaling
 

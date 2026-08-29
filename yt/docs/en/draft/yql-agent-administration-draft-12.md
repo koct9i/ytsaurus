@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-12: YQL-agent configuration and administration"
+last_modified: 2026-08-21T00:00:00Z
+tags: [yql-agent, configuration, administration]
+status: draft
+---
+
 # YQL-agent configuration and administration
 
 This page summarizes practical YQL-agent admin settings: base configuration, DQ, multicluster execution, Query Tracker integration, and caching.

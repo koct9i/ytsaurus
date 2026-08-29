@@ -1,11 +1,10 @@
-{% note info "Draft metadata" %}
-
-- **Draft number:** 18
-- **Author:** AI agent
-- **Created:** 2026-07-11
-- **Status:** In progress
-
-{% endnote %}
+---
+type: Draft Article
+title: "Draft-18: Data storage failure handling and recovery"
+last_modified: 2026-07-11T00:00:00Z
+tags: [data-storage, failure-recovery, operations]
+status: draft
+---
 
 # Data storage failure handling and recovery
 

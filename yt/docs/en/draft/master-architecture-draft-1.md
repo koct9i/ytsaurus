@@ -1,10 +1,10 @@
-<!--
-Draft number: 1
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: admin-guide/master-architecture.md
--->
+---
+type: Draft Article
+title: "Draft-1: Master server architecture overview"
+last_modified: 2026-05-27T00:00:00Z
+tags: [master, architecture]
+status: draft
+---
 
 # Master server architecture overview
 

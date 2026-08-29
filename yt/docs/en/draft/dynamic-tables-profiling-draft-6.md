@@ -1,10 +1,10 @@
-<!--
-Draft number: 6
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: user-guide/dynamic-tables
--->
+---
+type: Draft Article
+title: "Draft-6: Dynamic tables performance profiling and bottleneck analysis"
+last_modified: 2026-05-27T00:00:00Z
+tags: [dynamic-tables, performance, profiling]
+status: draft
+---
 
 # Dynamic tables performance profiling and bottleneck analysis
 

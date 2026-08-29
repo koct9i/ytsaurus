@@ -1,11 +1,12 @@
-# Tuning YT bus RPC service performance for data-node table I/O
+---
+type: Draft Article
+title: "Draft-14: Tuning YT bus RPC service performance for data-node table I/O"
+last_modified: 2026-06-06T00:00:00Z
+tags: [rpc, data-node, performance]
+status: draft
+---
 
-> **Draft metadata**
->
-> - **Draft number:** 14
-> - **Author:** AI agent (OpenAI GPT-5.5)
-> - **Created:** 2026-06-06
-> - **Status:** In progress; requires review by YT storage/RPC maintainers.
+# Tuning YT bus RPC service performance for data-node table I/O
 
 This page is a short checklist for tuning high-RPS native bus RPC traffic, with emphasis on **data node** read/write paths used by C++ table readers and writers. It is intentionally not exhaustive: use it to find the bottleneck stage and the first set of knobs to inspect.
 

@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-21: Configuring cross-cluster communication"
+last_modified: 2026-08-21T00:00:00Z
+tags: [cross-cluster, configuration, networking]
+status: draft
+---
+
 # Configuring cross-cluster communication
 
 {% note warning %}

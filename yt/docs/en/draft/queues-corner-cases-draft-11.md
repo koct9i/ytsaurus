@@ -1,10 +1,10 @@
-<!--
-Draft number: 11
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: user-guide/dynamic-tables/queues
--->
+---
+type: Draft Article
+title: "Draft-11: Queues — corner cases, performance analysis, and administration how-to"
+last_modified: 2026-05-27T00:00:00Z
+tags: [queues, dynamic-tables, operations]
+status: draft
+---
 
 # Queues — corner cases, performance analysis, and administration how-to
 

@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-23: CRI job execution environment setup"
+last_modified: 2026-08-21T00:00:00Z
+tags: [cri, job-environment, configuration]
+status: draft
+---
+
 # CRI job execution environment setup
 
 {% note info "Draft" %}

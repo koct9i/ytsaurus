@@ -1,6 +1,12 @@
-# Using tracing in YTsaurus server
+---
+type: Draft Article
+title: "Draft-19: Using tracing in YTsaurus server"
+last_modified: 2026-08-21T00:00:00Z
+tags: [tracing, observability, server]
+status: draft
+---
 
-Draft number: 19
+# Using tracing in YTsaurus server
 
 {% note warning "Draft" %}
 

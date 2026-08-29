@@ -1,10 +1,10 @@
-<!--
-Draft number: 4
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: admin-guide/master-architecture.md
--->
+---
+type: Draft Article
+title: "Draft-4: Master read request execution"
+last_modified: 2026-05-27T00:00:00Z
+tags: [master, reads, performance]
+status: draft
+---
 
 # Master read request execution
 
