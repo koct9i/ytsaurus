@@ -604,6 +604,8 @@ items:
          href: admin-guide/problems.md
        - name: Cell addition
          href: admin-guide/cell-addition.md
+       - name: Synthetic workload for master cell addition
+         href: admin-guide/master-cell-addition-workload.md
        - name: GPU support
          href: admin-guide/gpu.md
        - name: Users and groups synchronization
