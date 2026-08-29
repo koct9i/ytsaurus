@@ -1,10 +1,10 @@
-<!--
-Draft number: 2
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: admin-guide/master-architecture.md
--->
+---
+type: Draft Article
+title: "Draft-2: Master cell topology and inter-cell communication"
+last_modified: 2026-05-27T00:00:00Z
+tags: [master, architecture, multicell]
+status: draft
+---
 
 # Master cell topology and inter-cell communication
 

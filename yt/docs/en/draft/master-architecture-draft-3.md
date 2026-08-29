@@ -1,10 +1,10 @@
-<!--
-Draft number: 3
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: admin-guide/master-architecture.md
--->
+---
+type: Draft Article
+title: "Draft-3: Master transaction lifecycle and mutation pipeline"
+last_modified: 2026-05-27T00:00:00Z
+tags: [master, transactions, mutations]
+status: draft
+---
 
 # Master transaction lifecycle and mutation pipeline
 

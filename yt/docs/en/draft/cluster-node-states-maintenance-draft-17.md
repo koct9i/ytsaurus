@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-17: Cluster and node states, locks, and maintenance"
+last_modified: 2026-08-21T00:00:00Z
+tags: [cluster-nodes, maintenance, operations]
+status: draft
+---
+
 # Cluster and node states, locks, and maintenance
 
 This page is a compact operator cheat sheet for the most common cluster-wide switches, per-node flags, node lifecycle states, and the maintenance API. It is intentionally practical: use it to choose the smallest safe action before stopping, draining, isolating, or recovering cluster components.
