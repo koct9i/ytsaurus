@@ -1,10 +1,10 @@
-<!--
-Draft number: 13
-Author: AI agent (GitHub Copilot)
-Created: 2026-06-01
-Status: In progress
-Target: user-guide/storage/yson
--->
+---
+type: Draft Article
+title: "Draft-13: YSON formats and SDK guide"
+last_modified: 2026-06-01T00:00:00Z
+tags: [yson, formats, sdk]
+status: draft
+---
 
 # YSON formats and SDK guide
 

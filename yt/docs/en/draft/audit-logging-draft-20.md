@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-20: YTsaurus audit logging"
+last_modified: 2026-08-21T00:00:00Z
+tags: [audit-logging, security, operations]
+status: draft
+---
+
 # YTsaurus audit logging
 
 {% note warning "Draft" %}

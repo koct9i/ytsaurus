@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-0: About the Draft Category"
+last_modified: 2026-08-29T00:00:00Z
+tags: [documentation, drafts, okf]
+status: stable
+---
+
 # Draft-0: About the Draft Category
 
 ## Purpose
@@ -5,6 +13,8 @@
 The **Draft** category is a playground for writing and editing documentation articles, by developers, AI agents and contributors in early-stage exploration.
 
 Articles in this category are **work-in-progress**. Content may be temporarily inconsistent, incomplete, or inaccurate. Do not rely solely on draft articles for production decisions.
+
+The `yt/docs/en/draft` and `yt/docs/ru/draft` directories use the [Open Knowledge Format (OKF)][okf]. Every draft article must remain a conformant OKF concept document.[^okf-spec]
 
 ## Rules for Draft Articles
 
@@ -26,11 +36,16 @@ Articles in this category are **work-in-progress**. Content may be temporarily i
 
 9. **Review encouraged.** Anyone — human or AI — is encouraged to leave comments and suggest improvements on draft articles. Draft PRs benefit from lightweight review focused on factual correctness rather than style.
 
-10. **Metadata header.** Each draft article should begin or end with a short metadata block (in a comment or as a leading paragraph) noting: the draft number, the author or agent that created it, the creation date, and the current status (e.g., *in progress*, *ready for review*, *ready for graduation*).
+10. **Open Knowledge Format.** Every draft article must be a UTF-8 Markdown concept document with an OKF YAML frontmatter block at the very start of the file. The frontmatter must contain `type`, `title`, `last_modified`, `tags`, and `status`. Set `type: Draft Article`, format the title as `Draft-<number>: <human-friendly title>`, write `last_modified` as an ISO 8601 datetime with an explicit UTC offset, and set `status: draft`. Producer-defined frontmatter fields are allowed, but they must not replace these fields.
+
+11. **Metadata maintenance.** When an article changes meaningfully, update `last_modified` and keep its tags representative of the current content. Record reviews in `verified`, and use `stale_after` when the knowledge becomes unsafe to rely on after a known time. The YAML frontmatter is the authoritative metadata block; do not add a second, prose-only draft metadata block.
+
+12. **Links and reserved files.** Use standard Markdown links for relationships between draft concepts, preferably bundle-relative links where the documentation renderer supports them. Do not use the OKF-reserved filenames `index.md` or `log.md` for ordinary draft concepts; if those files are added, they must follow the OKF structures for indexes and logs.
 
 ## This Article
 
-- **Draft number:** 0
-- **Author:** AI agent (GitHub Copilot)
-- **Created:** 2026-05-27
-- **Status:** Final — this article is the permanent description of the Draft category and is not subject to graduation.
+Draft-0 is the permanent, stable reference for the Draft category and is not subject to graduation. Its OKF metadata therefore uses `status: stable`, as the sole exception to the `status: draft` rule for articles in these directories.
+
+[okf]: https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md
+
+[^okf-spec]: Open Knowledge Format specification, version 0.2 when this rule was adopted.

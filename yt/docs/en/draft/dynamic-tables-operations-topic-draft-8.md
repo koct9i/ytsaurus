@@ -1,10 +1,10 @@
-<!--
-Draft number: 8
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: user-guide/dynamic-tables
--->
+---
+type: Draft Article
+title: "Draft-8: Dynamic tables production operations overview"
+last_modified: 2026-05-27T00:00:00Z
+tags: [dynamic-tables, operations, administration]
+status: draft
+---
 
 # Dynamic tables production operations overview
 

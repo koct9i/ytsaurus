@@ -1,10 +1,10 @@
-<!--
-Draft number: 9
-Author: AI agent (GitHub Copilot)
-Created: 2026-05-27
-Status: In progress
-Target: user-guide/dynamic-tables
--->
+---
+type: Draft Article
+title: "Draft-9: Dynamic tables (sorted) — operational corner cases and administration notes"
+last_modified: 2026-05-27T00:00:00Z
+tags: [dynamic-tables, sorted-tables, operations]
+status: draft
+---
 
 # Dynamic tables (sorted) — operational corner cases and administration notes
 

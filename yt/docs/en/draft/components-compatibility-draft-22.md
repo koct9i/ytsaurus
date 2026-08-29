@@ -1,10 +1,10 @@
-<!--
-Draft number: 22
-Author: AI agent (OpenAI)
-Created: 2026-08-11
-Status: In progress
-Target: admin-guide/components-compatibility.md
--->
+---
+type: Draft Article
+title: "Draft-22: Component compatibility and persistent-state versions"
+last_modified: 2026-08-11T00:00:00Z
+tags: [compatibility, persistent-state, upgrades]
+status: draft
+---
 
 # Component compatibility and persistent-state versions
 
