@@ -1,10 +1,10 @@
-<!--
-Draft number: 16
-Author: AI agent (OpenAI)
-Created: 2026-06-10
-Status: In progress
-Target: user-guide/storage/cypress-local-filesystem-format
--->
+---
+type: Draft Article
+title: "Draft-16: Local filesystem representation of Cypress trees"
+last_modified: 2026-06-10T00:00:00Z
+tags: [cypress, filesystem, storage]
+status: draft
+---
 
 # Local filesystem representation of Cypress trees
 
