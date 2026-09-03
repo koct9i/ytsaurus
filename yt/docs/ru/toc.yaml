@@ -707,3 +707,7 @@ items:
         href: other/index.md
       - name: Выступления на мероприятиях, публикации и семинары
         href: other/video-posts.md
+  - name: Черновики
+    items:
+      - name: О черновиках (draft-0)
+        href: draft/draft-0.md
