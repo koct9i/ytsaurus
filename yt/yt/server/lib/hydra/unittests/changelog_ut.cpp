@@ -142,6 +142,19 @@ TEST_F(TChangelogTest, Truncate)
     CheckRecords(records, 0, NewRecordCount);
 }
 
+TEST_F(TChangelogTest, RemoveEvictsCachedChangelog)
+{
+    WaitFor(Changelog_->Close())
+        .ThrowOnError();
+    Changelog_.Reset();
+
+    WaitFor(ChangelogStore_->RemoveChangelog(/*id*/ 0))
+        .ThrowOnError();
+
+    Changelog_ = WaitFor(ChangelogStore_->CreateChangelog(/*id*/ 0, /*meta*/ {}))
+        .ValueOrThrow();
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 class TChangelogTestNoAutoFlush

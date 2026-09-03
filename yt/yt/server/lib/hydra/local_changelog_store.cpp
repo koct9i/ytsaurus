@@ -473,6 +473,7 @@ private:
 
         auto path = GetChangelogPath(Config_->Path, id);
         RemoveChangelogFiles(path);
+        TryRemove(id, /*forbidResurrection*/ true);
 
         YT_LOG_INFO("Local changelog removed (ChangelogId: %v, Epoch: %v)",
             id,
