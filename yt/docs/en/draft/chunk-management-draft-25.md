@@ -35,9 +35,11 @@ Three layers describe the same object:
   It creates read or write sessions and transfers blocks directly to Data Nodes.
 * A **Data Node** owns physical replicas in disk locations. It serves blocks,
   persists chunk metadata, reports replica changes, and executes master jobs.
-* The master **chunk server** owns the authoritative metadata object: type,
-  confirmation/sealing state, requisition, chunk-tree links, and the known set of
-  replicas. It does not carry user data in normal operation.
+* The master **chunk server** owns the authoritative control-plane metadata
+  object: type, confirmation/sealing state, requisition, chunk-tree links, and the
+  known set of replicas. It retains only a compact subset of the chunk's format
+  metadata; the complete read metadata lives with each physical replica. It does
+  not carry user data in normal operation.
 
 The master state is a replicated state-machine state. Chunk objects, chunk-tree
 links, requisitions, and registered replicas are **persistent** and change in
@@ -64,6 +66,71 @@ Two independent classifications are easy to confuse:
 Compression and table format (`optimize_for=scan` or `lookup`) are format choices,
 not additional chunk types. Likewise, a chunk's **vital** flag changes alerting
 and loss semantics, not its physical representation.
+
+### Where chunk metadata lives { #metadata-placement }
+
+`TChunkMeta` consists of three fixed fields—chunk **type**, **format**, and a
+**features** bit mask—plus a set of typed protobuf extensions. Confirmation does
+not copy that complete set into the master. Before `ConfirmChunk`, the writer
+filters the extensions to the master allowlist. This distinction keeps detailed,
+per-block metadata out of master memory while leaving enough summary information
+for chunk-tree traversal, accounting, placement, and scheduling.
+
+The **master stores persistently**:
+
+* the chunk ID/object kind and confirmation or journal-sealing state;
+* type, format, and feature bits;
+* `TMiscExt`, including aggregate row count, compressed and uncompressed sizes,
+  data weight, compression codec, largest data-block size, system-block count,
+  timestamps and flags relevant to the chunk;
+* `TBoundaryKeysExt` for pruning and validating sorted-table ranges;
+* `THunkChunkRefsExt` and `THunkChunkMiscExt`, which are needed to account for and
+  navigate hunk references;
+* `THeavyColumnStatisticsExt`, when produced;
+* the table schema as a separate master schema object/reference, rather than the
+  replica's serialized `TTableSchemaExt`;
+* control-plane state that is not part of `TChunkMeta`: disk-space charge,
+  erasure codec, read/write quorum and lag settings, requisition and replication,
+  parent chunk lists, exports, stored/last-seen replica descriptors, approved
+  replica count, placement state, and ally-replica endorsement state.
+
+Several frequently read `TMiscExt` values are also extracted into fields on the
+master chunk object. This is an access and memory-layout optimization; the values
+still originate in the metadata supplied at confirmation (or in later journal
+seal information).
+
+Each **Data Node replica stores the complete blob chunk metadata** beside the
+chunk data (commonly in a metadata sidecar) and serves it via `GetChunkMeta`.
+Depending on the chunk format, node-side-only extensions include:
+
+* `TBlocksExt`, with physical block sizes, checksums, and offsets;
+* erasure and striped-erasure placement information;
+* table data-block metadata and indexes, name tables, column metadata and column
+  groups, samples, partitions, key-column information, row digests, and other
+  format-specific read structures;
+* the serialized table-schema extension used by readers, detailed columnar
+  statistics not included in the master allowlist, hunk metas, system-block
+  metadata, compression-dictionary metadata, and future extensions that readers
+  understand but the master does not need.
+
+Thus the master can answer discovery and coarse range-planning requests, but it
+cannot by itself decode table rows or locate and verify arbitrary blocks. A
+reader gets the detailed metadata from a chosen Data Node (and may cache it) before
+performing format-specific reads. For blob chunks, all healthy replicas are
+expected to carry equivalent immutable metadata. Journal metadata is different:
+while a journal is active, a Data Node derives its current `TMiscExt`—notably
+flushed row count, byte size, and sealing state—from the local changelog, so
+replicas can temporarily report different progress. The master keeps the agreed
+logical summary and finalizes it during sealing.
+
+{% note info "Terminology" %}
+
+"The master stores chunk metadata" therefore means that it stores the compact
+control-plane projection above. It does **not** mean that the master is a fallback
+repository for the complete replica metadata file. Losing every replica also
+loses the detailed format metadata required to read the chunk.
+
+{% endnote %}
 
 ## Chunk types { #types }
 
