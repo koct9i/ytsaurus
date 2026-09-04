@@ -82,11 +82,11 @@ Byte counts are used in these examples. The effective total tracker limit is:
 effective total = detected/configured instance memory - free_memory_watermark
 ```
 
-`total_memory` is the static fallback, but an instance-limit tracker can replace the current total with the container/runtime limit. `free_memory_watermark` is reserved before the total is passed to the memory tracker.
+`total_memory` is the static fallback, but an instance-limit tracker can replace the current total with the container/runtime limit. Normally, `free_memory_watermark` is subtracted before the total is passed to the memory tracker. If the watermark is greater than the detected total, the node logs a warning and does not subtract it.
 
 Each entry in `memory_limits` has one of three types:
 
-- `static`: reserve the explicit `value`; `value` is mandatory;
+- `static`: use the explicit `value` as the category ceiling; `value` is mandatory, and the value is deducted when calculating the dynamic remainder;
 - `dynamic`: take an equal share of the memory left after the watermark and all non-dynamic category amounts;
 - `none`: do not actively set a limit for this category. For dynamic-budget calculation, its existing explicit tracker limit is used, or current usage if no explicit limit exists.
 
@@ -110,10 +110,12 @@ resource_limits = {
 
 For each category independently, the effective source is, from highest to lowest priority:
 
-1. bundle dynamic memory limit, when the bundle configuration supplies one;
+1. bundle dynamic memory limit, when the bundle configuration supplies one for `tablet_static`, `tablet_dynamic`, `lookup_rows_cache`, or `query`;
 2. cluster-node dynamic `resource_limits.memory_limits[category]`;
 3. cluster-node static `resource_limits.memory_limits[category]`;
 4. the `none` behavior when no usable entry exists.
+
+Bundle dynamic configuration uses plain byte values, which become `static` category limits. The bundle keys are `tablet_static`, `tablet_dynamic`, `lookup_row_cache`, and `query`; note that `lookup_row_cache` is singular in the bundle configuration but maps to the `lookup_rows_cache` tracker category. Cache-capacity settings such as `compressed_block_cache` also exist in the bundle configuration, but they reconfigure the corresponding caches instead of adding category entries to this precedence chain.
 
 This per-category fallback matters: providing one dynamic entry does not erase all static entries. The dynamic `free_memory_watermark`, when present, replaces the static watermark.
 
@@ -169,20 +171,22 @@ api = {
 };
 ```
 
-The tracker total is `base × total_memory_limit_ratio`, while the `heavy_request` category limit is `base × heavy_request_memory_limit_ratio`. Ratios are in `[0, 1]`. Settings selected for the proxy's role override fields from `default_memory_limit_ratios`; per-user ratios create a further request pool within `heavy_request`. Thus an individual request must fit the tracker total, the heavy-request category, and its user's pool.
+The tracker total is `base × total_memory_limit_ratio`, while the `heavy_request` category limit is `base × heavy_request_memory_limit_ratio`. Ratios are in `[0, 1]`. If `role_to_memory_limit_ratios` has an entry for the proxy's role, that whole ratio object is selected instead of `default_memory_limit_ratios` for the total and heavy-request calculations; it is not a field-by-field patch. Missing fields in that object receive their schema defaults.
+
+User-pool selection is slightly different. The proxy first reads the default ratio object and then applies a matching role object's `default_user_memory_limit_ratio` and `user_to_memory_limit_ratio` entries. A user-specific value wins over the default-user value at each layer. Thus an individual heavy request must fit the tracker total, the heavy-request category, and its user's pool.
 
 ### Tracker behavior shared by nodes and proxies
 
-Dynamic `memory_tracker` settings tune the common implementation:
+Dynamic tracker settings tune the common implementation. The field is named `node_memory_tracker` in cluster-node dynamic configuration and `memory_tracker` in HTTP/RPC proxy dynamic configuration:
 
 ```yson
-memory_tracker = {
+node_memory_tracker = {
     check_per_category_limit_overcommit = false;
     system_categories_update_period = 1s;
 };
 ```
 
-`system_categories_update_period` controls reconciliation of system categories. `check_per_category_limit_overcommit` enables stricter validation when category limits are configured; leave it at the version's default unless you understand whether the configured category limits are intended as overlapping ceilings or a partition of the total.
+For a proxy, use the same map under the `memory_tracker` key. `system_categories_update_period` controls reconciliation of system categories. For unconditional `Acquire` calls, `check_per_category_limit_overcommit` makes the tracker report a category overcommit (return `false` and log a warning) after accounting the allocation, even when total memory remains; it does not roll the allocation back. Conditional `TryAcquire` calls check the applicable total, category, and pool limits before accounting memory regardless of this option. Leave the option at the version's default unless callers are prepared to react to the overcommit result. On a cluster node, the option is forced off unless the job-resource manager is also configured to check the user-jobs category during resource updates.
 
 ## Observing and changing limits safely
 
