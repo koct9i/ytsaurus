@@ -42,11 +42,14 @@ Three layers describe the same object:
   not carry user data in normal operation.
 
 The master state is a replicated state-machine state. Chunk objects, chunk-tree
-links, requisitions, and registered replicas are **persistent** and change in
-Hydra mutations. Refresh queues, placement indexes, job queues, and running jobs
-are **transient**; after leadership change or restart they are rebuilt from the
-persistent state. Correctness therefore cannot depend on a transient job running
-exactly once. Every operation is reconciled again from observed state.
+links, requisitions, and master-resident registered replicas are **persistent**
+and change in Hydra mutations. Some deployments externalize a configured share
+of replica records to Sequoia instead; the chunk server fetches and reconciles
+those records rather than embedding them in each master chunk object. Refresh
+queues, placement indexes, job queues, and running jobs are **transient**; after
+leadership change or restart they are rebuilt from persistent metadata.
+Correctness therefore cannot depend on a transient job running exactly once.
+Every operation is reconciled again from observed state.
 
 ### IDs, chunks, parts, and replicas
 
@@ -91,8 +94,10 @@ The **master stores persistently**:
   replica's serialized `TTableSchemaExt`;
 * control-plane state that is not part of `TChunkMeta`: disk-space charge,
   erasure codec, read/write quorum and lag settings, requisition and replication,
-  parent chunk lists, exports, stored/last-seen replica descriptors, approved
-  replica count, placement state, and ally-replica endorsement state.
+  parent chunk lists, exports, last-seen replica descriptors, placement state, and
+  ally-replica endorsement state. Stored and approved replica records live here
+  in the classic representation, or in Sequoia when that representation is
+  enabled for the chunk.
 
 Several frequently read `TMiscExt` values are also extracted into fields on the
 master chunk object. This is an access and memory-layout optimization; the values
@@ -401,9 +406,13 @@ replica directory and revision to the response. The client can update its cache
 without another master round trip, reducing master load and improving retry
 latency.
 
-The master sends replica-announcement requests in full or incremental heartbeat
-responses. The receiving node stores the directory in its ally-replica manager
-and can gossip/forward announcements as requested. Announcements may be:
+The master does not send the directory separately to every replica. It places a
+replica-announcement request in a full or incremental heartbeat response to one
+Data Node. That seed node stores the directory in its ally-replica manager and
+fans the revisioned announcement out directly to the other nodes named in the
+directory. A recipient retains the announcement only if it actually stores the
+chunk (or the relevant erasure part), and ignores a revision older than the one it
+already knows. Announcements may be:
 
 * immediate for stable, exactly replicated chunks;
 * delayed for under-replicated chunks, allowing placement to settle;
@@ -412,16 +421,21 @@ and can gossip/forward announcements as requested. Announcements may be:
 This cache is eventually consistent. Correct readers must still tolerate a dead
 suggested replica and retry or refresh from the master.
 
-An **endorsement** closes the reliability loop. When the replica set changes, the
-master marks the chunk as requiring an endorsed announcement and assigns one
-surviving location (deterministically, currently the greatest suitable location
-ID) to carry it. The announcement includes `confirmation_needed` and a master
-revision. The node later returns an unconfirmed/confirmation record in its
-heartbeat; the master removes the endorsement only after the matching or newer
-revision is acknowledged. If the chosen location disappears or the replica set
-changes again, the endorsement is discarded/reassigned and resent. Thus at least
-one current replica is made responsible for propagating the authoritative ally
-set without assuming that a one-shot heartbeat response was delivered.
+An **endorsement** closes the master-to-seed delivery loop. When the replica set
+changes, the master marks the chunk as requiring an endorsed announcement and
+assigns one surviving location (deterministically, currently the greatest
+suitable location ID) to carry it. The announcement includes
+`confirmation_needed` and a master revision. On accepting that request, the seed
+node queues the chunk ID and revision for confirmation in a following heartbeat;
+the master removes the endorsement only after the matching or newer revision is
+acknowledged. If the chosen location disappears or the replica set changes again,
+the endorsement is discarded or reassigned and resent.
+
+An endorsement proves that a designated seed accepted the current directory; it
+does not synchronously prove that every peer received the fan-out. Peer delivery
+remains eventually consistent and revision guarded. This is sufficient because
+ally information is only a read-retry optimization: the master replica directory
+and ordinary reader fallback remain authoritative.
 
 Chunks with one non-erasure replica need no ally directory. Endorsements apply to
 blob chunks; journal availability follows its own quorum and sealing machinery.
