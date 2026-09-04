@@ -1,12 +1,12 @@
 ---
 type: Draft Article
-title: "Draft-24: Cluster node and proxy resource management: memory"
+title: "Draft-24: Cluster node and proxy memory management"
 last_modified: 2026-09-04T00:00:00Z
 tags: [administration, cluster-node, proxy, memory]
 status: draft
 ---
 
-# Cluster node and proxy resource management: memory
+# Cluster node and proxy memory management
 
 {% note warning "Draft" %}
 
