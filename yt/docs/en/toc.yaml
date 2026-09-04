@@ -726,3 +726,5 @@ items:
           href: draft/exec-node-cri-job-environment-draft-23.md
         - name: Cluster node and proxy memory management (draft-24)
           href: draft/cluster-resource-management-memory-draft-24.md
+        - name: Chunk management architecture (draft-25)
+          href: draft/chunk-management-draft-25.md
