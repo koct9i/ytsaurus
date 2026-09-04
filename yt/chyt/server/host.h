@@ -3,7 +3,7 @@
 #include "cluster_nodes.h"
 #include "private.h"
 #include "config.h"
-#include "cypress_config_repository.h"
+#include "cypress_object_repository.h"
 
 #include <yt/yt/ytlib/api/native/public.h>
 
@@ -22,6 +22,10 @@
 #include <string>
 
 namespace NYT::NClickHouseServer {
+
+////////////////////////////////////////////////////////////////////////////////
+
+using TDiscoveryNodes = THashMap<std::string, NYTree::IAttributeDictionaryPtr>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -111,9 +115,14 @@ public:
     //! (e.g. the instance is in 'interrupting' state or not started yet).
     //! |alwaysIncludeLocal| controls the behavior in such cases.
     TClusterNodes GetNodes(bool alwaysIncludeLocal = false) const;
+    TDiscoveryNodes GetDiscoveryNodes() const;
     IClusterNodePtr GetLocalNode() const;
 
     int GetInstanceCookie() const;
+
+    //! Returns |true| if this instance currently holds the per-clique leader lock,
+    //! or if the election is not configured (in which case it always returns |true|).
+    bool IsLeader() const;
 
     const NChunkClient::IMultiReaderMemoryManagerPtr& GetMultiReaderMemoryManager() const;
 
@@ -130,10 +139,6 @@ public:
     TFuture<void> GetIdleFuture() const;
 
     void PopulateSystemDatabase(DB::IDatabase* systemDatabase) const;
-    DB::DatabasePtr CreateYTDatabase() const;
-
-    //! Create rooted databases using names and rootes specified in the yt-config by user.
-    std::vector<DB::DatabasePtr> CreateUserDefinedDatabases() const;
 
     std::vector<TString> GetUserDefinedDatabaseNames() const;
 
@@ -153,7 +158,11 @@ public:
 
     void ReloadDictionaryGlobally(const std::string& configPath) const;
 
-    TCypressDictionaryConfigRepositoryPtr GetCypressDictionaryConfigRepository();
+    TCypressObjectRepositoryPtr GetCypressObjectRepository() const;
+
+    TMaterializedViewCoordinatorPtr GetMaterializedViewCoordinator() const;
+
+    void RefreshCypressObjectRepositoryGlobally() const;
 
     void PrepareClickHouseUser(const std::string& userName);
 

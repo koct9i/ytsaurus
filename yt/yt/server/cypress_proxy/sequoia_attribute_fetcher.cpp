@@ -12,8 +12,6 @@
 
 #include <yt/yt/ytlib/api/native/connection.h>
 
-#include <yt/yt/ytlib/cypress_client/rpc_helpers.h>
-
 #include <yt/yt/core/ytree/attribute_filter.h>
 #include <yt/yt/core/ytree/ypath_proxy.h>
 
@@ -911,8 +909,6 @@ private:
         if (auto attributeFilter = AttributeRequest_.GetBaseAttributeFilter(scope)) {
             ToProto(req->mutable_attributes(), attributeFilter);
         }
-        SetSuppressAccessTracking(req, true);
-        SetSuppressExpirationTimeoutRenewal(req, true);
         return SequoiaSession_->CreateGetBatcher(req, nodeIds, scope);
     }
 
@@ -938,7 +934,7 @@ private:
                 if (auto error = WrapRetriableResolveError(rspOrError, nodeId); error.IsOK()) {
                     // Not a resolve error. Pass it through.
                     THROW_ERROR_EXCEPTION("Error getting requested information from master")
-                        << rspOrError;
+                        .With(rspOrError);
                 }
 
                 // A race on a nested node should lead to that node being omitted silently.

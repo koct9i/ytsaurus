@@ -285,7 +285,8 @@ protected:
         }
 
         if (execve(ExeName.c_str(), ExecArgs.data(), ExecEnv.data()) == -1) {
-            ythrow TSystemError() << "Cannot execl";
+            YQL_CLOG(ERROR, ProviderDq) << "Cannot execve: " << ExeName << ", args: " << JoinSeq(',', Args);
+            ythrow TSystemError() << "Cannot execve: " << ExeName;
         }
     }
 };
@@ -521,7 +522,8 @@ private:
         }
 
         if (execvp(PortoCtl.c_str(), ExecArgs.data()) == -1) {
-            ythrow TSystemError() << "Cannot execl";
+            YQL_CLOG(ERROR, ProviderDq) << "Cannot execvp: " << PortoCtl << ", args: " << JoinSeq(',', ArgsElems);
+            ythrow TSystemError() << "Cannot execvp: " << PortoCtl;
         }
     }
 
@@ -764,22 +766,6 @@ public:
         return false;
     }
 
-    void PauseByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void AddWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void ResumeByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    bool IsPausedByWatermark() const override {
-        return false;
-    }
-
     template<typename T>
     void FromProto(const T& f)
     {
@@ -939,22 +925,6 @@ public:
     }
 
     bool IsPausedByCheckpoint() const override {
-        return false;
-    }
-
-    void PauseByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void AddWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void ResumeByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    bool IsPausedByWatermark() const override {
         return false;
     }
 
@@ -1779,11 +1749,16 @@ public:
         return "";
     }
 
-    void Prepare(const TDqTaskSettings& task, const TDqTaskRunnerMemoryLimits& memoryLimits,
-        const IDqTaskRunnerExecutionContext& execCtx, TDqComputeActorWatermarks* watermarksTracker) override
-    {
+    void Prepare(
+        const TDqTaskSettings& task,
+        const TDqTaskRunnerMemoryLimits& memoryLimits,
+        const IDqTaskRunnerExecutionContext& execCtx,
+        TDqComputeActorWatermarks* watermarksTracker,
+        TDqWatermarkGeneratorTracker* sourceWatermarksTracker
+    ) override {
         Y_UNUSED(execCtx);
         Y_UNUSED(watermarksTracker);
+        Y_UNUSED(sourceWatermarksTracker);
         Y_ABORT_UNLESS(Task.GetId() == task.GetId());
         try {
             auto result = Delegate->Prepare(memoryLimits);
@@ -1952,6 +1927,14 @@ public:
             // Stats.CodeGenFinalizeTime = f.GetCodeGenFinalizeTime();
             // Stats.CodeGenModulePassTime = f.GetCodeGenModulePassTime();
 
+            Stats.MkqlStats.clear();
+            for (const auto& stat : protoStats.GetMkqlStats()) {
+                Stats.MkqlStats.emplace_back(TMkqlStat{
+                    TStatKey(stat.GetName(), stat.GetDeriv()),
+                    stat.GetValue()
+                });
+            }
+
             for (const auto& input : protoStats.GetInputChannels()) {
                 InputChannels[input.GetChannelId()]->FromProto(input);
             }
@@ -2116,20 +2099,20 @@ private:
         task.GetMeta().UnpackTo(&taskMeta);
 
         auto* files = taskMeta.MutableFiles();
-
+        YQL_CLOG(TRACE, ProviderDq) << "PrepareTask: files " << files->size();
         for (auto& file : *files) {
             if (file.GetObjectType() != Yql::DqsProto::TFile::EEXE_FILE) {
                 auto maybeFile = FileCache->AcquireFile(file.GetObjectId());
                 if (!maybeFile) {
-                    throw std::runtime_error("Cannot find object `" + file.GetObjectId() + "' in cache");
+                    throw std::runtime_error("Cannot find object `" + file.GetObjectId() + "` in cache");
                 }
                 filesHolder->Add(file.GetObjectId());
                 auto name = file.GetName();
-
                 switch (file.GetObjectType()) {
                     case Yql::DqsProto::TFile::EUDF_FILE:
                     case Yql::DqsProto::TFile::EUSER_FILE:
                         file.SetLocalPath(InitializeLocalFile(result->ExternalWorkDir(), *maybeFile, name));
+                        YQL_CLOG(TRACE, ProviderDq) << "PrepareTask: Add file.SetLocalPath: " << name << ", local path: " << file.GetLocalPath();
                         break;
                     default:
                         Y_ABORT_UNLESS(false);

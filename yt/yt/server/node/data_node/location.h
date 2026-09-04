@@ -59,7 +59,6 @@ struct TLocationPerformanceCounters
     TEnumIndexedArray<EIODirection, TEnumIndexedArray<EIOCategory, NProfiling::TCounter>> CompletedIOSize;
 
     TEnumIndexedArray<EIODirection, TEnumIndexedArray<EIOCategory, std::atomic<i64>>> UsedMemory;
-    TEnumIndexedArray<EIODirection, TEnumIndexedArray<EIOCategory, std::atomic<i64>>> LegacyUsedMemory;
 
     NProfiling::TCounter ThrottledReplicationReads;
     NProfiling::TCounter ThrottledProbingReads;
@@ -130,7 +129,6 @@ public:
     void Release() noexcept;
 
     i64 GetSize() const;
-    bool GetUseLegacyUsedMemory() const;
     TChunkLocationPtr GetOwner() const;
 
     void IncreaseSize(i64 delta);
@@ -143,10 +141,8 @@ public:
 private:
     friend class TChunkLocation;
 
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
     TLocationMemoryGuard(
         TMemoryUsageTrackerGuard memoryGuard,
-        bool useLegacyUsedMemory,
         EIODirection direction,
         EIOCategory category,
         i64 size,
@@ -155,8 +151,6 @@ private:
     void MoveFrom(TLocationMemoryGuard&& other) noexcept;
 
     TMemoryUsageTrackerGuard MemoryGuard_;
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
-    bool UseLegacyUsedMemory_ = false;
     EIODirection Direction_;
     EIOCategory Category_;
     i64 Size_ = 0;
@@ -194,6 +188,9 @@ public:
     //! Returns the medium name.
     std::string GetMediumName() const;
 
+    //! Returns the medium index.
+    int GetMediumIndex() const;
+
     //! Returns the medium descriptor.
     NChunkClient::TMediumDescriptorPtr GetMediumDescriptor() const;
 
@@ -214,37 +211,25 @@ public:
     const IMemoryUsageTrackerPtr& GetWriteMemoryTracker() const;
 
     //! Returns the max number of used memory across workloads.
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
-    i64 GetMaxUsedMemory(
-        bool useLegacyUsedMemory,
-        EIODirection direction) const;
+    i64 GetMaxUsedMemory(EIODirection direction) const;
 
     //! Returns the number of used memory.
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
     i64 GetUsedMemory(
-        bool useLegacyUsedMemory,
         EIODirection direction,
         const TWorkloadDescriptor& workloadDescriptor) const;
 
     //! Returns total amount of used memory in given #direction.
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
-    i64 GetUsedMemory(
-        bool useLegacyUsedMemory,
-        EIODirection direction) const;
+    i64 GetUsedMemory(EIODirection direction) const;
 
     //! Acquires a lock memory for the given number of bytes to be read or written.
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
     TLocationMemoryGuard AcquireLocationMemory(
-        bool useLegacyUsedMemory,
         TMemoryUsageTrackerGuard memoryGuard,
         EIODirection direction,
         const TWorkloadDescriptor& workloadDescriptor,
         i64 delta);
 
     //! Acquires a lock memory for the given number of bytes to be read or written if possible.
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
     TErrorOr<TLocationMemoryGuard> TryAcquireLocationMemory(
-        bool useLegacyUsedMemory,
         EIODirection direction,
         const TWorkloadDescriptor& workloadDescriptor,
         i64 delta);
@@ -316,11 +301,17 @@ public:
 
     double GetFairShareWorkloadCategoryWeight(EWorkloadCategory category) const;
 
+    std::vector<std::pair<std::string, double>> BuildFairShareTags(
+        EWorkloadCategory category,
+        const std::optional<NIO::TIOFairShareState>& fairShareState) const;
+
     //! Push supplier to the queue.
     void PushProbePutBlocksRequestSupplier(const TProbePutBlocksRequestSupplierPtr& supplier);
 
     //! Try to acquire memory for top requests.
     void CheckProbePutBlocksRequests();
+
+    void RemoveProbePutBlocksRequestSupplier(const TProbePutBlocksRequestSupplierPtr& supplier);
 
     //! Calc sum of all requested memory passeed to AcquireProbePutBlocks.
     i64 GetRequestedMemory() const;
@@ -340,13 +331,12 @@ protected:
 private:
     friend class TLocationMemoryGuard;
     friend class TPendingIOGuard;
-    friend class TLockedChunkGuard;
+    friend class NNode::TLockedChunkGuard;
 
     TAtomicPtr<TChunkLocationConfig, /*EnableAcquireHazard*/ true> RuntimeConfig_;
 
     TLocationPerformanceCountersPtr PerformanceCounters_;
 
-    // TODO(vvshlyaga): Change to fair share queue.
     YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, ProbePutBlocksRequestsLock_);
     std::deque<TProbePutBlocksRequestSupplierPtr> ProbePutBlocksRequests_;
     THashSet<TSessionId> ProbePutBlocksSessionIds_;
@@ -354,7 +344,6 @@ private:
     const IMemoryUsageTrackerPtr ReadMemoryTracker_;
     const IMemoryUsageTrackerPtr WriteMemoryTracker_;
 
-    TChunkLocationUuid Uuid_;
     TChunkLocationIndex Index_ = NNodeTrackerClient::InvalidChunkLocationIndex;
 
     TAtomicIntrusivePtr<NChunkClient::TMediumDescriptor> MediumDescriptor_;
@@ -378,14 +367,13 @@ private:
     THazardPtr<TChunkLocationConfig> GetRuntimeConfig() const;
 
     void DoCheckProbePutBlocksRequests();
+    void DoCheckFifoProbePutBlocksRequests();
+    void DoCheckFairShareProbePutBlocksRequests();
     bool ContainsProbePutBlocksRequestSupplier(const TProbePutBlocksRequestSupplierPtr& supplier) const;
 
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
-    void IncreaseUsedMemory(bool useLegacyUsedMemory, EIODirection direction, EIOCategory category, i64 delta);
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
-    void DecreaseUsedMemory(bool useLegacyUsedMemory, EIODirection direction, EIOCategory category, i64 delta);
-    // TODO(vvshlyaga): Remove flag useLegacyUsedMemory after rolling writer with probing on all nodes.
-    void UpdateUsedMemory(bool useLegacyUsedMemory, EIODirection direction, EIOCategory category, i64 delta);
+    void IncreaseUsedMemory(EIODirection direction, EIOCategory category, i64 delta);
+    void DecreaseUsedMemory(EIODirection direction, EIOCategory category, i64 delta);
+    void UpdateUsedMemory(EIODirection direction, EIOCategory category, i64 delta);
 
     void UpdateMediumTag();
 

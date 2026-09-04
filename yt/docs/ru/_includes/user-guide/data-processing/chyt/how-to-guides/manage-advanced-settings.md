@@ -28,7 +28,7 @@
 
     1. В [документации {{clickhouse}}](https://clickhouse.com/docs/ru/operations/settings/settings) найдите нужные настройки и скопируйте их названия.
     1. Откройте интерфейс клики, как описано в разделе [Как перейти в интерфейс клики](../../../../../user-guide/data-processing/chyt/cliques/ui.md#where).
-    1. Нажмите кнопку ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
+    1. Нажмите ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в правом верхнем углу, в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или кнопку **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
     1. Выберите слева раздел **Advanced**.
     1. Найдите раздел **Query settings**.
     1. В поле *Use JSON syntax* введите параметры и их значения в JSON-синтаксисе, в виде пар `ключ: значение`, заключённых в фигурные скобки `{ }`. Например:
@@ -152,10 +152,10 @@
 - Веб-интерфейс
 
     1. Откройте интерфейс клики, как описано в разделе [Как перейти в интерфейс клики](../../../../../user-guide/data-processing/chyt/cliques/ui.md#where).
-    1. Нажмите кнопку ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
+    1. Нажмите ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в правом верхнем углу, в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или кнопку **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
     1. Выберите слева раздел **Advanced**.
     1. Найдите раздел **Clickhouse config**.
-    1. В поле *Use JSON syntax* введите параметры и их значения в виде JSON конфигурации.
+    1. В поле *Use JSON syntax* введите параметры и их значения в виде JSON-конфигурации.
         Пример конфигурации простого словаря и установки [**Query settings**](#query-settings) в `settings` части:
 
         ```json
@@ -234,10 +234,10 @@ YT-часть конфигурации инстанса задаётся в оп
 - Веб-интерфейс
 
     1. Откройте интерфейс клики, как описано в разделе [Как перейти в интерфейс клики](../../../../../user-guide/data-processing/chyt/cliques/ui.md#where).
-    1. Нажмите кнопку ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
+    1. Нажмите ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в правом верхнем углу, в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или кнопку **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
     1. Выберите слева раздел **Advanced**.
     1. Найдите раздел **YT config**.
-    1. В поле *Use JSON syntax* введите параметры и их значения в виде JSON конфигурации, например:
+    1. В поле *Use JSON syntax* введите параметры и их значения в виде JSON-конфигурации, например:
 
         ```json
         {
@@ -349,10 +349,10 @@ YT-часть конфигурации инстанса задаётся в оп
 Рекомендуем использовать веб-интерфейс:
 
 1. Откройте интерфейс клики, как описано в разделе [Как перейти в интерфейс клики](../../../../../user-guide/data-processing/chyt/cliques/ui.md#where).
-1. Нажмите кнопку ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
+1. Нажмите ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в правом верхнем углу, в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или кнопку **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
 1. Выберите слева раздел **Advanced**.
 1. Найдите раздел **Instance memory**.
-1. В поле *Use JSON syntax* введите параметры и их значения в виде JSON конфигурации. В качестве шаблона можно использовать пример конфигурации:
+1. В поле *Use JSON syntax* введите параметры и их значения в виде JSON-конфигурации. В качестве шаблона можно использовать пример конфигурации:
 
     ```json
     {
@@ -370,6 +370,8 @@ YT-часть конфигурации инстанса задаётся в оп
 
 1. Чтобы применить изменения, нажмите кнопку **Confirm**.
 
+{% include [memory-usage-warning](./_includes/memory-usage-warning.md) %}
+
 ## Sticky query distribution { #sticky-query }
 
 Продвинутые опции **Enable sticky query distribution** и **Query sticky group size** управляют распределением запросов по инстансам с учётом кеширования.
@@ -386,7 +388,7 @@ YT-часть конфигурации инстанса задаётся в оп
 Рекомендуем использовать веб-интерфейс:
 
 1. Откройте интерфейс клики, как описано в разделе [Как перейти в интерфейс клики](../../../../../user-guide/data-processing/chyt/cliques/ui.md#where).
-1. Нажмите кнопку ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
+1. Нажмите ![edit speclet](../../../../../../images/edit-btn.png){width=24 height=24} в правом верхнем углу, в блоке [Кнопки действий](../../../../../user-guide/data-processing/chyt/cliques/ui.md#action-menu) или кнопку **Edit speclet** на вкладке **Speclet** на [Панели вкладок](../../../../../user-guide/data-processing/chyt/cliques/ui.md#tabs).
 1. Выберите слева раздел **Advanced**.
 1. Найдите опцию **Enable sticky query distribution** и включите её.
 1. Найдите опцию **Query sticky group size** и в поле введите число — размер группы инстансов. Запрос будет случайно направлен координатором на один из инстансов группы.

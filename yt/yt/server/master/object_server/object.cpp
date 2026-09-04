@@ -1,5 +1,6 @@
 #include "object.h"
 
+#include "helpers.h"
 #include "garbage_collector.h"
 #include "object.h"
 #include "object_manager.h"
@@ -10,6 +11,8 @@
 #include <yt/yt/server/master/cell_master/hydra_facade.h>
 
 #include <yt/yt/server/master/cypress_server/node.h>
+
+#include <yt/yt/server/master/sequoia_server/revision.h>
 
 #include <yt/yt/server/lib/hive/hive_manager.h>
 
@@ -125,8 +128,8 @@ void ValidateCreatedObjectsRefs(TThreadState* threadState)
             !garbageCollector->IsRegisteredZombie(object) &&
             !garbageCollector->IsEphemeralGhost(object))
         {
-            YT_LOG_ALERT("Object leak detected (ObjectId: %v)",
-                object->GetId());
+            YT_TLOG_ALERT("Object leak detected")
+                .With("ObjectId", object->GetId());
         }
     }
 }
@@ -189,9 +192,8 @@ bool IsObjectActive(const TObject* object)
 
 void ValidateObjectActive(const TObject* object)
 {
-    YT_LOG_ALERT_AND_THROW_UNLESS(IsObjectAlive(object),
-        "Object is not alive while validating its life stage (ObjectId: %v)",
-        GetObjectId(object));
+    YT_TLOG_ALERT_AND_THROW_UNLESS(IsObjectAlive(object), "Object is not alive while validating its life stage")
+        .With("ObjectId", GetObjectId(object));
 
     if (!IsObjectActive(object)) {
         THROW_ERROR_EXCEPTION(
@@ -261,6 +263,34 @@ YT_PREVENT_TLS_CACHING TRopSanTag TObject::GenerateRopSanTag()
 }
 
 #endif
+
+TRevision TObject::GetAttributeRevision() const
+{
+    return AttributeRevision_;
+}
+
+TRevision TObject::GetContentRevision() const
+{
+    return ContentRevision_;
+}
+
+void TObject::SetAttributeRevision(TRevision revision)
+{
+    YT_TLOG_ALERT_IF(AttributeRevision_ > revision, "Trying to set stale attribute revision")
+        .With("NodeId", Id_)
+        .With("ObjectAttributeRevision", AttributeRevision_)
+        .With("NewRevision", revision);
+    AttributeRevision_ = revision;
+}
+
+void TObject::SetContentRevision(TRevision revision)
+{
+    YT_TLOG_ALERT_IF(ContentRevision_ > revision, "Trying to set stale content revision")
+        .With("NodeId", Id_)
+        .With("ObjectContentRevision", ContentRevision_)
+        .With("NewRevision", revision);
+    ContentRevision_ = revision;
+}
 
 TCellTag TObject::GetNativeCellTag() const
 {
@@ -354,15 +384,41 @@ void TObject::SetModified(EModificationType modificationType)
     YT_VERIFY(hydraContext);
     auto currentRevision = hydraContext->GetVersion().ToRevision();
 
+    if (IsNativeSequoiaNode(this)) {
+        if (auto sequoiaRevision = GetCurrentSequoiaRevision()) {
+            bool postponed = false;
+            Visit(*sequoiaRevision,
+                [&] (const TSequoiaRevisionPrepare& prepareRevision) {
+                    prepareRevision.PrepareNodeModification(As<TCypressNode>()->GetVersionedId(), modificationType);
+                    postponed = true;
+                },
+                [&] (const TSequoiaRevisionCommit& commitRevision) {
+                    currentRevision = commitRevision.Revision;
+                },
+                [] (TSequoiaRevisionDisabled /*disabled*/) { });
+            if (postponed) {
+                return;
+            }
+        } else {
+            YT_TLOG_ALERT("Changing revision of Sequoia node outside of Sequoia revision context")
+                .With("NodeId", As<TCypressNode>()->GetVersionedId());
+        }
+    }
+
+    YT_TLOG_TRACE("Setting revision")
+        .With("NodeId", Id_)
+        .With("Revision", currentRevision)
+        .With("Type", modificationType);
+
     switch (modificationType) {
-        case EModificationType::Attributes: {
-            AttributeRevision_ = currentRevision;
+        case EModificationType::Attributes:
+            SetAttributeRevision(currentRevision);
             break;
-        }
-        case EModificationType::Content: {
-            ContentRevision_ = currentRevision;
+
+        case EModificationType::Content:
+            SetContentRevision(currentRevision);
             break;
-        }
+
         default:
             YT_ABORT();
     }

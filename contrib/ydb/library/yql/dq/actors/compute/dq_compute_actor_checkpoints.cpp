@@ -2,6 +2,7 @@
 #include "dq_checkpoints.h"
 #include "dq_compute_actor_impl.h"
 #include <contrib/ydb/library/services/services.pb.h>
+#include <contrib/ydb/library/yql/dq/common/dq_common.h>
 
 #include <yql/essentials/minikql/comp_nodes/mkql_saveload.h>
 
@@ -446,7 +447,7 @@ void TDqComputeActorCheckpoints::DoCheckpoint() {
 
     LOG_PCP_D("Performing task checkpoint");
     if (SaveState()) {
-        LOG_PCP_T("Injecting checkpoint barrier to outputs");
+        LOG_PCP_I("Injecting checkpoint barrier to outputs");
         ComputeActor->InjectBarrierToOutputs(*PendingCheckpoint.Checkpoint);
         ComputeActor->ResumeInputsByCheckpoint();
         TryToSavePendingCheckpoint();
@@ -569,7 +570,7 @@ void TDqComputeActorCheckpoints::PassAway() {
 }
 
 static bool IsInfiniteSourceType(const TString& sourceType) {
-    return sourceType == "PqSource";
+    return sourceType == PqSource;
 }
 
 NDqProto::ECheckpointingMode GetTaskCheckpointingMode(const TDqTaskSettings& task) {

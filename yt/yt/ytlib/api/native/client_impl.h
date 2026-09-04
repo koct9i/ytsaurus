@@ -56,7 +56,7 @@
 
 #include <yt/yt/client/table_client/tracked_memory_chunk_provider.h>
 
-#include <yt/yt/flow/lib/client/controller/controller_service_proxy.h>
+#include <yt/yt/flow/library/cpp/client/controller/controller_service_proxy.h>
 
 #include <yt/yt/client/ypath/rich.h>
 
@@ -471,6 +471,14 @@ public: \
         const NYPath::TRichYPath& path,
         const TFileWriterOptions& options) override;
 
+    TFuture<TFilePartitions> PartitionFile(
+        const NYPath::TYPath& path,
+        const std::vector<TFileReadRange>& ranges,
+        const TPartitionFileOptions& options) override;
+    TFuture<IFileReaderPtr> CreateFilePartitionReader(
+        const TFilePartitionCookiePtr& cookie,
+        const TReadFilePartitionOptions& options) override;
+
     IJournalReaderPtr CreateJournalReader(
         const NYPath::TYPath& path,
         const TJournalReaderOptions& options) override;
@@ -819,6 +827,10 @@ public: \
         NChaosClient::TChaosLeaseId chaosLeaseId,
         const TChaosLeaseAttachOptions& options = {}),
         (chaosLeaseId, options))
+    IMPLEMENT_METHOD(void, PingChaosLease, (
+        NChaosClient::TChaosLeaseId chaosLeaseId,
+        const TChaosLeasePingOptions& options = {}),
+        (chaosLeaseId, options))
 
     IMPLEMENT_METHOD(void, SetUserBanned, (
         const std::string& user,
@@ -1032,18 +1044,6 @@ public: \
         NObjectClient::TTransactionId parentTransactionId,
         const TStartShuffleOptions& options),
         (account, partitionCount, parentTransactionId, options))
-    IMPLEMENT_METHOD(void, RegisterShuffleChunks, (
-        const TShuffleHandlePtr& shuffleHandle,
-        const std::vector<NChunkClient::NProto::TChunkSpec>& chunkSpecs,
-        std::optional<int> writerIndex,
-        const TRegisterShuffleChunksOptions& options),
-        (shuffleHandle, chunkSpecs, writerIndex, options))
-    IMPLEMENT_METHOD(std::vector<NChunkClient::NProto::TChunkSpec>, FetchShuffleChunks, (
-        const TShuffleHandlePtr& shuffleHandle,
-        int partitionIndex,
-        std::optional<std::pair<int, int>> writerIndexRange,
-        const TFetchShuffleChunksOptions& options),
-        (shuffleHandle, partitionIndex, writerIndexRange, options))
     IMPLEMENT_METHOD(void, ForsakeChaosCoordinator, (
         NHydra::TCellId chaosCellId,
         NHydra::TCellId cordinatorCellId,
@@ -1063,12 +1063,12 @@ public: \
     TFuture<IRowBatchReaderPtr> CreateShuffleReader(
         const TSignedShuffleHandlePtr& signedShuffleHandle,
         int partitionIndex,
-        std::optional<std::pair<int, int>> writerIndexRange,
+        std::optional<std::pair<int, int>> logicalWriterIndexRange,
         const TShuffleReaderOptions& options) override;
     TFuture<IRowBatchWriterPtr> CreateShuffleWriter(
         const TSignedShuffleHandlePtr& signedShuffleHandle,
         const std::string& partitionColumn,
-        std::optional<int> writerIndex,
+        std::optional<int> logicalWriterIndex,
         const TShuffleWriterOptions& options) override;
 
 

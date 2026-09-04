@@ -4,8 +4,8 @@
 #include "record_format.h"
 #include "session_provider.h"
 
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_session_pool.h>
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_writer.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_pool.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_writer.h>
 
 #include <yt/yt/ytlib/table_client/partitioner.h>
 
@@ -17,6 +17,7 @@
 #include <yt/yt/core/misc/heap.h>
 
 #include <deque>
+#include <functional>
 
 namespace NYT::NPushBasedShuffleClient {
 
@@ -27,7 +28,7 @@ using namespace NLogging;
 using namespace NNodeTrackerClient;
 using namespace NTableClient;
 
-using TCreateDistributedChunkWriterCallback = TCallback<IDistributedChunkWriterPtr(TNodeDescriptor, TSessionId)>;
+using TCreateDistributedChunkWriterCallback = std::function<IDistributedChunkWriterPtr(TNodeDescriptor, TSessionId)>;
 
 namespace {
 
@@ -38,6 +39,7 @@ struct TShuffleWireRecordTag { };
 struct TRecordEntry
 {
     TSharedRef Record;
+    TDistributedChunkSessionWriteStatistics Statistics;
     int SendAttempts = 0;
 };
 
@@ -65,6 +67,8 @@ struct TPartitionState
 
     // Eviction-heap key; cached Builder->GetDataSize(), updated per AddRow.
     i64 BufferedDataSize = 0;
+    // Logical data weight of the buffered rows; reported with the flushed record.
+    i64 BufferedDataWeight = 0;
     // Slot in EvictionHeap_, or -1 when there is no builder.
     int HeapIndex = -1;
 };
@@ -80,16 +84,16 @@ public:
         IPartitionWriteSessionProviderPtr sessionProvider,
         IPartitionerPtr partitioner,
         TCreateDistributedChunkWriterCallback createDistributedChunkWriter,
-        i32 mapperId,
+        i32 writerId,
         IInvokerPtr invoker,
         THashMap<int, TSessionDescriptor> seededSessions)
         : Config_(std::move(config))
         , SessionProvider_(std::move(sessionProvider))
         , Partitioner_(std::move(partitioner))
         , CreateDistributedChunkWriter_(std::move(createDistributedChunkWriter))
-        , MapperId_(mapperId)
+        , WriterId_(writerId)
         , SerializedInvoker_(CreateSerializedInvoker(std::move(invoker)))
-        , Logger(PushBasedShuffleLogger().WithTag("MapperId: %v", MapperId_))
+        , Logger(PushBasedShuffleLogger().WithTag("WriterId", WriterId_))
         , Partitions_(Partitioner_->GetPartitionCount())
         , SeededSessions_(std::move(seededSessions))
         , BuildersBudget_(static_cast<i64>(Config_->MemoryBudget * Config_->BuildersBudgetFraction))
@@ -98,21 +102,20 @@ public:
         YT_VERIFY(BuildersBudget_ > 0);
         YT_VERIFY(InFlightBudget_ > 0);
         EvictionHeap_.reserve(Partitions_.size());
-        YT_LOG_INFO(
-            "Push-based shuffle writer created "
-            "(PartitionCount: %v, MemoryBudget: %v, BuildersBudget: %v, InFlightBudget: %v, MaxSendAttempts: %v)",
-            Partitions_.size(),
-            Config_->MemoryBudget,
-            BuildersBudget_,
-            InFlightBudget_,
-            Config_->MaxSendAttempts);
+        YT_TLOG_INFO("Push-based shuffle writer created")
+            .With("PartitionCount", Partitions_.size())
+            .With("MemoryBudget", Config_->MemoryBudget)
+            .With("BuildersBudget", BuildersBudget_)
+            .With("InFlightBudget", InFlightBudget_)
+            .With("MaxSendAttempts", Config_->MaxSendAttempts);
     }
 
     TFuture<void> Write(TRange<TUnversionedRow> rows) override
     {
         auto promise = NewPromise<void>();
+        auto future = promise.ToFuture();
         SerializedInvoker_->Invoke(BIND(
-            [this, this_ = MakeStrong(this), rows, promise] () mutable {
+            [this, this_ = MakeStrong(this), rows, promise = std::move(promise)] () mutable {
                 try {
                     DoWrite(rows, promise);
                 } catch (const std::exception& ex) {
@@ -128,11 +131,12 @@ public:
             }));
         // Caller-cancel would auto-set the shared BackpressurePromise_ state
         // and trip YT_VERIFY on the next backpressured Write.
-        return promise.ToFuture().ToUncancelable();
+        return future.ToUncancelable();
     }
 
     TFuture<void> Close() override
     {
+        // The close future owns the writer until its serialized kickoff runs.
         return BIND(&TPushBasedShuffleWriter::DoClose, MakeStrong(this))
             .AsyncVia(SerializedInvoker_)
             .Run()
@@ -144,7 +148,7 @@ private:
     const IPartitionWriteSessionProviderPtr SessionProvider_;
     const IPartitionerPtr Partitioner_;
     const TCreateDistributedChunkWriterCallback CreateDistributedChunkWriter_;
-    const i32 MapperId_;
+    const i32 WriterId_;
     const IInvokerPtr SerializedInvoker_;
     const TLogger Logger;
 
@@ -153,8 +157,9 @@ private:
     // front is the next eviction victim. HeapIndex mirrors each slot for
     // O(log P) sift and removal. See yt/yt/core/misc/heap.h.
     std::vector<int> EvictionHeap_;
-    // Sessions handed out by RegisterMapper, consumed (erased) on a partition's first session
-    // request; failovers and unseeded partitions go through the provider.
+    // Sessions handed out during writer registration, consumed (erased) on a
+    // partition's first session request; failovers and unseeded partitions go
+    // through the provider.
     THashMap<int, TSessionDescriptor> SeededSessions_;
 
     const i64 BuildersBudget_;
@@ -192,11 +197,13 @@ private:
             auto& partitionState = Partitions_[partitionIndex];
             if (!partitionState.Builder) {
                 YT_ASSERT(partitionState.BufferedDataSize == 0);
-                partitionState.Builder.emplace(MapperId_, partitionState.NextRowId);
+                YT_ASSERT(partitionState.BufferedDataWeight == 0);
+                partitionState.Builder.emplace(WriterId_, partitionState.NextRowId);
                 PushToEvictionHeap(partitionIndex);
             }
             i64 prevAllocation = partitionState.Builder->GetAllocatedDataSize();
             partitionState.Builder->AddRow(row);
+            partitionState.BufferedDataWeight += GetDataWeight(row);
             i64 allocationDelta = partitionState.Builder->GetAllocatedDataSize() - prevAllocation;
 
             // The builder grew; resift it toward the heap front.
@@ -229,10 +236,9 @@ private:
         if (InFlightBytes_ > InFlightBudget_) {
             YT_VERIFY(!BackpressurePromise_);
             BackpressurePromise_ = std::move(writePromise);
-            YT_LOG_DEBUG(
-                "Backpressure engaged (InFlightBytes: %v, InFlightBudget: %v)",
-                InFlightBytes_,
-                InFlightBudget_);
+            YT_TLOG_DEBUG("Backpressure engaged")
+                .With("InFlightBytes", InFlightBytes_)
+                .With("InFlightBudget", InFlightBudget_);
             return;
         }
         writePromise.Set();
@@ -251,9 +257,8 @@ private:
         Closing_ = true;
         ClosePromise_ = NewPromise<void>();
 
-        YT_LOG_INFO(
-            "Closing shuffle writer (NonEmptyPartitions: %v)",
-            EvictionHeap_.size());
+        YT_TLOG_INFO("Closing shuffle writer")
+            .With("NonEmptyPartitions", EvictionHeap_.size());
 
         std::vector<int> nonEmptySnapshot(EvictionHeap_.begin(), EvictionHeap_.end());
         for (int partitionIndex : nonEmptySnapshot) {
@@ -324,8 +329,15 @@ private:
         YT_VERIFY(record);
         BuildersBytes_ -= prevAllocation;
         partitionState.NextRowId += record->Header.RowCount;
+        TDistributedChunkSessionWriteStatistics statistics{
+            .DataWeight = partitionState.BufferedDataWeight,
+            .UncompressedDataSize = static_cast<i64>(
+                sizeof(TRecordHeader) + GetByteSize(record->UncompressedPayload)),
+            .RowCount = record->Header.RowCount,
+        };
         partitionState.Builder.reset();
         partitionState.BufferedDataSize = 0;
+        partitionState.BufferedDataWeight = 0;
         RemoveFromEvictionHeap(partitionIndex);
 
         // TODO(apollo1321): IDistributedChunkWriter::WriteRecord currently
@@ -334,7 +346,11 @@ private:
         auto compressed = MergeRefsToRef<TShuffleWireRecordTag>(
             CompressShuffleRecord(*record, Config_->Codec));
         InFlightBytes_ += compressed.Size();
-        partitionState.Pending.push_back({.Record = std::move(compressed), .SendAttempts = 0});
+        partitionState.Pending.push_back({
+            .Record = std::move(compressed),
+            .Statistics = statistics,
+            .SendAttempts = 0,
+        });
         ++OutstandingWork_;
 
         if (partitionState.Session) {
@@ -354,15 +370,17 @@ private:
             if (entry.SendAttempts >= Config_->MaxSendAttempts) {
                 --OutstandingWork_;
                 FailWriter(TError("Failed to write shuffle record after exceeding max send attempts")
-                    << TErrorAttribute("mapper_id", MapperId_)
-                    << TErrorAttribute("partition_index", partitionIndex)
-                    << TErrorAttribute("send_attempts", entry.SendAttempts));
+                    .With("writer_id", WriterId_)
+                    .With("partition_index", partitionIndex)
+                    .With("send_attempts", entry.SendAttempts));
                 return;
             }
             ++entry.SendAttempts;
             i64 cookie = partitionState.NextSendCookie++;
             auto sessionId = partitionState.Session->SessionId;
-            auto writeFuture = partitionState.Writer->WriteRecord(entry.Record);
+            auto writeFuture = partitionState.Writer->WriteRecord(
+                entry.Record,
+                entry.Statistics);
             partitionState.InFlight[cookie] = TInFlightEntry{
                 .Entry = std::move(entry),
                 .SessionId = sessionId,
@@ -377,7 +395,7 @@ private:
         auto& partitionState = Partitions_[partitionIndex];
         YT_VERIFY(!partitionState.PendingSessionFuture);
 
-        // The initial (non-excluded) request for a partition uses its RegisterMapper-seeded
+        // The initial (non-excluded) request for a partition uses its registration-seeded
         // session if present; failovers and unseeded partitions go through the provider.
         if (!excluded) {
             auto seedIt = SeededSessions_.find(partitionIndex);
@@ -387,10 +405,9 @@ private:
             }
         }
         if (!partitionState.PendingSessionFuture) {
-            YT_LOG_DEBUG(
-                "Requesting session (PartitionIndex: %v, ExcludedSessionId: %v)",
-                partitionIndex,
-                excluded);
+            YT_TLOG_DEBUG("Requesting session")
+                .With("PartitionIndex", partitionIndex)
+                .With("ExcludedSessionId", excluded);
             partitionState.PendingSessionFuture = SessionProvider_->GetSession(partitionIndex, excluded);
         }
         ++OutstandingWork_;
@@ -417,24 +434,23 @@ private:
         }
         if (!sessionOrError.IsOK()) {
             FailWriter(TError("Failed to acquire session for partition")
-                << TErrorAttribute("mapper_id", MapperId_)
-                << TErrorAttribute("partition_index", partitionIndex)
-                << static_cast<const TError&>(sessionOrError));
+                .With("writer_id", WriterId_)
+                .With("partition_index", partitionIndex)
+                .With(static_cast<const TError&>(sessionOrError)));
             return;
         }
         partitionState.Session = sessionOrError.Value();
-        partitionState.Writer = CreateDistributedChunkWriter_.Run(
+        partitionState.Writer = CreateDistributedChunkWriter_(
             partitionState.Session->SequencerNode,
             partitionState.Session->SessionId);
-        YT_LOG_DEBUG(
-            "Session resolved (PartitionIndex: %v, SessionId: %v)",
-            partitionIndex,
-            partitionState.Session->SessionId);
+        YT_TLOG_DEBUG("Session resolved")
+            .With("PartitionIndex", partitionIndex)
+            .With("SessionId", partitionState.Session->SessionId);
 
         // Sweep order is THashMap iteration order — non-deterministic. The
         // writer makes no in-order delivery guarantee per partition (retries
         // already break ordering), and the sequencer accepts arbitrary order
-        // from a single mapper.
+        // from a single writer.
         if (excluded) {
             std::vector<i64> toErase;
             for (auto& [cookie, inFlight] : partitionState.InFlight) {
@@ -481,19 +497,18 @@ private:
         if (inFlight.Entry.SendAttempts >= Config_->MaxSendAttempts) {
             --OutstandingWork_;
             FailWriter(TError("Failed to write shuffle record after exceeding max send attempts")
-                << TErrorAttribute("mapper_id", MapperId_)
-                << TErrorAttribute("partition_index", partitionIndex)
-                << TErrorAttribute("send_attempts", inFlight.Entry.SendAttempts)
-                << error);
+                .With("writer_id", WriterId_)
+                .With("partition_index", partitionIndex)
+                .With("send_attempts", inFlight.Entry.SendAttempts)
+                .With(error));
             return;
         }
 
         if (partitionState.Session && partitionState.Session->SessionId == inFlight.SessionId) {
-            YT_LOG_DEBUG(
-                error,
-                "Retiring session after write failure (PartitionIndex: %v, SessionId: %v)",
-                partitionIndex,
-                inFlight.SessionId);
+            YT_TLOG_DEBUG("Retiring session after write failure")
+                .With("PartitionIndex", partitionIndex)
+                .With("SessionId", inFlight.SessionId)
+                .With(error);
             auto excluded = partitionState.Session->SessionId;
             partitionState.Session.reset();
             partitionState.Writer.Reset();
@@ -508,10 +523,9 @@ private:
     void MaybeReleaseBackpressure()
     {
         if (BackpressurePromise_ && InFlightBytes_ <= InFlightBudget_) {
-            YT_LOG_DEBUG(
-                "Backpressure released (InFlightBytes: %v, InFlightBudget: %v)",
-                InFlightBytes_,
-                InFlightBudget_);
+            YT_TLOG_DEBUG("Backpressure released")
+                .With("InFlightBytes", InFlightBytes_)
+                .With("InFlightBudget", InFlightBudget_);
             auto promise = std::move(BackpressurePromise_);
             BackpressurePromise_.Reset();
             promise.Set();
@@ -523,7 +537,7 @@ private:
         if (!Closing_ || ClosePromise_.IsSet() || OutstandingWork_ > 0) {
             return;
         }
-        YT_LOG_INFO("Shuffle writer closed");
+        YT_TLOG_INFO("Shuffle writer closed");
         ClosePromise_.Set();
     }
 
@@ -532,7 +546,8 @@ private:
         if (!TerminalError_.IsOK()) {
             return;
         }
-        YT_LOG_WARNING(error, "Shuffle writer failed");
+        YT_TLOG_WARNING("Shuffle writer failed")
+            .With(error);
         TerminalError_ = error;
         if (BackpressurePromise_) {
             auto promise = std::move(BackpressurePromise_);
@@ -557,25 +572,25 @@ IPushBasedShuffleWriterPtr CreatePushBasedShuffleWriter(
     IPartitionWriteSessionProviderPtr sessionProvider,
     IPartitionerPtr partitioner,
     NApi::NNative::IConnectionPtr connection,
-    i32 mapperId,
+    i32 writerId,
     IInvokerPtr invoker,
     THashMap<int, TSessionDescriptor> seededSessions)
 {
     auto writerConfig = config->WriterConfig;
-    auto createWriter = BIND([connection, writerConfig] (TNodeDescriptor sequencerNode, TSessionId sessionId) {
+    auto createWriter = [connection, writerConfig] (TNodeDescriptor sequencerNode, TSessionId sessionId) {
         return CreateDistributedChunkWriter(
             sequencerNode,
             sessionId,
             connection,
             writerConfig);
-    });
+    };
 
     return New<TPushBasedShuffleWriter>(
         std::move(config),
         std::move(sessionProvider),
         std::move(partitioner),
         std::move(createWriter),
-        mapperId,
+        writerId,
         std::move(invoker),
         std::move(seededSessions));
 }
@@ -585,7 +600,7 @@ IPushBasedShuffleWriterPtr CreatePushBasedShuffleWriterForTesting(
     IPartitionWriteSessionProviderPtr sessionProvider,
     IPartitionerPtr partitioner,
     TCreateDistributedChunkWriterCallback createDistributedChunkWriter,
-    i32 mapperId,
+    i32 writerId,
     IInvokerPtr invoker)
 {
     return New<TPushBasedShuffleWriter>(
@@ -593,7 +608,7 @@ IPushBasedShuffleWriterPtr CreatePushBasedShuffleWriterForTesting(
         std::move(sessionProvider),
         std::move(partitioner),
         std::move(createDistributedChunkWriter),
-        mapperId,
+        writerId,
         std::move(invoker),
         THashMap<int, TSessionDescriptor>{});
 }

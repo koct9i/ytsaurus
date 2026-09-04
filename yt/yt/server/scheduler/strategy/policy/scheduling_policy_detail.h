@@ -10,8 +10,6 @@
 #include "scheduling_policy.h"
 #include "attributes_list.h"
 
-#include <yt/yt/server/scheduler/strategy/policy/gpu/public.h>
-
 #include <yt/yt/server/scheduler/strategy/field_filter.h>
 #include <yt/yt/server/scheduler/strategy/pool_tree_element.h>
 #include <yt/yt/server/scheduler/strategy/pool_tree_snapshot.h>
@@ -558,7 +556,7 @@ public:
     void UnregisterNode(NNodeTrackerClient::TNodeId nodeId) override;
 
     //! Scheduling.
-    void ProcessSchedulingHeartbeat(
+    TFuture<void> ProcessSchedulingHeartbeat(
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
         const TPoolTreeSnapshotPtr& treeSnapshot,
         bool skipScheduleAllocations) override;
@@ -586,18 +584,16 @@ public:
         NNodeTrackerClient::TNodeId nodeId,
         TDelimitedStringBuilderWrapper& delimitedBuilder) const override;
     void BuildSchedulingAttributesForNode(NNodeTrackerClient::TNodeId nodeId, NYTree::TFluentMap fluent) const override;
-    void BuildSchedulingAttributesStringForOngoingAllocations(
+    NLogging::TLoggingTagList BuildSchedulingAttributeTagsForOngoingAllocations(
         const TPoolTreeSnapshotPtr& treeSnapshot,
         const std::vector<TAllocationPtr>& allocations,
-        TInstant now,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const override;
+        TInstant now) const override;
 
-    void BuildElementLoggingStringAttributes(
+    NLogging::TLoggingTagList BuildElementLoggingTags(
         const TPoolTreeSnapshotPtr& treeSnapshot,
-        const TPoolTreeElement* element,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const override;
+        const TPoolTreeElement* element) const override;
 
-    void PopulateOrchidService(const NYTree::TCompositeMapServicePtr& orchidService) const override;
+    void PopulateOrchidService(const NYTree::ICompositeMapServicePtr& orchidService) const override;
 
     void ProfileOperation(
         const TPoolTreeOperationElement* element,
@@ -685,10 +681,13 @@ private:
     // and we start building up-to-date persistent state.
     TInstant SchedulingSegmentsInitializationDeadline_;
     TPersistentStatePtr InitialPersistentState_ = New<TPersistentState>();
-    TPersistentStatePtr PersistentState_;
+    //! Updated once per scheduling segments management cycle and treated as immutable after publication.
+    NYTree::INodePtr CachedPersistentStateNode_;
 
     TPersistentNodeSchedulingSegmentStateMap InitialPersistentSchedulingSegmentNodeStates_;
     TPersistentOperationSchedulingSegmentStateMap InitialPersistentSchedulingSegmentOperationStates_;
+
+    THashMap<std::string, TInstant> NodeToResourceLimitsViolationStartTime_;
 
     DECLARE_THREAD_AFFINITY_SLOT(ControlThread);
 
@@ -707,6 +706,11 @@ private:
     void InitSchedulingProfilingCounters();
 
     //! Process node heartbeat, including allocation scheduling.
+    void DoProcessSchedulingHeartbeat(
+        const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
+        const TPoolTreeSnapshotPtr& treeSnapshot,
+        bool skipScheduleAllocations);
+
     TRunningAllocationStatistics ComputeRunningAllocationStatistics(
         const TNodeStatePtr& nodeState,
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,

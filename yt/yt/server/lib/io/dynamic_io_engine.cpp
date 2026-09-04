@@ -29,8 +29,8 @@ public:
         , Logger(std::move(logger))
     {
         SetType(defaultEngineType, defaultIOConfig);
-        YT_LOG_INFO("Dynamic IO engine initialized (Type: %v)",
-            defaultEngineType);
+        YT_TLOG_INFO("Dynamic IO engine initialized")
+            .With("Type", defaultEngineType);
 
         for (auto engineType : GetSupportedIOEngineTypes()) {
             Profiler_
@@ -134,7 +134,7 @@ public:
             } catch (const std::exception& ex) {
                 THROW_ERROR_EXCEPTION("Error reconfiguring %Qlv IO engine",
                     type)
-                    << ex;
+                    .With(ex);
             }
         } else {
             try {
@@ -150,14 +150,14 @@ public:
             } catch (const std::exception& ex) {
                 THROW_ERROR_EXCEPTION("Error creating %Qlv IO engine",
                     type)
-                    << ex;
+                    .With(ex);
             }
         }
 
         CurrentType_.store(type);
 
-        YT_LOG_INFO("Dynamic IO engine reconfigured (Type: %v)",
-            type);
+        YT_TLOG_INFO("Dynamic IO engine reconfigured")
+            .With("Type", type);
     }
 
     void Reconfigure(const NYTree::INodePtr& dynamicIOConfig) override
@@ -191,6 +191,11 @@ public:
     EDirectIOPolicy UseDirectIOForReads() const override
     {
         return GetCurrentEngine()->UseDirectIOForReads();
+    }
+
+    EDirectIOPolicy UseDirectIOForWrites() const override
+    {
+        return GetCurrentEngine()->UseDirectIOForWrites();
     }
 
     bool IsInFlightRequestLimitExceeded() const override

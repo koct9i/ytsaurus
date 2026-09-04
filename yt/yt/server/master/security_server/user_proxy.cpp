@@ -280,6 +280,9 @@ private:
             case EInternedAttributeKey::LastSeenTime: {
                 std::vector<TFuture<TYPathProxy::TRspGetPtr>> asyncResults;
                 if (IsPrimaryMaster()) {
+                    const auto& securityManager = Bootstrap_->GetSecurityManager();
+                    auto userNameToForward = securityManager->GetAuthenticatedUserNameToForward();
+
                     const auto& multicellManager = Bootstrap_->GetMulticellManager();
                     auto portalCellTags = multicellManager->GetRoleMasterCells(NCellMaster::EMasterCellRole::CypressNodeHost);
 
@@ -290,7 +293,7 @@ private:
 
                         auto proxy = NObjectClient::TObjectServiceProxy::FromDirectMasterChannel(
                             multicellManager->GetMasterChannelOrThrow(portalCellTag, NHydra::EPeerKind::Follower));
-                        asyncResults.push_back(proxy.Execute(TYPathProxy::Get(user->GetObjectPath() + "/@last_seen_time")));
+                        asyncResults.push_back(proxy.ExecuteAs(userNameToForward, TYPathProxy::Get(user->GetObjectPath() + "/@last_seen_time")));
                     }
                 }
 
@@ -416,13 +419,13 @@ private:
                 auto newTags = ConvertTo<THashSet<std::string>>(value);
                 if (std::ssize(newTags) > securityManagerDynconfig->MaxUserTagCount) {
                     THROW_ERROR_EXCEPTION("Cannot set user tags as user tags count limit exceeded")
-                        << TErrorAttribute("max_user_tag_count", securityManagerDynconfig->MaxUserTagCount);
+                        .With("max_user_tag_count", securityManagerDynconfig->MaxUserTagCount);
                 }
                 for (const auto& tag : newTags) {
                     if (std::ssize(tag) >= securityManagerDynconfig->MaxUserTagSize) {
                         THROW_ERROR_EXCEPTION("Cannot set user tags as user tag size limit exceeded")
-                            << TErrorAttribute("max_user_tag_size", securityManagerDynconfig->MaxUserTagSize)
-                            << TErrorAttribute("tag", tag);
+                            .With("max_user_tag_size", securityManagerDynconfig->MaxUserTagSize)
+                            .With("tag", tag);
                     }
                     ValidateBooleanFormulaVariable(tag);
                 }

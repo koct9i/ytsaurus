@@ -100,7 +100,7 @@ std::vector<TResourceUsage::TTaggedStat> ExtractIOStatsPerDevice(
     const std::string& input)
 {
     // Example of input: 'hw: 34843530298; sdb: 618096087; sdi: 9284833908'.
-    static const NRe2::RE2 regex("([a-z]+) *: *([0-9]+)");
+    static const re2::RE2 regex("([a-z]+) *: *([0-9]+)");
 
     std::vector<TResourceUsage::TTaggedStat> result;
     std::string_view inputView{input.c_str(), input.length()};
@@ -108,7 +108,7 @@ std::vector<TResourceUsage::TTaggedStat> ExtractIOStatsPerDevice(
     std::string deviceName;
     int statisticsValue;
 
-    while (NRe2::RE2::FindAndConsume(&inputView, regex, &deviceName, &statisticsValue)) {
+    while (re2::RE2::FindAndConsume(&inputView, regex, &deviceName, &statisticsValue)) {
         // hw - total statistic for all devices.
         // In that function we extract only per device statistic, because of that we skip hw.
         if (deviceName != "hw") {
@@ -178,6 +178,7 @@ const THashMap<EStatField, TPortoStatRule> PortoStatRules = {
     {EStatField::ThreadCount, {"thread_count", LongExtractor}},
     {EStatField::CpuLimit, {"cpu_limit_bound", CoreNsPerSecondExtractor}},
     {EStatField::CpuGuarantee, {"cpu_guarantee_bound", CoreNsPerSecondExtractor}},
+    // NB(pavook): V2 "anon" excludes swapcached, unlike V1 "total_rss", but it is close enough and arguably more correct for ResidentAnon.
     {EStatField::ResidentAnon, {"memory.stat", GetStatByCGroupVersionedKeyExtractor(ECGroupController::Memory, "total_rss", "anon")}},
     {EStatField::TmpfsUsage, {"memory.stat", GetStatByCGroupVersionedKeyExtractor(ECGroupController::Memory, "total_shmem", "shmem")}},
     {EStatField::MappedFile, {"memory.stat", GetStatByCGroupVersionedKeyExtractor(ECGroupController::Memory, "total_mapped_file", "file_mapped")}},
@@ -302,7 +303,7 @@ class TPortoInstanceLauncher
 public:
     TPortoInstanceLauncher(std::string_view name, IPortoExecutorPtr executor)
         : Executor_(std::move(executor))
-        , Logger(ContainersLogger().WithTag("Container: %v", name))
+        , Logger(ContainersLogger().WithTag("Container", name))
     {
         Spec_.Name = name;
         Spec_.CGroupControllers = {
@@ -458,16 +459,16 @@ public:
         }
 
         Spec_.Command = commandBuilder.Flush();
-        YT_LOG_DEBUG("Executing Porto container (Name: %v, Command: %v)",
-            Spec_.Name,
-            Spec_.Command);
+        YT_TLOG_DEBUG("Executing Porto container")
+            .With("Name", Spec_.Name)
+            .With("Command", Spec_.Command);
 
         Spec_.Env = env;
 
         auto onContainerCreated = [this, this_ = MakeStrong(this)] (const TError& error) -> IInstancePtr {
             if (!error.IsOK()) {
                 THROW_ERROR_EXCEPTION(NContainers::EErrorCode::FailedToStartContainer, "Unable to start container")
-                    << error;
+                    .With(error);
             }
 
             return GetPortoInstance(Executor_, Spec_.Name, Spec_.NetworkInterface);
@@ -484,7 +485,7 @@ public:
         auto onContainerCreated = [this, this_ = MakeStrong(this)] (const TError& error) -> IInstancePtr {
             if (!error.IsOK()) {
                 THROW_ERROR_EXCEPTION(NContainers::EErrorCode::FailedToStartContainer, "Unable to create container")
-                    << error;
+                    .With(error);
             }
 
             return GetPortoInstance(Executor_, Spec_.Name, Spec_.NetworkInterface);
@@ -539,9 +540,9 @@ public:
         }
         if (!error.IsOK()) {
             THROW_ERROR_EXCEPTION("Failed to send signal to Porto instance")
-                << TErrorAttribute("signal", signal)
-                << TErrorAttribute("container", Name_)
-                << error;
+                .With("signal", signal)
+                .With("container", Name_)
+                .With(error);
         }
     }
 
@@ -572,10 +573,10 @@ public:
             return cpuUsage.Value() > cpuSystemUsage.Value() ? cpuUsage.Value() - cpuSystemUsage.Value() : 0;
         } else if (cpuUsage.IsOK()) {
             return TError("Missing property %Qlv in Porto response", EStatField::CpuSystemUsage)
-                << TErrorAttribute("container", Name_);
+                .With("container", Name_);
         } else {
             return TError("Missing property %Qlv in Porto response", EStatField::CpuUsage)
-                << TErrorAttribute("container", Name_);
+                .With("container", Name_);
         }
     }
 
@@ -614,7 +615,7 @@ public:
                 layerCountRequested = true;
             } else {
                 THROW_ERROR_EXCEPTION("Unknown resource field %Qlv requested", field)
-                    << TErrorAttribute("container", Name_);
+                    .With("container", Name_);
             }
         }
 
@@ -642,18 +643,18 @@ public:
                             record = callback(value);
                         } catch (const std::exception& ex) {
                             record = TError("Error parsing Porto property %Qlv", field)
-                                << TErrorAttribute("container", Name_)
-                                << TErrorAttribute("property_value", value)
-                                << ex;
+                                .With("container", Name_)
+                                .With("property_value", value)
+                                .With(ex);
                         }
                     } else {
                         record = TError("Error getting Porto property %Qlv", field)
-                            << TErrorAttribute("container", Name_)
-                            << valueOrError;
+                            .With("container", Name_)
+                            .With(valueOrError);
                     }
                 } else {
                     record = TError("Missing property %Qlv in Porto response", field)
-                        << TErrorAttribute("container", Name_);
+                        .With("container", Name_);
                 }
             }
         };
@@ -755,7 +756,7 @@ public:
         i64 memoryLimit;
         if (!TryFromString<i64>(memoryLimitRsp.Value(), memoryLimit)) {
             THROW_ERROR_EXCEPTION("Failed to parse memory limit value from Porto")
-                << TErrorAttribute(memoryLimitProperty, memoryLimitRsp.Value());
+                .With(memoryLimitProperty, memoryLimitRsp.Value());
         }
 
         const auto& cpuLimitRsp = response.at(cpuLimitProperty);
@@ -766,7 +767,7 @@ public:
         auto cpuLimitValue = TStringBuf(cpuLimitRsp.Value().begin(), cpuLimitRsp.Value().size() - 1);
         if (!TryFromString<double>(cpuLimitValue, cpuLimit)) {
             THROW_ERROR_EXCEPTION("Failed to parse CPU limit value from Porto")
-                << TErrorAttribute(cpuLimitProperty, cpuLimitRsp.Value());
+                .With(cpuLimitProperty, cpuLimitRsp.Value());
         }
 
         const auto& cpuGuaranteeRsp = response.at(cpuGuaranteeProperty);
@@ -781,7 +782,7 @@ public:
             auto cpuGuaranteeValue = TStringBuf(cpuGuaranteeRsp.Value().begin(), cpuGuaranteeRsp.Value().size() - 1);
             if (!TryFromString<double>(cpuGuaranteeValue, cpuGuarantee)) {
                 THROW_ERROR_EXCEPTION("Failed to parse CPU guarantee value from Porto")
-                    << TErrorAttribute(cpuGuaranteeProperty, cpuGuaranteeRsp.Value());
+                    .With(cpuGuaranteeProperty, cpuGuaranteeRsp.Value());
             }
         }
 
@@ -886,8 +887,8 @@ public:
         auto instanceCGroup = NDetail::ParsePortoPidsCGroup(portoCGroups, isV2);
         if (!instanceCGroup) {
             THROW_ERROR_EXCEPTION("CGroup not found for container %Qv", GetName())
-                << TErrorAttribute("cgroups", portoCGroups)
-                << TErrorAttribute("is_v2", isV2);
+                .With("cgroups", portoCGroups)
+                .With("is_v2", isV2);
         }
 
         std::vector<pid_t> pids;
@@ -896,7 +897,9 @@ public:
             try {
                 processCGroups = GetProcessCGroups(pid);
             } catch (const std::exception& ex) {
-                YT_LOG_DEBUG(ex, "Failed to get CGroups for process (Pid: %v)", pid);
+                YT_TLOG_DEBUG("Failed to get CGroups for process")
+                    .With("Pid", pid)
+                    .With(ex);
                 continue;
             }
 
@@ -943,7 +946,7 @@ private:
         : Name_(std::move(name))
         , NetworkInterface_(std::move(networkInterface))
         , Executor_(std::move(executor))
-        , Logger(ContainersLogger().WithTag("Container: %v", Name_))
+        , Logger(ContainersLogger().WithTag("Container", Name_))
     { }
 
     void SetProperty(const std::string& key, const std::string& value)
@@ -993,7 +996,7 @@ std::string GetSelfContainerName(const IPortoExecutorPtr& executor)
         }
     } catch (const std::exception& ex) {
         THROW_ERROR_EXCEPTION("Failed to get name for container \"self\"")
-            << ex;
+            .With(ex);
     }
 }
 

@@ -63,69 +63,6 @@ class TChunkListCumulativeStatisticsTest
     : public TChunkGeneratorTestBase
 { };
 
-TEST_F(TChunkListCumulativeStatisticsTest, CannotAttachSealedAfterUnsealed1)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    AttachToChunkList(root, {CreateJournalChunk(false, false)});
-    EXPECT_THROW(
-        AttachToChunkList(root, {CreateJournalChunk(true, false)}),
-        TErrorException);
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CannotAttachSealedAfterUnsealed2)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    EXPECT_THROW(
-        AttachToChunkList(root, {CreateJournalChunk(false, false), CreateJournalChunk(true, false)}),
-        TErrorException);
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CanAttachUnsealedAfterSealed)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    AttachToChunkList(root, {CreateJournalChunk(true, false)});
-    AttachToChunkList(root, {CreateJournalChunk(false, false)});
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CannotHaveMultipleNonoverlayedUnsealed1)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    AttachToChunkList(root, {CreateJournalChunk(false, false)});
-    EXPECT_THROW(
-        AttachToChunkList(root, {CreateJournalChunk(false, false)}),
-        TErrorException);
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CannotHaveMultipleNonoverlayedUnsealed2)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    EXPECT_THROW(
-        AttachToChunkList(root, {CreateJournalChunk(false, false), CreateJournalChunk(false, false)}),
-        TErrorException);
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CannotHaveNonoverlayedAfterOverlayed)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    AttachToChunkList(root, {CreateJournalChunk(false, true)});
-    EXPECT_THROW(
-        AttachToChunkList(root, {CreateJournalChunk(false, false)}),
-        TErrorException);
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CanHaveMultipleOverlayedUnsealed1)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    AttachToChunkList(root, {CreateJournalChunk(false, true)});
-    AttachToChunkList(root, {CreateJournalChunk(false, true)});
-}
-
-TEST_F(TChunkListCumulativeStatisticsTest, CanHaveMultipleOverlayedUnsealed2)
-{
-    auto* root = CreateChunkList(EChunkListKind::JournalRoot);
-    AttachToChunkList(root, {CreateJournalChunk(false, true), CreateJournalChunk(false, true)});
-}
-
 TEST_F(TChunkListCumulativeStatisticsTest, Static)
 {
     auto* root = CreateChunkList();
@@ -377,7 +314,7 @@ TEST_F(TChunkListCumulativeStatisticsTest, HunkTreeStatisticsJournals)
         hunkChunk1->Seal(sealInfo);
 
         // NB: Same as in OnHunkJournalChunkSealed.
-        VisitAllAncestorsInHunkTree(hunkChunk1, [&] (TChunkList* chunkList, bool firstOccurrence) {
+        VisitHunkTreeAncestors(hunkChunk1, [&] (TChunkList* chunkList, bool firstOccurrence) {
             if (firstOccurrence) {
                 chunkList->AccumulateHunkStatistics(hunkChunk1, /*force*/ true);
             }

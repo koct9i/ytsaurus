@@ -83,7 +83,7 @@ void TBundleControllerConfig::Register(TRegistrar registrar)
         .Default(100);
     registrar.Parameter("journal_disk_space_per_cell", &TThis::JournalDiskSpacePerCell)
         .GreaterThan(0)
-        .Default(100_GB);
+        .Default(600_GB);
     registrar.Parameter("snapshot_disk_space_per_cell", &TThis::SnapshotDiskSpacePerCell)
         .GreaterThan(0)
         .Default(15_GB);
@@ -152,6 +152,8 @@ void TBundleControllerDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("remove_instance_cypress_node_after", &TThis::RemoveInstanceCypressNodeAfter)
         .Default();
     registrar.Parameter("offline_instance_grace_period", &TThis::OfflineInstanceGracePeriod)
+        .Default();
+    registrar.Parameter("deallocate_offline_instance_after", &TThis::DeallocateOfflineInstanceAfter)
         .Default();
 
     registrar.Parameter("max_concurrent_cypress_write_requests", &TThis::MaxConcurrentCypressWriteRequests)

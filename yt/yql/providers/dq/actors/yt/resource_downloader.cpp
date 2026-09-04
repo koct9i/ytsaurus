@@ -58,7 +58,7 @@ private:
     void Bootstrap(const NActors::TActorContext& ctx) {
         YtWrapper = Coordinator->GetWrapper(
             ctx.ActorSystem(),
-            Options.YtBackend.GetClusterName(),
+            Options.YtBackend.GetProxyAddress(),
             Options.YtBackend.GetUser(),
             Options.YtBackend.GetToken());
         DownloadFile();
@@ -90,6 +90,10 @@ private:
 
     void OnFileDownloaded(TEvReadFileResponse::TPtr& ev, const NActors::TActorContext& ctx) {
         auto result = std::get<0>(*ev->Get());
+        auto& file = Options.Files[CurrentFileId];
+        const TString remotePath = Options.UploadPrefix + "/" + file.GetRemoteFileName();
+        const TString localFileName = Options.TmpDir + "/" + file.GetRemoteFileName();
+
         if (result.IsOK()) {
             SaveToCache();
 
@@ -104,10 +108,15 @@ private:
                 DownloadFile();
             }
         } else if (Options.MaxRetries == -1 || ++Retry < Options.MaxRetries) {
-            YQL_CLOG(DEBUG, ProviderDq) << "Retry " << ToString(result);
+            YQL_CLOG(WARN, ProviderDq) << "Download retry " << Retry
+                << " for " << remotePath << " -> " << localFileName
+                << ": " << ToString(result);
             std::random_shuffle(Options.Files.begin() + CurrentFileId, Options.Files.end());
             Tick(ctx);
         } else {
+            YQL_CLOG(ERROR, ProviderDq) << "Download failed after " << Retry
+                << " retries for " << remotePath << " -> " << localFileName
+                << ": " << ToString(result);
             PassAway();
         }
     }
@@ -126,7 +135,7 @@ IActor* CreateYtResourceDownloader(
     const TResourceManagerOptions& options,
     const ICoordinationHelper::TPtr& coordinator)
 {
-    Y_ABORT_UNLESS(!options.YtBackend.GetClusterName().empty());
+    Y_ABORT_UNLESS(!options.YtBackend.GetProxyAddress().empty());
     Y_ABORT_UNLESS(!options.YtBackend.GetUser().empty());
     Y_ABORT_UNLESS(!options.Files.empty());
     Y_ABORT_UNLESS(!options.UploadPrefix.empty());

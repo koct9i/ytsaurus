@@ -16,6 +16,8 @@ from sqlglot.typing.snowflake import EXPRESSION_METADATA
 class Snowflake(Dialect):
     # https://docs.snowflake.com/en/sql-reference/identifiers-syntax
     NORMALIZATION_STRATEGY = NormalizationStrategy.UPPERCASE
+    # https://docs.snowflake.com/en/sql-reference/data-types-text#escape-sequences
+    UNESCAPED_SEQUENCES = {"\\a": "a", "\\v": "v"}
     NULL_ORDERING = "nulls_are_large"
     TIME_FORMAT = "'YYYY-MM-DD HH24:MI:SS'"
     SUPPORTS_USER_DEFINED_TYPES = False
@@ -29,6 +31,7 @@ class Snowflake(Dialect):
     SUPPORTS_ALIAS_REFS_IN_JOIN_CONDITIONS = True
     LEAST_GREATEST_IGNORES_NULLS = False
     UUID_IS_STRING_TYPE = True
+    STAR_ILIKE_BACKSLASH_ESCAPE = True
 
     EXPRESSION_METADATA = EXPRESSION_METADATA.copy()
 
@@ -152,6 +155,7 @@ class Snowflake(Dialect):
             "POLICY": TokenType.POLICY,
             "POOL": TokenType.POOL,
             "PUT": TokenType.PUT,
+            "UNDROP": TokenType.UNDROP,
             "REMOVE": TokenType.COMMAND,
             "RM": TokenType.COMMAND,
             "ROLE": TokenType.ROLE,

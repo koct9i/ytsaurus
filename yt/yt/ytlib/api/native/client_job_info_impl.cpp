@@ -295,7 +295,7 @@ public:
 
         TransferResultFuture_.Subscribe(BIND([pipe = AsyncStreamPipe_] (const TError& error) {
             if (!error.IsOK()) {
-                YT_UNUSED_FUTURE(pipe->Abort(TError("Failed to get job input") << error));
+                YT_UNUSED_FUTURE(pipe->Abort(TError("Failed to get job input").With(error)));
             }
         }));
     }
@@ -402,11 +402,10 @@ private:
             LastTraceIdLo_ = records.back().Key.TraceIdLo;
         }
 
-        YT_LOG_DEBUG(
-            "Read job trace events batch (LastTraceId: %v, LastEventIndex: %v, BatchNumber: %v)",
-            TGuid(LastTraceIdHi_, LastTraceIdLo_),
-            LastEventIndex_,
-            BatchNumber_);
+        YT_TLOG_DEBUG("Read job trace events batch")
+            .With("LastTraceId", TGuid(LastTraceIdHi_, LastTraceIdLo_))
+            .With("LastEventIndex", LastEventIndex_)
+            .With("BatchNumber", BatchNumber_);
 
         if (std::ssize(records) < BatchSize_) {
             EndOfTrace_ = true;
@@ -494,9 +493,9 @@ static void ValidateJobSpecVersion(
 {
     if (!jobSpec.has_version() || jobSpec.version() != GetJobSpecVersion()) {
         THROW_ERROR_EXCEPTION("Job spec found in operation archive is of unsupported version")
-            << TErrorAttribute("job_id", jobId)
-            << TErrorAttribute("found_version", jobSpec.version())
-            << TErrorAttribute("supported_version", GetJobSpecVersion());
+            .With("job_id", jobId)
+            .With("found_version", jobSpec.version())
+            .With("supported_version", GetJobSpecVersion());
     }
 }
 
@@ -558,15 +557,14 @@ TErrorOr<IChannelPtr> TClient::TryCreateChannelToJobNode(
         return ChannelFactory_->CreateChannel(jobNodeDescriptorOrError.ValueOrThrow());
     }
 
-    YT_LOG_DEBUG(
-        jobNodeDescriptorOrError,
-        "Failed to get job node descriptor from scheduler (OperationId: %v, JobId: %v)",
-        operationId,
-        jobId);
+    YT_TLOG_DEBUG("Failed to get job node descriptor from scheduler")
+        .With("OperationId", operationId)
+        .With("JobId", jobId)
+        .With(jobNodeDescriptorOrError);
 
     if (!IsNoSuchJobOrOperationError(jobNodeDescriptorOrError)) {
         THROW_ERROR_EXCEPTION("Failed to get job node descriptor from scheduler")
-            << jobNodeDescriptorOrError;
+            .With(jobNodeDescriptorOrError);
     }
 
     try {
@@ -579,30 +577,27 @@ TErrorOr<IChannelPtr> TClient::TryCreateChannelToJobNode(
             .ValueOrThrow();
         auto jobYsonMap = ConvertToNode(jobYsonString)->AsMap();
         if (auto addresses = jobYsonMap->FindChildValue<TAddressMap>("addresses")) {
-            YT_LOG_DEBUG(
-                jobNodeDescriptorOrError,
-                "Creating channel using job's address map from archive (OperationId: %v, JobId: %v, Addresses: %v)",
-                operationId,
-                jobId,
-                *addresses);
+            YT_TLOG_DEBUG("Creating channel using job's address map from archive")
+                .With("OperationId", operationId)
+                .With("JobId", jobId)
+                .With("Addresses", *addresses)
+                .With(jobNodeDescriptorOrError);
             return ChannelFactory_->CreateChannel(*addresses);
         } else {
             auto address = ConvertToNode(jobYsonString)->AsMap()->GetChildValueOrThrow<std::string>("address");
-            YT_LOG_DEBUG(
-                jobNodeDescriptorOrError,
-                "Creating channel using job's address field from archive (OperationId: %v, JobId: %v, Address: %v)",
-                operationId,
-                jobId,
-                address);
+            YT_TLOG_DEBUG("Creating channel using job's address field from archive")
+                .With("OperationId", operationId)
+                .With("JobId", jobId)
+                .With("Address", address)
+                .With(jobNodeDescriptorOrError);
             return ChannelFactory_->CreateChannel(address);
         }
     } catch (const std::exception& ex) {
         auto error = TError(ex);
-        YT_LOG_DEBUG(
-            error,
-            "Failed to create node channel to job using address from archive (OperationId: %v, JobId: %v)",
-            operationId,
-            jobId);
+        YT_TLOG_DEBUG("Failed to create node channel to job using address from archive")
+            .With("OperationId", operationId)
+            .With("JobId", jobId)
+            .With(error);
         return error;
     }
 }
@@ -619,8 +614,8 @@ TErrorOr<TJobSpec> TClient::TryFetchJobSpecFromJobNode(
     auto rspOrError = WaitFor(req->Invoke());
     if (!rspOrError.IsOK()) {
         return TError("Failed to get job spec from job node")
-            << std::move(rspOrError)
-            << TErrorAttribute("job_id", jobId);
+            .With(std::move(rspOrError))
+            .With("job_id", jobId);
     }
 
     const auto& rsp = rspOrError.Value();
@@ -639,11 +634,10 @@ TErrorOr<TJobSpec> TClient::TryFetchJobSpecFromJobNode(
         if (nodeChannelOrError.IsOK()) {
             return TryFetchJobSpecFromJobNode(jobId, nodeChannelOrError.ValueOrThrow());
         }
-        YT_LOG_DEBUG(
-            nodeChannelOrError,
-            "Failed to create channel to job node using archive info (OperationId: %v, JobId: %v)",
-            operationId,
-            jobId);
+        YT_TLOG_DEBUG("Failed to create channel to job node using archive info")
+            .With("OperationId", operationId)
+            .With("JobId", jobId)
+            .With(nodeChannelOrError);
     }
     auto jobNodeDescriptorOrError = TryGetJobNodeDescriptor(jobId, requiredPermissions);
     if (!jobNodeDescriptorOrError.IsOK()) {
@@ -672,8 +666,8 @@ TJobSpec TClient::FetchJobSpecFromArchive(TJobId jobId)
 
     if (!resultOrError.IsOK()) {
         THROW_ERROR_EXCEPTION("Failed to get job spec from operation archive")
-            << TErrorAttribute("job_id", jobId)
-            << resultOrError;
+            .With("job_id", jobId)
+            .With(resultOrError);
     }
 
     const auto& result = resultOrError.Value();
@@ -689,13 +683,13 @@ TJobSpec TClient::FetchJobSpecFromArchive(TJobId jobId)
 
     if (!jobSpecStr) {
         THROW_ERROR_EXCEPTION("Missing job spec in job archive table")
-            << TErrorAttribute("job_id", jobId);
+            .With("job_id", jobId);
     }
 
     TJobSpec jobSpec;
     if (!TryDeserializeProto(&jobSpec, TRef::FromString(*jobSpecStr))) {
         THROW_ERROR_EXCEPTION("Failed to parse job spec fetched from operation archive")
-            << TErrorAttribute("job_id", jobId);
+            .With("job_id", jobId);
     }
 
     ValidateJobSpecVersion(jobId, jobSpec);
@@ -752,12 +746,10 @@ void TClient::ValidateOperationAccess(
     if (!operationOrError.IsOK()) {
         if (ignoreMissingOperation) {
             // We check against an empty ACL to allow only "superusers" and "root" access.
-            YT_LOG_WARNING(
-                operationOrError,
-                "Failed to get operation to validate access; "
-                "validating against empty ACL (OperationId: %v, JobId: %v)",
-                operationId,
-                jobId);
+            YT_TLOG_WARNING("Failed to get operation to validate access; validating against empty ACL")
+                .With("OperationId", operationId)
+                .With("JobId", jobId)
+                .With(operationOrError);
 
             ValidateOperationAccess(
                 operationId,
@@ -766,8 +758,8 @@ void TClient::ValidateOperationAccess(
                 permissions);
         } else {
             THROW_ERROR_EXCEPTION("Failed to validate operation ACL")
-                << TErrorAttribute("operation_id", operationId)
-                << operationOrError;
+                .With("operation_id", operationId)
+                .With(operationOrError);
         }
         return;
     }
@@ -797,15 +789,12 @@ void TClient::ValidateOperationAccess(
             accessControlRule.SetAcl(ConvertTo<TSerializableAccessControlList>(aclYson));
         } else {
             // We check against an empty ACL and ACO name to allow only "superusers" and "root" access.
-            YT_LOG_WARNING(
-                "job_spec_ext has neither ACL nor ACO name; "
-                "validating against empty ACL (JobId: %v)",
-                jobId);
+            YT_TLOG_WARNING("job_spec_ext has neither ACL nor ACO name; validating against empty ACL")
+                .With("JobId", jobId);
         }
     } else {
-        YT_LOG_WARNING(
-            "Job spec has no scheduler_job_spec_ext; validating against empty ACL (JobId: %v)",
-            jobId);
+        YT_TLOG_WARNING("Job spec has no scheduler_job_spec_ext; validating against empty ACL")
+            .With("JobId", jobId);
     }
 
     NScheduler::ValidateOperationAccess(
@@ -827,10 +816,8 @@ void TClient::ValidateOperationAccess(
     auto accessControlRule = TryGetAccessControlRuleFromOperation(operation);
     if (!accessControlRule) {
         // We check against an empty ACL to allow only "superusers" and "root" access.
-        YT_LOG_WARNING(
-            "Failed to get ACL or ACO name from operation attributes; "
-            "validating against empty ACL (OperationId: %v)",
-            operation.Id);
+        YT_TLOG_WARNING("Failed to get ACL or ACO name from operation attributes; validating against empty ACL")
+            .With("OperationId", operation.Id);
     }
 
     ValidateOperationAccess(
@@ -871,10 +858,9 @@ TJobSpec TClient::FetchJobSpec(
             return std::move(jobSpecFromProxyOrError).Value();
         }
 
-        YT_LOG_DEBUG(
-            jobSpecFromProxyOrError,
-            "Failed to fetch job spec from job node (JobId: %v)",
-            jobId);
+        YT_TLOG_DEBUG("Failed to fetch job spec from job node")
+            .With("JobId", jobId)
+            .With(jobSpecFromProxyOrError);
     }
 
     if (Any(specSource & EJobSpecSource::Archive)) {
@@ -891,8 +877,8 @@ TJobSpec TClient::FetchJobSpec(
         return jobSpec;
     }
     THROW_ERROR_EXCEPTION("Failed to get job spec")
-        << TErrorAttribute("job_id", jobId)
-        << TErrorAttribute("spec_source", specSource);
+        .With("job_id", jobId)
+        .With("spec_source", specSource);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -940,7 +926,8 @@ void TClient::DoDumpJobContext(
     ToProto(req->mutable_job_id(), jobId);
     ToProto(req->mutable_transaction_id(), transaction->GetId());
 
-    YT_LOG_DEBUG("Requesting node to dump job input context (TransactionId: %v)", transaction->GetId());
+    YT_TLOG_DEBUG("Requesting node to dump job input context")
+        .With("TransactionId", transaction->GetId());
 
     auto rsp = WaitFor(req->Invoke()).
         ValueOrThrow();
@@ -950,7 +937,8 @@ void TClient::DoDumpJobContext(
 
     auto chunkId = chunkIds[0];
 
-    YT_LOG_DEBUG("Received job input context dump from node (ChunkId: %v)", chunkId);
+    YT_TLOG_DEBUG("Received job input context dump from node")
+        .With("ChunkId", chunkId);
 
     try {
         TJobFile file{
@@ -972,13 +960,12 @@ void TClient::DoDumpJobContext(
             "Error saving input context for job %v into %v",
             jobId,
             path)
-            << ex;
+            .With(ex);
     }
 
-    YT_LOG_DEBUG(
-        "Job input context attached (ChunkId: %v, Path: %v)",
-        chunkId,
-        path);
+    YT_TLOG_DEBUG("Job input context attached")
+        .With("ChunkId", chunkId)
+        .With("Path", path);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1020,8 +1007,8 @@ IAsyncZeroCopyInputStreamPtr TClient::DoGetJobInput(
 
     if (!locateChunksResult.IsOK()) {
         THROW_ERROR_EXCEPTION("Failed to locate chunks used in job input")
-            << TErrorAttribute("job_id", jobId)
-            << locateChunksResult;
+            .With("job_id", jobId)
+            .With(locateChunksResult);
     }
 
     auto jobSpecHelper = NJobProxy::CreateJobSpecHelper(jobSpec);
@@ -1057,7 +1044,7 @@ TYsonString TClient::DoGetJobInputPaths(
     auto optionalDataSourceDirectoryExt = FindProtoExtension<TDataSourceDirectoryExt>(jobSpecExt.extensions());
     if (!optionalDataSourceDirectoryExt) {
         THROW_ERROR_EXCEPTION("Cannot build job input paths; job is either too old or has intermediate input")
-            << TErrorAttribute("job_id", jobId);
+            .With("job_id", jobId);
     }
 
     const auto& dataSourceDirectoryExt = *optionalDataSourceDirectoryExt;
@@ -1066,7 +1053,7 @@ TYsonString TClient::DoGetJobInputPaths(
     for (const auto& dataSource : dataSourceDirectory->DataSources()) {
         if (!dataSource->GetPath()) {
             THROW_ERROR_EXCEPTION("Cannot build job input paths; job has intermediate input")
-                << TErrorAttribute("job_id", jobId);
+                .With("job_id", jobId);
         }
     }
 
@@ -1150,15 +1137,13 @@ auto RetryJobIsNotRunning(
 
     auto rspOrError = invokeRequest();
     for (int retry = 0; needRetry(rspOrError) && retry < RetryCount; ++retry) {
-        YT_LOG_DEBUG(
-            "Job state is \"running\" but job phase is not, retrying "
-            "(OperationId: %v, JobId: %v, Retry: %v, RetryCount: %v, RetryBackoff: %v, Error: %v)",
-            operationId,
-            jobId,
-            retry,
-            RetryCount,
-            RetryBackoff,
-            rspOrError);
+        YT_TLOG_DEBUG("Job state is \"running\" but job phase is not, retrying")
+            .With("OperationId", operationId)
+            .With("JobId", jobId)
+            .With("Retry", retry)
+            .With("RetryCount", RetryCount)
+            .With("RetryBackoff", RetryBackoff)
+            .With("Error", rspOrError);
         TDelayedExecutor::WaitForDuration(RetryBackoff);
         rspOrError = invokeRequest();
     }
@@ -1199,9 +1184,10 @@ std::optional<TGetJobStderrResponse> TClient::DoGetUserJobStderrFromNode(
         if (!IsNoSuchJobOrOperationError(rspOrError) &&
             !rspOrError.FindMatching(NJobProberClient::EErrorCode::JobIsNotRunning))
         {
-            YT_LOG_WARNING(rspOrError, "Failed to get job stderr from job proxy (OperationId: %v, JobId: %v)",
-                operationId,
-                jobId);
+            YT_TLOG_WARNING("Failed to get job stderr from job proxy")
+                .With("OperationId", operationId)
+                .With("JobId", jobId)
+                .With(rspOrError);
         }
 
         return {};
@@ -1265,9 +1251,9 @@ TSharedRef TClient::DoGetJobStderrFromArchive(
         auto matchedError = ex.Error().FindMatching(NYTree::EErrorCode::ResolveError);
         if (!matchedError) {
             THROW_ERROR_EXCEPTION("Failed to get job stderr from archive")
-                << TErrorAttribute("operation_id", operationId)
-                << TErrorAttribute("job_id", jobId)
-                << ex;
+                .With("operation_id", operationId)
+                .With("job_id", jobId)
+                .With(ex);
         }
         return {};
     }
@@ -1303,8 +1289,8 @@ TGetJobStderrResponse TClient::DoGetJobStderr(
     // COMPAT(bystrovserg)
     if (stderrType == EJobStderrType::GpuCheckStderr && archiveVersion < 61) {
         THROW_ERROR_EXCEPTION(EErrorCode::UnsupportedArchiveVersion, "GPU checker stderr is not supported in current archive version")
-            << TErrorAttribute("current_archive_version", archiveVersion)
-            << TErrorAttribute("required_archive_version", 61);
+            .With("current_archive_version", archiveVersion)
+            .With("required_archive_version", 61);
     }
 
     if (auto stderrRef = DoGetJobStderrFromArchive(operationId, jobId, deadline, stderrType)) {
@@ -1316,8 +1302,8 @@ TGetJobStderrResponse TClient::DoGetJobStderr(
     }
 
     THROW_ERROR_EXCEPTION(NControllerAgent::EErrorCode::NoSuchJob, "Stderr is not found")
-        << TErrorAttribute("operation_id", operationId)
-        << TErrorAttribute("job_id", jobId);
+        .With("operation_id", operationId)
+        .With("job_id", jobId);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1375,9 +1361,9 @@ TSharedRef TClient::DoGetJobFailContextFromNode(
             return TSharedRef();
         }
         THROW_ERROR_EXCEPTION("Failed to get job job fail context from node")
-            << TErrorAttribute("operation_id", operationId)
-            << TErrorAttribute("job_id", jobId)
-            << std::move(rspOrError);
+            .With("operation_id", operationId)
+            .With("job_id", jobId)
+            .With(std::move(rspOrError));
     }
     auto rsp = rspOrError.Value();
     return TSharedRef::FromString(rsp->fail_context_data());
@@ -1423,9 +1409,9 @@ TSharedRef TClient::DoGetJobFailContextFromArchive(
         auto matchedError = ex.Error().FindMatching(NYTree::EErrorCode::ResolveError);
         if (!matchedError) {
             THROW_ERROR_EXCEPTION("Failed to get job fail_context from archive")
-                << TErrorAttribute("operation_id", operationId)
-                << TErrorAttribute("job_id", jobId)
-                << ex.Error();
+                .With("operation_id", operationId)
+                .With("job_id", jobId)
+                .With(ex.Error());
         }
     }
 
@@ -1453,8 +1439,8 @@ TSharedRef TClient::DoGetJobFailContext(
     THROW_ERROR_EXCEPTION(
         NControllerAgent::EErrorCode::NoSuchJob,
         "Job fail context is not found")
-        << TErrorAttribute("operation_id", operationId)
-        << TErrorAttribute("job_id", jobId);
+        .With("operation_id", operationId)
+        .With("job_id", jobId);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1506,9 +1492,10 @@ void TClient::UpdateJobTracesWithJobState(
         auto jobYsonMap = ConvertToNode(jobYsonString)->AsMap();
         jobState = jobYsonMap->GetChildValueOrThrow<EJobState>("state");
     } catch (const std::exception& ex) {
-        YT_LOG_DEBUG(ex, "Failed to fetch state from job, skipping job trace update (OperationId: %v, JobId: %v)",
-            operationId,
-            jobId);
+        YT_TLOG_DEBUG("Failed to fetch state from job, skipping job trace update")
+            .With("OperationId", operationId)
+            .With("JobId", jobId)
+            .With(ex);
         return;
     }
 
@@ -1559,8 +1546,8 @@ TFuture<std::vector<TJobTraceMeta>> TClient::DoListJobTracesFromArchive(
     // COMPAT(bystrovserg)
     if (archiveVersion < 63) {
         THROW_ERROR_EXCEPTION(EErrorCode::UnsupportedArchiveVersion, "Job trace meta is not supported in current archive version")
-            << TErrorAttribute("current_archive_version", archiveVersion)
-            << TErrorAttribute("required_archive_version", 63);
+            .With("current_archive_version", archiveVersion)
+            .With("required_archive_version", 63);
     }
 
     NQueryClient::TQueryBuilder builder;
@@ -1634,9 +1621,9 @@ static void ValidateNonNull(
 {
     if (Y_UNLIKELY(value.Type == EValueType::Null)) {
         auto error = TError("Unexpected null value in column %Qv in job archive", name)
-            << TErrorAttribute("operation_id", operationId);
+            .With("operation_id", operationId);
         if (jobId.Underlying()) {
-            error = error << TErrorAttribute("job_id", jobId);
+            error = error.With("job_id", jobId);
         }
         THROW_ERROR error;
     }
@@ -2306,17 +2293,16 @@ static void ParseJobsFromControllerAgentResponse(
             "Error obtaining %Qv of operation %v from controller agent orchid",
             key,
             operationId)
-            << rspOrError;
+            .With(rspOrError);
     }
 
     auto rsp = rspOrError.Value();
     auto items = ConvertToNode(NYson::TYsonString(rsp->value()))->AsMap();
     *totalCount += items->GetChildren().size();
 
-    YT_LOG_DEBUG(
-        "Received %Qv jobs from controller agent (Count: %v)",
-        key,
-        items->GetChildren().size());
+    YT_TLOG_DEBUG("Received jobs from controller agent")
+        .With("Key", key)
+        .With("Count", items->GetChildren().size());
 
     auto filter = [&] (const INodePtr& jobNode) -> bool {
         const auto& jobMap = jobNode->AsMap();
@@ -2401,7 +2387,7 @@ TFuture<TListJobsFromControllerAgentResult> TClient::DoListJobsFromControllerAge
                 THROW_ERROR_EXCEPTION(NApi::EErrorCode::UncertainOperationControllerState,
                     "Error obtaining state of operation %v from controller agent",
                     operationId)
-                    << operationStateRspOrError;
+                    .With(operationStateRspOrError);
             }
             auto state = ConvertTo<EControllerState>(TYsonStringBuf(operationStateRspOrError.Value()->value()));
             if (state == EControllerState::Preparing) {
@@ -2591,19 +2577,17 @@ static TError TryFillJobPools(
 
     auto operationOrError = WaitFor(client->GetOperation(operationId, getOperationOptions));
     if (!operationOrError.IsOK()) {
-        YT_LOG_DEBUG(
-            operationOrError,
-            "Failed to fetch operation to extract pools (OperationId: %v)",
-            operationId);
+        YT_TLOG_DEBUG("Failed to fetch operation to extract pools")
+            .With("OperationId", operationId)
+            .With(operationOrError);
         return operationOrError;
     }
 
     auto path = "/scheduling_options_per_pool_tree";
     auto schedulingOptionsPerPoolTreeYson = TryGetAny(operationOrError.Value().RuntimeParameters.AsStringBuf(), path);
     if (!schedulingOptionsPerPoolTreeYson) {
-        YT_LOG_DEBUG(
-            "Operation runtime_parameters miss scheduling_options_per_pool_tree (OperationId: %v)",
-            operationId);
+        YT_TLOG_DEBUG("Operation runtime_parameters miss scheduling_options_per_pool_tree")
+            .With("OperationId", operationId);
         return TError(
             "Operation %v runtime_parameters miss scheduling_options_per_pool_tree",
             operationId);
@@ -2766,7 +2750,7 @@ TListJobsResult TClient::DoListJobs(
             result.Errors.push_back(TError(
                 EErrorCode::JobArchiveUnavailable,
                 "Job archive is unavailable")
-                << archiveResultOrError);
+                .With(archiveResultOrError));
         }
     }
 
@@ -2789,10 +2773,9 @@ TListJobsResult TClient::DoListJobs(
     if (attributesToReturn.contains("pool")) {
         auto error = TryFillJobPools(this, operationId, TMutableRange(result.Jobs), Logger);
         if (!error.IsOK()) {
-            YT_LOG_DEBUG(
-                error,
-                "Failed to fill job pools (OperationId: %v)",
-                operationId);
+            YT_TLOG_DEBUG("Failed to fill job pools")
+                .With("OperationId", operationId)
+                .With(error);
         }
     }
     if (attributesToReturn.contains("is_stale")) {
@@ -2809,7 +2792,7 @@ TListJobsResult TClient::DoListJobs(
             result.Errors.push_back(TError(
                 EErrorCode::JobArchiveUnavailable,
                 "Failed to fetch statistics from job archive")
-                << statisticsOrError);
+                .With(statisticsOrError));
         } else {
             result.Statistics = std::move(statisticsOrError).Value();
             result.ArchiveJobCount = 0;
@@ -2961,7 +2944,7 @@ std::optional<TJob> TClient::DoGetJobFromControllerAgent(
 
     if (!batchRspOrError.IsOK()) {
         THROW_ERROR_EXCEPTION("Cannot get jobs from controller agent")
-            << batchRspOrError;
+            .With(batchRspOrError);
     }
     const auto& batchRsp = batchRspOrError.Value();
 
@@ -2984,7 +2967,7 @@ std::optional<TJob> TClient::DoGetJobFromControllerAgent(
                 "Error obtaining job %v of operation %v from controller agent",
                 jobId,
                 operationId)
-                << rspOrError;
+                .With(rspOrError);
         }
     }
 
@@ -2993,7 +2976,7 @@ std::optional<TJob> TClient::DoGetJobFromControllerAgent(
         THROW_ERROR_EXCEPTION(NApi::EErrorCode::UncertainOperationControllerState,
             "Error obtaining state of operation %v from controller agent",
             operationId)
-            << rspOrError;
+            .With(rspOrError);
     }
     auto state = ConvertTo<EControllerState>(TYsonStringBuf(rspOrError.Value()->value()));
     if (state == EControllerState::Preparing) {
@@ -3075,11 +3058,10 @@ TYsonString TClient::DoGetJob(
     if (attributes.contains("pool")) {
         auto error = TryFillJobPools(this, operationId, TMutableRange(&job, 1), Logger);
         if (!error.IsOK()) {
-            YT_LOG_DEBUG(
-                error,
-                "Failed to fill job pool (OperationId: %v, JobId: %v)",
-                operationId,
-                jobId);
+            YT_TLOG_DEBUG("Failed to fill job pool")
+                .With("OperationId", operationId)
+                .With("JobId", jobId)
+                .With(error);
         }
     }
 

@@ -77,7 +77,7 @@ class TNvidiaSmiGpuInfoProvider
             auto now = TInstant::Now();
             if (now > deadline) {
                 THROW_ERROR_EXCEPTION("Failed to get GPU information within timeout")
-                    << TErrorAttribute("timeout", timeout);
+                    .With("timeout", timeout);
             } else {
                 remainingTimeout = deadline - now;
             }
@@ -97,7 +97,7 @@ class TNvidiaSmiGpuInfoProvider
         checkAndUpdateTimeout();
         if (!nvidiaSmiResult.Status.IsOK()) {
             THROW_ERROR_EXCEPTION("Failed to check healthy GPUs: 'nvidia-smi --query-gpu' exited with an error")
-                << nvidiaSmiResult.Status;
+                .With(nvidiaSmiResult.Status);
         }
 
         auto output = nvidiaSmiResult.Output.ToStringBuf();

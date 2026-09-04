@@ -8,6 +8,56 @@ Is released as a docker image.
 
 **Releases:**
 
+{% cut "**2.11.0**" %}
+
+**Release date:** 2026-07-31
+
+
+**Release page:** [2.11.0](https://github.com/ytsaurus/ytsaurus-spyt/releases/tag/spyt/2.11.0)
+
+
+**Docker image:** [ghcr.io/ytsaurus/spyt:2.11.0](https://github.com/orgs/ytsaurus/packages/container/spyt/1085278761?tag=2.11.0)
+
+
+Major release that enables support for Spark 4.2.x and submitting jobs to an inner cluster without JVM.
+
+- Spark 4.2.x and Java 25 support
+- Java 21 support for Spark 4.0.x and above
+- Refactor submit to an inner standalone cluster to use pure Python implementation without JVM
+- Support for enabling YTsaurus shuffle service on per application basis for standalone clusters
+- Push based mode for the YTsaurus shuffle service, enabled with `spark.ytsaurus.shuffle.push.enabled`
+- Asynchronous read task creation for ytPartitioning, limited by the new `spark.ytsaurus.throttling.maxConcurrency` option 
+- `spark.ytsaurus.*` became the primary configuration prefix, `spark.yt.*` is kept as a fallback alias
+- Log export to Monium, enabled with `spark.ytsaurus.logs.export.enabled`
+- Spark Connect driver uses the temporary token of its vanilla operation, the `spark.ytsaurus.connect.token.refresh.period` option is removed
+- Fixed driver hangs for distributed writes in case of errors
+- Fixed duplicates of Spark configuration keys re-injected from the environment
+- Other minor fixes and improvements
+
+{% endcut %}
+
+
+{% cut "**2.9.3**" %}
+
+**Release date:** 2026-07-13
+
+
+**Release page:** [2.9.3](https://github.com/ytsaurus/ytsaurus-spyt/releases/tag/spyt/2.9.3)
+
+
+**Docker image:** [ghcr.io/ytsaurus/spyt:2.9.3](https://github.com/orgs/ytsaurus/packages/container/spyt/1028609465?tag=2.9.3)
+
+
+Maintenance release with minor enhancements
+
+- Enable YTsaurus shuffle service per application instead of globally on standalone clusters
+- Fix operation_alias and enable_multi_operation_mode compatibility
+- Fix driver hangs for distributed writes in case of errors
+- Other minor fixes and improvements
+
+{% endcut %}
+
+
 {% cut "**2.10.0**" %}
 
 **Release date:** 2026-05-27

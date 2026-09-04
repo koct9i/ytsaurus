@@ -41,7 +41,8 @@ EAbortReason GetAbortReason(const TError& resultError, const TLogger& Logger)
         return resultError.Attributes().Get<EAbortReason>("abort_reason", EAbortReason::Scheduler);
     } catch (const std::exception& ex) {
         // Process unknown abort reason from node.
-        YT_LOG_WARNING(ex, "Found unknown abort reason in job result");
+        YT_TLOG_WARNING("Found unknown abort reason in job result")
+            .With(ex);
         return EAbortReason::Unknown;
     }
 }
@@ -277,7 +278,7 @@ std::unique_ptr<TAbortedJobSummary> CreateAbortedJobSummary(
     summary.FinishTime = TInstant::Now();
 
     auto error = TError("Allocation finished concurrently with settling job")
-        << TErrorAttribute("abort_reason", EAbortReason::AllocationFinished);
+        .With("abort_reason", EAbortReason::AllocationFinished);
 
     ToProto(
         summary.Result.emplace().mutable_error(),
@@ -330,9 +331,9 @@ std::unique_ptr<TAbortedJobSummary> CreateAbortedJobSummary(
 {
     TAbortedJobSummary summary{other, abortReason};
 
-    outerError <<= TErrorAttribute("abort_reason", abortReason);
+    outerError.Add("abort_reason", abortReason);
     if (other.Error && !other.Error->IsOK()) {
-        outerError <<= *other.Error;
+        outerError.Add(*other.Error);
     }
 
     ToProto(
@@ -502,10 +503,9 @@ std::unique_ptr<TJobSummary> ParseJobSummary(NProto::TJobStatus* const status, c
         case EJobState::Waiting:
             return std::make_unique<TWaitingJobSummary>(status);
         default:
-            YT_LOG_ERROR(
-                "Unexpected job state in parsing status (JobState: %v, JobId: %v)",
-                state,
-                FromProto<TJobId>(status->job_id()));
+            YT_TLOG_ERROR("Unexpected job state in parsing status")
+                .With("JobState", state)
+                .With("JobId", FromProto<TJobId>(status->job_id()));
             YT_ABORT();
     }
 }

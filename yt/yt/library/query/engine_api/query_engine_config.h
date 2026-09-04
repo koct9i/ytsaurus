@@ -51,7 +51,11 @@ struct TQueryEngineDynamicConfig
     std::optional<bool> AllowReverseScanForOrderBy; // COMPAT(dtorilov): Remove after 26.1.
     std::optional<bool> PrefetchJoinTables;
 
+    std::optional<bool> AllowMultipleJoinSubqueriesForNonLookupJoins;
+
     std::optional<i64> JoinCacheSize;
+
+    std::optional<int> MaxSubsplitsPerTablet;
 
     REGISTER_YSON_STRUCT(TQueryEngineDynamicConfig);
 

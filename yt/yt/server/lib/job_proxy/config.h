@@ -21,7 +21,7 @@
 
 #include <yt/yt/library/containers/cri/config.h>
 
-#include <yt/yt/library/tracing/jaeger/tracer.h>
+#include <yt/yt/library/tracing/jaeger/config.h>
 
 #include <yt/yt/client/file_client/config.h>
 
@@ -456,6 +456,14 @@ struct TJobProxyInternalConfig
     TDuration HeartbeatPeriod;
     TDuration InputPipeBlinkerPeriod;
 
+    //! Enables reporting per-job I/O statistics to data nodes.
+    //! When disabled, neither io_consumed nor io_fair_share_weight is sent,
+    //! including an explicitly configured reader or writer weight.
+    bool EnableJobIoStatistics;
+
+    //! Time span over which the job I/O meter retains accounted I/O history.
+    TDuration JobIoMeterMaxHistoryDuration;
+
     TJobEnvironmentConfig JobEnvironment;
 
     //! Addresses derived from node local descriptor to leverage locality.
@@ -555,12 +563,11 @@ struct TJobProxyInternalConfig
     i64 AdaptiveRowCountUpperBound;
 
     std::optional<int> OomScoreAdjOnExceededMemoryReserve;
+    bool ReadOomScoreAdjBeforeUpdate;
 
     bool UseNewDeliveryFencedConnection;
 
-    //! Enable root volume disk quota.
-    //! Apply the quota to the entire root filesystem instead of the sandbox and tmp folders individually.
-    bool EnableRootVolumeDiskQuota;
+    bool DisableRbindRootVolume;
 
     //! Restrict places allowed for porto volumes and layers.
     bool RestrictPortoPlace;
@@ -600,6 +607,8 @@ struct TJobProxyDynamicConfig
 {
     NTracing::TJaegerTracerDynamicConfigPtr Jaeger;
 
+    bool EnableJobIoStatistics;
+
     bool EnableJobShellSeccopm;
 
     bool UsePortoKillForSignalling;
@@ -628,6 +637,7 @@ struct TJobProxyDynamicConfig
     i64 AdaptiveRowCountUpperBound;
 
     std::optional<int> OomScoreAdjOnExceededMemoryReserve;
+    bool ReadOomScoreAdjBeforeUpdate;
 
     bool UseNewDeliveryFencedConnection;
 

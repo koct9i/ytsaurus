@@ -81,10 +81,9 @@ DEFINE_REFCOUNTED_TYPE(TStrategyTestingOptions)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TStrategyControllerThrottling
+struct TStrategyControllerThrottling
     : public virtual NYTree::TYsonStruct
 {
-public:
     TDuration ScheduleAllocationStartBackoffTime;
     TDuration ScheduleAllocationMaxBackoffTime;
     double ScheduleAllocationBackoffMultiplier;
@@ -245,6 +244,23 @@ DEFINE_REFCOUNTED_TYPE(TGpuSchedulingPolicyTestingOptions)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+//! Unset fields fall back to the tree-level values from TGpuSchedulingPolicyConfig.
+struct TGpuSchedulingPolicyModuleConfig
+    : public NYTree::TYsonStruct
+{
+    std::optional<TDuration> ModuleReconsiderationTimeout;
+
+    std::optional<std::vector<TModuleShareAndNetworkPriority>> ModuleShareToNetworkPriority;
+
+    REGISTER_YSON_STRUCT(TGpuSchedulingPolicyModuleConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TGpuSchedulingPolicyModuleConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct TGpuSchedulingPolicyConfig
     : public NYTree::TYsonStruct
 {
@@ -257,7 +273,12 @@ struct TGpuSchedulingPolicyConfig
     // TODO(eshcherbin): Rework how modules are configured.
     ESchedulingSegmentModuleType ModuleType;
 
+    //! Legacy way to configure the module set; merged into "module_configs" by the postprocessor.
+    // TODO(yaishenka): Drop the legacy "modules" field and switch fully to per-module configs.
     THashSet<std::string> Modules;
+
+    //! Per-module configuration; after postprocessing its keys define the module set.
+    THashMap<std::string, TGpuSchedulingPolicyModuleConfigPtr> ModuleConfigs;
 
     TDuration PriorityModuleBindingTimeout;
 
@@ -526,6 +547,8 @@ struct TStrategyTreeConfig
     bool EnableGuaranteePriorityScheduling;
 
     bool EnableStepFunctionForGangOperations;
+    //! Hard gate: turns FIFO children reordering off tree-wide no matter what the pools ask for.
+    bool EnableFifoChildrenReorderingForGuaranteeUtilization;
     bool EnableImprovedFairShareByFitFactorComputation;
     bool EnableImprovedFairShareByFitFactorComputationDistributionGap;
     bool EnableFastFifoFairShareByFitFactorComputation;
@@ -536,6 +559,7 @@ struct TStrategyTreeConfig
     TJobResourcesConfigPtr MinNodeResourceLimits;
 
     TDuration MinNodeResourceLimitsCheckPeriod;
+    TDuration MinNodeResourceLimitsViolationTimeout;
 
     bool AllowGangOperationsOnlyInFifoPools;
 
@@ -551,6 +575,8 @@ struct TStrategyTreeConfig
     bool ConsiderSingleAllocationVanillaOperationsAsGang;
 
     bool UsePrecommitForPreemption;
+
+    bool EnableInfiniteResourceLimitsOvercommit;
 
     TGpuSchedulingPolicyConfigPtr GpuSchedulingPolicy;
     EPolicyKind PolicyKind;

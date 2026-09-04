@@ -762,6 +762,22 @@ TEST_F(TParseAndPrepareExpressionTest, CompareTuple)
     ProfileForBothExecutionBackends(expr, schema, nullptr, &variables);
 }
 
+TEST_F(TParseAndPrepareExpressionTest, CompareCompositeWithScalar)
+{
+    auto schema = New<TTableSchema>(std::vector<TColumnSchema>{
+        TColumnSchema("composite_column", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))),
+    });
+
+    EXPECT_THROW_THAT(
+        ParseAndPrepareExpression(
+            "composite_column = 'value'",
+            *schema,
+            GetBuiltinTypeInferrers(),
+            /*references*/ nullptr,
+            TPreparePlanFragmentOptions{.BuilderVersion = DefaultExpressionBuilderVersion}),
+        HasSubstr("Type mismatch in expression"));
+}
+
 TEST_P(TParseAndPrepareExpressionTest, Simple)
 {
     auto schema = GetSampleTableSchema();
@@ -3264,6 +3280,12 @@ TEST_P(TEvaluateExpressionTest, Basic)
         TColumnSchema("any", EValueType::Any),
         TColumnSchema("b", EValueType::Boolean),
         TColumnSchema("l", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int32))),
+        TColumnSchema("composite", OptionalLogicalType(
+            StructLogicalType(
+                {
+                    TStructField{"nested", "nested", SimpleLogicalType(ESimpleLogicalValueType::String)},
+                },
+                /*removedFieldStableNames*/ {}))),
     });
 
     auto expr = ParseAndPrepareExpression(exprString, *schema);
@@ -3476,6 +3498,10 @@ INSTANTIATE_TEST_SUITE_P(
             "l=[12;-2;3]",
             "l",
             MakeComposite("[12;-2;3]")),
+        std::tuple<const char*, const char*, TUnversionedValue>(
+            "composite={nested=\"value\"}",
+            "composite.nested",
+            MakeString("value")),
         std::tuple<const char*, const char*, TUnversionedValue>(
             "l=[12;-2;3]",
             "to_any(l)",

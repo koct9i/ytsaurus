@@ -75,6 +75,7 @@ TJob::TJob(IJobHostPtr host)
     ChunkReadOptions_.WorkloadDescriptor = Host_->GetJobSpecHelper()->GetJobIOConfig()->TableReader->WorkloadDescriptor;
     ChunkReadOptions_.ChunkReaderStatistics = New<TChunkReaderStatistics>();
     ChunkReadOptions_.ReadSessionId = TReadSessionId::Create();
+    ChunkReadOptions_.JobIoMeter = Host_->GetJobIoMeter();
 }
 
 void TJob::Initialize()
@@ -201,7 +202,9 @@ TSimpleJobBase::TSimpleJobBase(IJobHostPtr host)
     : TJob(host)
     , JobSpec_(host->GetJobSpecHelper()->GetJobSpec())
     , JobSpecExt_(host->GetJobSpecHelper()->GetJobSpecExt())
-{ }
+{
+    WriteBlocksOptions_.ClientOptions.JobIoMeter = host->GetJobIoMeter();
+}
 
 void TSimpleJobBase::Initialize()
 {
@@ -229,7 +232,7 @@ void TSimpleJobBase::Initialize()
 
 TJobResult TSimpleJobBase::Run()
 {
-    YT_LOG_INFO("Initializing");
+    YT_TLOG_INFO("Initializing");
 
     Host_->OnPrepared();
 
@@ -237,7 +240,8 @@ TJobResult TSimpleJobBase::Run()
     auto enableRowFilter = jobSpec.input_query_spec().options().enable_row_filter();
 
     IOStartTime_ = GetCpuInstant();
-    YT_LOG_INFO("Started measuring I/O time (IOStartTime: %v)", CpuInstantToInstant(IOStartTime_));
+    YT_TLOG_INFO("Started measuring I/O time")
+        .With("IOStartTime", CpuInstantToInstant(IOStartTime_));
 
     if (jobSpec.has_input_query_spec() && enableRowFilter) {
         RunQuery(
@@ -249,7 +253,7 @@ TJobResult TSimpleJobBase::Run()
         InitializeReader();
         InitializeWriter();
 
-        YT_LOG_INFO("Reading and writing");
+        YT_TLOG_INFO("Reading and writing");
 
         TPipeReaderToWriterOptions options;
         options.BufferRowCount = Host_->GetJobSpecHelper()->GetJobIOConfig()->BufferRowCount;
@@ -261,7 +265,7 @@ TJobResult TSimpleJobBase::Run()
             options);
     }
 
-    YT_LOG_INFO("Finalizing");
+    YT_TLOG_INFO("Finalizing");
     {
         TJobResult result;
         ToProto(result.mutable_error(), TError());
@@ -296,12 +300,14 @@ bool TSimpleJobBase::ShouldSendBoundaryKeys() const
 double TSimpleJobBase::GetProgress() const
 {
     if (TotalRowCount_ == 0) {
-        YT_LOG_WARNING("Calculated job progress, total row count is zero");
+        YT_TLOG_WARNING("Calculated job progress, total row count is zero");
         return 0;
     } else {
         i64 rowCount = Reader_ ? Reader_->GetDataStatistics().row_count() : 0;
         double progress = static_cast<double>(rowCount) / TotalRowCount_;
-        YT_LOG_DEBUG("Calculated job progress (Progress: %v, ReadRowCount: %v)", progress, rowCount);
+        YT_TLOG_DEBUG("Calculated job progress")
+            .With("Progress", progress)
+            .With("ReadRowCount", rowCount);
         return progress;
     }
 }
@@ -375,7 +381,7 @@ void TSimpleJobBase::Interrupt()
 {
     if (!Host_->GetJobSpecHelper()->IsReaderInterruptionSupported()) {
         THROW_ERROR_EXCEPTION("Interrupting is not supported for this type of jobs")
-            << TErrorAttribute("job_type", Host_->GetJobSpecHelper()->GetJobType());
+            .With("job_type", Host_->GetJobSpecHelper()->GetJobType());
     }
 
     if (!Initialized_) {
@@ -404,7 +410,7 @@ ISchemalessMultiChunkReaderPtr TSimpleJobBase::DoInitializeReader(
     Reader_ = CreateProfilingMultiChunkReader(ReaderFactory_(nameTable, columnFilter), IOStartTime_);
     Initialized_ = true;
 
-    YT_LOG_INFO("Reader initialized");
+    YT_TLOG_INFO("Reader initialized");
 
     return Reader_;
 }
@@ -417,7 +423,7 @@ ISchemalessMultiChunkWriterPtr TSimpleJobBase::DoInitializeWriter(
 
     Writer_ = CreateProfilingMultiChunkWriter(WriterFactory_(nameTable, schema), IOStartTime_);
 
-    YT_LOG_INFO("Writer initialized");
+    YT_TLOG_INFO("Writer initialized");
 
     return Writer_;
 }

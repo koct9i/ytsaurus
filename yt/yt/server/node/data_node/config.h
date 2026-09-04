@@ -36,8 +36,6 @@
 
 namespace NYT::NDataNode {
 
-using namespace NNode;
-
 ////////////////////////////////////////////////////////////////////////////////
 
 struct TP2PConfig
@@ -85,7 +83,7 @@ DEFINE_REFCOUNTED_TYPE(TP2PConfig)
 ////////////////////////////////////////////////////////////////////////////////
 
 struct TChunkLocationConfig
-    : public TChunkLocationConfigBase
+    : public NNode::TChunkLocationConfigBase
 {
     static constexpr bool EnableHazard = true;
 
@@ -112,6 +110,9 @@ struct TChunkLocationConfig
 
     TEnumIndexedArray<EWorkloadCategory, std::optional<double>> FairShareWorkloadCategoryWeights;
 
+    double WeightedRequestWeight;
+    double UnweightedRequestWeight;
+
     //! If the tracked memory is close to the limit, new sessions will not be started.
     double MemoryLimitFractionForStartingNewSessions;
 
@@ -136,6 +137,9 @@ struct TChunkLocationDynamicConfig
     std::optional<i64> CoalescedReadMaxGapSize;
 
     TEnumIndexedArray<EWorkloadCategory, std::optional<double>> FairShareWorkloadCategoryWeights;
+
+    std::optional<double> WeightedRequestWeight;
+    std::optional<double> UnweightedRequestWeight;
 
     //! If the tracked memory is close to the limit, new sessions will not be started.
     std::optional<double> MemoryLimitFractionForStartingNewSessions;
@@ -868,6 +872,40 @@ DEFINE_REFCOUNTED_TYPE(TJobControllerDynamicConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct TMediumAwareBlockCacheManagerConfig
+    : public NYTree::TYsonStruct
+{
+    bool Enable = false;
+    //! Block cache configuration grouped by medium name.
+    //! Each capacity is specified per location and multiplied by the location count for the medium.
+    THashMap<std::string, NChunkClient::TBlockCacheConfigPtr> BlockCacheConfigPerMediumPerLocation;
+
+    REGISTER_YSON_STRUCT(TMediumAwareBlockCacheManagerConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TMediumAwareBlockCacheManagerConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct TMediumAwareBlockCacheManagerDynamicConfig
+    : public NYTree::TYsonStruct
+{
+    std::optional<bool> Enable;
+    //! Block cache overrides grouped by medium name.
+    //! Each capacity is specified per location and multiplied by the location count for the medium.
+    THashMap<std::string, NChunkClient::TBlockCacheDynamicConfigPtr> BlockCacheConfigPerMediumPerLocation;
+
+    REGISTER_YSON_STRUCT(TMediumAwareBlockCacheManagerDynamicConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TMediumAwareBlockCacheManagerDynamicConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct TDataNodeConfig
     : public TJournalManagerConfig
 {
@@ -913,8 +951,11 @@ struct TDataNodeConfig
     //! Cache for partition block metas.
     TSlruCacheConfigPtr BlockMetaCache;
 
-    //! Cache for all types of blocks.
+    //! Ordinary block cache configuration.
     NChunkClient::TBlockCacheConfigPtr BlockCache;
+
+    //! Medium-aware block cache manager configuration.
+    TMediumAwareBlockCacheManagerConfigPtr MediumAwareBlockCacheManager;
 
     //! Opened blob chunks cache.
     TSlruCacheConfigPtr BlobReaderCache;
@@ -955,6 +996,10 @@ struct TDataNodeConfig
     //! Smoothing interval for net out limit throttling.
     TDuration NetOutThrottlingDuration;
 
+    //! Write requests are throttled when the number of bytes queued at in_throttler exceeds this limit.
+    //! This is a global limit.
+    i64 NetInThrottlingLimit;
+
     //! If |true| data node will reply instantly when network is throttling.
     bool EnableSendBlocksNetThrottling;
 
@@ -972,8 +1017,19 @@ struct TDataNodeConfig
     //! If |true| then write throttling locations on StartChunk won't be chosen.
     bool SkipWriteThrottlingLocations;
 
-    //! If |true| then IO requests in one session are proccessed sequentially.
+    //! If |true| then IO requests in one session are processed sequentially.
+    // TODO(vvshlyaga): Drop EnableSequentialIORequests after ReadIORequestsMode is fully rolled out.
     bool EnableSequentialIORequests;
+
+    //! Explicit mode for processing IO requests in one read session.
+    std::optional<EReadIORequestsMode> ReadIORequestsMode;
+
+    //! These limits apply only in Batched mode and are ignored in Sequential and Parallel modes.
+    //! Maximum number of simultaneously running IO requests in one read session.
+    int MaxInFlightReadRequestCount;
+
+    //! Maximum amount of data simultaneously read by IO requests in one read session.
+    i64 MaxInFlightReadDataSize;
 
     //! If |true| then if error occuried during chunk's blocks reading, already read blocks are returned.
     bool ReturnBlocksIfSessionFails;
@@ -1084,6 +1140,9 @@ struct TDataNodeDynamicConfig
     TSlruCacheDynamicConfigPtr BlocksExtCache;
     TSlruCacheDynamicConfigPtr BlockMetaCache;
     NChunkClient::TBlockCacheDynamicConfigPtr BlockCache;
+
+    TMediumAwareBlockCacheManagerDynamicConfigPtr MediumAwareBlockCacheManager;
+
     TSlruCacheDynamicConfigPtr BlobReaderCache;
     TSlruCacheDynamicConfigPtr ChangelogReaderCache;
     TTableSchemaCacheDynamicConfigPtr TableSchemaCache;
@@ -1093,6 +1152,9 @@ struct TDataNodeDynamicConfig
 
     //! After that time alert about long live read sessions will be sent.
     std::optional<TDuration> LongLiveReadSessionThreshold;
+
+    std::optional<TDuration> SessionBlockReorderTimeout;
+    std::optional<int> MaxOutOfTurnSessions;
 
     //! Prepared chunk readers are kept open during this period of time after the last use.
     TDuration ChunkReaderRetentionTimeout;
@@ -1113,12 +1175,15 @@ struct TDataNodeDynamicConfig
 
     bool UseDisableSendBlocks;
     bool UseProbePutBlocks;
+    bool EnableProbePutBlocksFairShare;
     bool PreallocateDiskSpace;
-    bool UseDirectIO;
 
     bool WaitPrecedingBlocksReceived;
 
     TP2PConfigPtr P2P;
+
+    std::optional<int> MaxBlocksPerRead;
+    std::optional<i64> MaxBytesPerRead;
 
     //! Desired number of bytes per disk write in a blob chunks.
     std::optional<i64> BytesPerWrite;
@@ -1146,6 +1211,10 @@ struct TDataNodeDynamicConfig
 
     std::optional<i64> NetOutThrottlingLimit;
 
+    std::optional<TDuration> NetOutThrottlingDuration;
+
+    std::optional<i64> NetInThrottlingLimit;
+
     std::optional<i64> DiskWriteThrottlingLimit;
     std::optional<i64> DiskReadThrottlingLimit;
 
@@ -1153,7 +1222,21 @@ struct TDataNodeDynamicConfig
 
     std::optional<bool> SkipWriteThrottlingLocations;
 
+    //! If |true|, write throttling is reflected in CheckWritable / GetIOWeight.
+    std::optional<bool> EnableWriteThrottlingWritableCheck;
+
+    //! If |true|, network in_throttler queue size is checked on StartChunk and ProbePutBlocks.
+    std::optional<bool> EnableInThrottlerQueueWritableCheck;
+
+    // TODO(vvshlyaga): Drop EnableSequentialIORequests after ReadIORequestsMode is fully rolled out.
     std::optional<bool> EnableSequentialIORequests;
+
+    std::optional<EReadIORequestsMode> ReadIORequestsMode;
+
+    //! These limits apply only in Batched mode and are ignored in Sequential and Parallel modes.
+    std::optional<int> MaxInFlightReadRequestCount;
+
+    std::optional<i64> MaxInFlightReadDataSize;
 
     std::optional<bool> ReturnBlocksIfSessionFails;
 
@@ -1177,6 +1260,12 @@ struct TDataNodeDynamicConfig
 };
 
 DEFINE_REFCOUNTED_TYPE(TDataNodeDynamicConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
+EReadIORequestsMode GetReadIORequestsMode(
+    const TDataNodeConfigPtr& config,
+    const TDataNodeDynamicConfigPtr& dynamicConfig);
 
 ////////////////////////////////////////////////////////////////////////////////
 

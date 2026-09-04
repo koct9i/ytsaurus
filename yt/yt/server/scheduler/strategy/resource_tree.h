@@ -28,6 +28,7 @@ class TResourceTree
 {
 public:
     TResourceTree(
+        NLogging::TLogger logger,
         const TStrategyTreeConfigPtr& config,
         const std::vector<IInvokerPtr>& feasibleInvokers);
 
@@ -81,11 +82,14 @@ public:
         const std::vector<TResourceTreeElementPtr>& operationElements);
 
 private:
-    std::vector<IInvokerPtr> FeasibleInvokers_;
+    const NLogging::TLogger Logger;
+
+    const std::vector<IInvokerPtr> FeasibleInvokers_;
 
     std::atomic<bool> EnableStructureLockProfiling_ = false;
     std::atomic<bool> EnableUsageLockProfiling_ = false;
     std::atomic<bool> UsePrecommitForPreemption_ = false;
+    std::atomic<bool> EnableInfiniteResourceLimitsOvercommit_ = false;
 
     // For testing.
     // Encoded as microseconds; ::Max<TDuration::TValue>() means "not set".

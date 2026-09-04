@@ -343,6 +343,9 @@ class MultiConsumerOrchid(ObjectOrchid):
         result = self.get_status()
         return result["queue_consumer_names"]
 
+    def get_named_consumer_status(self, consumer_name: str) -> dict:
+        return get(f"{self.orchid_path()}/status/consumers/{consumer_name}")
+
 
 class QueueAgentOrchid(OrchidWithRegularPasses):
     ENTITY_NAME = "queue_agent"
@@ -433,6 +436,10 @@ class QueueAgentShardingManagerOrchid(OrchidWithRegularPasses, OrchidSingleLeade
 
 class CypressSynchronizerOrchid(OrchidWithRegularPasses, OrchidSingleLeaderMixin):
     ENTITY_NAME = "cypress_synchronizer"
+
+
+class MultiConsumerNamesGarbageCollectorOrchid(OrchidWithRegularPasses, OrchidSingleLeaderMixin):
+    ENTITY_NAME = "multi_consumer_names_garbage_collector"
 
 
 ##################################################################
@@ -1096,6 +1103,21 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
 
     USE_OLD_QUEUE_EXPORTER_IMPL = False
 
+    BASE_QUEUE_AGENT_CONFIG = {
+        "election_manager": {
+            "transaction_timeout": 5000,
+            "transaction_ping_period": 100,
+            "lock_acquisition_period": 100,
+            "leader_cache_update_period": 100,
+        },
+        "multi_consumer_names_garbage_collector_election_manager": {
+            "transaction_timeout": 5000,
+            "transaction_ping_period": 100,
+            "lock_acquisition_period": 100,
+            "leader_cache_update_period": 100,
+        },
+    }
+
     BASE_QUEUE_AGENT_DYNAMIC_CONFIG = {
         "queue_agent_sharding_manager": {
             "pass_period": 100,
@@ -1126,6 +1148,21 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
             "clusters": ["primary"],
             "pass_period": 100,
         },
+        "multi_consumer_names_garbage_collector": {
+            "pass_period": 100,
+        },
+        # NB(apachee): setup_class recreates the dynamic config document from scratch,
+        # so the defaults from get_dynamic_queue_agent_config do not apply here.
+        "dynamic_state": {
+            # Retries should be enabled explicitly in tests.
+            "retry_backoff": {
+                "invocation_count": 0,
+                # Keep the backoffs negligible for tests that do enable retries.
+                "min_backoff": 1,
+                "max_backoff": 1,
+                "backoff_jitter": 0.0,
+            },
+        },
     }
 
     INSTANCES = None
@@ -1133,8 +1170,9 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
     DO_PREPARE_TABLES_ON_SETUP = True
     QUEUE_AGENT_DO_WAIT_FOR_GLOBAL_SYNC_ON_SETUP = False
 
-    def _is_multi_consumer_supported(self):
-        return "queue-agent" not in self.ARTIFACT_COMPONENTS.get("25_4", [])
+    @classmethod
+    def _is_multi_consumer_supported(cls) -> bool:
+        return "queue-agent" not in cls.ARTIFACT_COMPONENTS.get("25_4", [])
 
     @classmethod
     def modify_queue_agent_config(cls, config):
@@ -1156,6 +1194,8 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
 
     @classmethod
     def setup_class(cls):
+        cls.DELTA_QUEUE_AGENT_CONFIG = update(cls.BASE_QUEUE_AGENT_CONFIG, cls.DELTA_QUEUE_AGENT_CONFIG)
+
         super(TestQueueAgentBase, cls).setup_class()
 
         queue_agent_config = cls.Env._cluster_configuration["queue_agent"][0]
@@ -1302,26 +1342,32 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
 
     @staticmethod
     def _create_consumer(path, mount=True, without_meta=False, driver=None, multi_consumer=False, **kwargs):
-        if without_meta or not mount or multi_consumer:
+        if mount:
             if multi_consumer:
-                schema = init_queue_agent_state.MULTI_CONSUMER_OBJECT_TABLE_SCHEMA
-            elif without_meta:
-                schema = init_queue_agent_state.CONSUMER_OBJECT_TABLE_SCHEMA_WITHOUT_META
-            else:
-                schema = init_queue_agent_state.CONSUMER_OBJECT_TABLE_SCHEMA
+                assert not without_meta
+                create("queue_multi_consumer", path, driver=driver, attributes=kwargs)
+                return
 
-            attributes = {
-                "dynamic": True,
-                "schema": schema,
-                "treat_as_queue_consumer": True,
-            }
-            attributes.update(kwargs)
-            create("table", path, attributes=attributes, driver=driver)
-            if mount:
-                sync_mount_table(path, driver=driver)
-            return
+            if not without_meta:
+                create("queue_consumer", path, driver=driver, attributes=kwargs)
+                return
 
-        create("queue_consumer", path, driver=driver, attributes=kwargs)
+        if multi_consumer:
+            schema = init_queue_agent_state.MULTI_CONSUMER_OBJECT_TABLE_SCHEMA
+        elif without_meta:
+            schema = init_queue_agent_state.CONSUMER_OBJECT_TABLE_SCHEMA_WITHOUT_META
+        else:
+            schema = init_queue_agent_state.CONSUMER_OBJECT_TABLE_SCHEMA
+
+        attributes = {
+            "dynamic": True,
+            "schema": schema,
+            "treat_as_queue_consumer": True,
+        }
+        attributes.update(kwargs)
+        create("table", path, attributes=attributes, driver=driver)
+        if mount:
+            sync_mount_table(path, driver=driver)
 
     def _create_registered_consumer(
         self,
@@ -1460,8 +1506,13 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
         def queue_agent_sharding_manager_elected():
             return len(QueueAgentShardingManagerOrchid.get_leaders(instances=instances)) == 1
 
+        def multi_consumer_names_garbage_collector_elected():
+            return len(MultiConsumerNamesGarbageCollectorOrchid.get_leaders(instances=instances)) == 1
+
         wait(lambda: cypress_synchronizer_elected(), sleep_backoff=0.15)
         wait(lambda: queue_agent_sharding_manager_elected(), sleep_backoff=0.15)
+        if cls._is_multi_consumer_supported():
+            wait(lambda: multi_consumer_names_garbage_collector_elected(), sleep_backoff=0.15)
 
     @classmethod
     def _wait_for_discovery(cls, instances=None):
@@ -1489,8 +1540,9 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
     # Waits for a complete pass by all queue agent components.
     # More specifically, it performs the following (in order):
     #     1. Waits for a complete pass by the leading cypress synchronizer.
-    #     2. Waits for a complete pass by the leading queue agent manager.
-    #     3. Waits for a complete pass by all queue agents.
+    #     2. Waits for a complete pass by the leading multi consumer names garbage collector.
+    #     3. Waits for a complete pass by the leading queue agent manager.
+    #     4. Waits for a complete pass by all queue agents.
     @classmethod
     def _wait_for_component_passes(cls, instances=None, skip_cypress_synchronizer=False):
         if instances is None:
@@ -1503,6 +1555,12 @@ class TestQueueAgentBase(QueueConsumerRegistrationManagerBase, YTEnvSetup):
 
         if not skip_cypress_synchronizer:
             leading_cypress_synchronizer_orchid.wait_fresh_pass()
+
+            if cls._is_multi_consumer_supported():
+                wait(lambda: len(MultiConsumerNamesGarbageCollectorOrchid.get_leaders(instances=instances)) == 1)
+                leading_multi_consumer_names_garbage_collector_orchid = \
+                    MultiConsumerNamesGarbageCollectorOrchid.leader_orchid(instances=instances)
+                leading_multi_consumer_names_garbage_collector_orchid.wait_fresh_pass()
 
         cls._wait_for_discovery(instances=instances)
         leading_queue_agent_sharding_manager.wait_fresh_pass()

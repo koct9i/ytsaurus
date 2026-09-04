@@ -8,6 +8,144 @@ Is released as helm charts on [GitHub Packages](https://github.com/ytsaurus/ytsa
 
 **Releases:**
 
+{% cut "**v0.36.0**" %}
+
+**Release date:** 2026-08-20
+
+
+**Release page:** [v0.36.0](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases/tag/v0.36.0)
+
+
+**Helm chart:** [0.36.0](https://github.com/orgs/ytsaurus/packages/container/ytop-chart/1154294264?tag=0.36.0)
+
+
+#### What's Changed
+* Tag API module during release by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/862
+* Added minReadyInstanceCount into OnDelete logic evaluation by @qurname2 in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/866
+* Add option to focus on test-case by name by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/868
+* Requeue reconcile after update step progress and fix race at UpdateIsPossible by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/864
+* Set memory limit in HTTP and RPC proxy configs by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/861
+* Default location QUOTA should came from volume storage LIMIT by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/860
+* Cleanup rolling update calculations by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/837
+* Added ytProxy into DQEngine spec by @qurname2 in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/872
+
+**Full Changelog**: https://github.com/ytsaurus/ytsaurus-k8s-operator/compare/v0.35.0...v0.36.0
+
+{% endcut %}
+
+
+{% cut "**v0.35.0**" %}
+
+**Release date:** 2026-08-18
+
+
+**Release page:** [v0.35.0](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases/tag/v0.35.0)
+
+
+**Helm chart:** [0.35.0](https://github.com/orgs/ytsaurus/packages/container/ytop-chart/1146043475?tag=0.35.0)
+
+
+#### What's Changed
+* Support multiple init-job scripts per job [1] by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/834
+* Build master snapshots using native client in init job [2] by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/846
+* Fix admin user creation [3] by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/841
+* Support yson structured logs and multi-category filter in timbertruck by @tinarsky in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/847
+* Secondary Masters Maintenance [4] by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/740
+* Postprocess the timbertruck sidecar config by @tinarsky in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/848
+* Run PR checks against merge commit by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/850
+* pkg/ypatch: handle setting attribute with missing parent by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/802
+* api: add global terminationGracePeriodSeconds by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/688
+* Use master instance options for yt-client-init-job-user by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/852
+* Fix cluster maintenance by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/853
+* Fix PR checks by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/855
+* Add current workflow file into setup-go cache-dependency-path by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/858
+* Pin Telegram action, gate runs on secrets, and set workflow permissions by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/857
+
+#### New Contributors
+* @tinarsky made their first contribution in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/847
+
+**Full Changelog**: https://github.com/ytsaurus/ytsaurus-k8s-operator/compare/v0.34.0...v0.35.0
+
+{% endcut %}
+
+
+{% cut "**v0.34.0**" %}
+
+**Release date:** 2026-08-04
+
+
+**Release page:** [v0.34.0](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases/tag/v0.34.0)
+
+
+**Helm chart:** [0.34.0](https://github.com/orgs/ytsaurus/packages/container/ytop-chart/1146033798?tag=0.34.0)
+
+
+#### What's Changed
+* Increase events burst and rate limit by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/840
+* Start caches/discovery/tablets after master [1] by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/830
+* Fix HydraPersistenceUploader and Timbertruck mount paths by @ilyaibraev in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/796
+* Disable e2e tests for multicell master initialization by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/842
+* Fix init job (re)start consistency by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/843
+* Add option for test debug by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/826
+* Support tracing configuration by @tindarid in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/845
+* Disable stockpile by default by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/836
+* Support timbertruck for all components by @savnadya in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/817
+
+#### New Contributors
+* @tindarid made their first contribution in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/845
+
+**Full Changelog**: https://github.com/ytsaurus/ytsaurus-k8s-operator/compare/v0.33.0...v.0.34.0
+
+{% endcut %}
+
+
+{% cut "**v0.33.0**" %}
+
+**Release date:** 2026-07-22
+
+
+**Release page:** [v0.33.0](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases/tag/v0.33.0)
+
+
+**Helm chart:** [0.33.0](https://github.com/orgs/ytsaurus/packages/container/ytop-chart/1056412217?tag=0.33.0)
+
+
+#### What's Changed
+* Fix "Conflicting profiling tags" alert at tablet nodes by @ifsmirnov in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/819
+* Set full address in //sys/@ui_config/chyt_controller_base_url by @savnadya in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/818
+* Go 1.25.x update dependencies by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/803
+* Implement per_job_directory mode for Exec-node by @epsilond1 in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/768
+* Update test/r8r/canondata by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/822
+* Propagate resources to init containers by @Gufran in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/828
+* Drop support for YTsaurus 24.1 and older by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/831
+* Reduce mandatory k8s version to >=1.25 by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/831
+
+**Full Changelog**: https://github.com/ytsaurus/ytsaurus-k8s-operator/compare/v0.32.1...v0.33.0
+
+{% endcut %}
+
+
+{% cut "**v0.32.1**" %}
+
+**Release date:** 2026-06-04
+
+
+**Release page:** [v0.32.1](https://github.com/ytsaurus/ytsaurus-k8s-operator/releases/tag/v0.32.1)
+
+
+**Helm chart:** [0.32.1](https://github.com/orgs/ytsaurus/packages/container/ytop-chart/968345595?tag=0.32.1)
+
+
+#### What's Changed
+* Use configmap for timbertruck config and fix update flow when TT is enabled by @savnadya in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/812
+* Fix manual restart of init jobs by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/810
+* Remove default insecure admin password and token by @koct9i in https://github.com/ytsaurus/ytsaurus-k8s-operator/pull/814
+
+**Full Changelog**: https://github.com/ytsaurus/ytsaurus-k8s-operator/compare/v0.32.0...v0.32.1
+
+{% endcut %}
+
+
 {% cut "**v0.32.0**" %}
 
 **Release date:** 2026-05-29

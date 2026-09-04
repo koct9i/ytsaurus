@@ -26,7 +26,7 @@ TError TAlert::GetTaggedError() const
     for (const auto& tag : Tags) {
         errorAttributes.emplace_back(tag.first, tag.second);
     }
-    return Error << errorAttributes;
+    return Error.With(errorAttributes);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -69,10 +69,9 @@ public:
 
         AlertCollectionExecutor_->SetPeriod(newConfig->AlertCollectionPeriod);
 
-        YT_LOG_DEBUG(
-            "Updated alert manager dynamic config (OldConfig: %v, NewConfig: %v)",
-            ConvertToYsonString(oldConfig, EYsonFormat::Text),
-            ConvertToYsonString(newConfig, EYsonFormat::Text));
+        YT_TLOG_DEBUG("Updated alert manager dynamic config")
+            .With("OldConfig", ConvertToYsonString(oldConfig, EYsonFormat::Text))
+            .With("NewConfig", ConvertToYsonString(newConfig, EYsonFormat::Text));
     }
 
     void CollectAlerts()
@@ -113,13 +112,14 @@ public:
 
         THashMap<std::string, TError> alerts;
         for (const auto& [category, aggregatedAlert] : categoryToAggregatedAlerts) {
-            alerts.emplace(category, TError(*aggregatedAlert.ErrorCode, TRuntimeFormat(*aggregatedAlert.Description)) << aggregatedAlert.Errors);
+            alerts.emplace(category, TError(*aggregatedAlert.ErrorCode, TRuntimeFormat(*aggregatedAlert.Description)).With(aggregatedAlert.Errors));
         }
 
         auto guard = WriterGuard(SpinLock_);
         Alerts_ = alerts;
 
-        YT_LOG_DEBUG("Collected alerts (Count: %v)", Alerts_.size());
+        YT_TLOG_DEBUG("Collected alerts")
+            .With("Count", Alerts_.size());
     }
 
     THashMap<std::string, TError> GetAlerts() const override
@@ -210,7 +210,7 @@ public:
             CategoryToGauges_.clear();
         }
 
-        YT_LOG_DEBUG("Alert collector is stopped");
+        YT_TLOG_DEBUG("Alert collector is stopped");
     }
 
     void StageAlert(TAlert alert) override
@@ -226,7 +226,11 @@ public:
             alert.Tags,
             AlertProfiler_.WithTag("category", alert.Category).WithTags(TTagSet{alert.Tags}).Gauge("/alerts"));
 
-        YT_LOG_DEBUG(alert.Error, "Staged alert (Category: %v, Description: %v, Tags: %v)", alert.Category, alert.Description, alert.Tags);
+        YT_TLOG_DEBUG("Staged alert")
+            .With("Category", alert.Category)
+            .With("Description", alert.Description)
+            .With("Tags", alert.Tags)
+            .With(alert.Error);
     }
 
     void PublishAlerts() override
@@ -254,7 +258,8 @@ public:
             Alerts_.insert(Alerts_.end(), std::make_move_iterator(alerts.begin()), std::make_move_iterator(alerts.end()));
         }
 
-        YT_LOG_DEBUG("Publishing staged alerts (Count: %v)", StagedAlerts_.size());
+        YT_TLOG_DEBUG("Publishing staged alerts")
+            .With("Count", StagedAlerts_.size());
 
         StagedAlerts_.clear();
     }

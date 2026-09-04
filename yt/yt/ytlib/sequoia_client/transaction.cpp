@@ -15,6 +15,7 @@
 #include <yt/yt/ytlib/api/native/tablet_helpers.h>
 #include <yt/yt/ytlib/api/native/transaction_helpers.h>
 
+#include <yt/yt/ytlib/cell_master_client/cell_directory.h>
 #include <yt/yt/ytlib/cell_master_client/cell_directory_synchronizer.h>
 
 #include <yt/yt/ytlib/cypress_server/proto/sequoia_actions.pb.h>
@@ -40,8 +41,8 @@
 
 #include <yt/yt/core/concurrency/action_queue.h>
 
-#include <yt/yt/core/misc/random.h>
 #include <yt/yt/core/misc/protobuf_helpers.h>
+#include <yt/yt/core/misc/random.h>
 
 #include <yt/yt/core/ytree/helpers.h>
 
@@ -61,7 +62,6 @@ using namespace NTransactionClient;
 using namespace NYPath;
 
 using NNative::IClientPtr;
-
 using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -77,17 +77,17 @@ void ValidateSequoiaTableSchema(ESequoiaTable table, const TTableSchemaPtr& actu
         return;
     }
 
-    YT_LOG_ALERT("Unexpected schema of Sequoia table (SequoiaTable: %v, Schema: %v, ExpectedSchema: %v)",
-        table,
-        *actualSchema,
-        *expectedSchema);
+    YT_TLOG_ALERT("Unexpected schema of Sequoia table")
+        .With("SequoiaTable", table)
+        .With("Schema", *actualSchema)
+        .With("ExpectedSchema", *expectedSchema);
 
     THROW_ERROR_EXCEPTION(
         NTableClient::EErrorCode::SchemaViolation,
         "Sequoia table %Qlv has unexpected schema",
         table)
-        << TErrorAttribute("expected_schema", *expectedSchema)
-        << TErrorAttribute("actual_schema", *actualSchema);
+        .With("expected_schema", *expectedSchema)
+        .With("actual_schema", *actualSchema);
 }
 
 } // namespace
@@ -279,12 +279,11 @@ public:
 
         SortRequests();
 
-        YT_LOG_ALERT_AND_THROW_UNLESS(
+        YT_TLOG_ALERT_AND_THROW_UNLESS(
             options.StrongOrderingTags.empty(),
-            "Commit options have non-empty strong ordering tags "
-            "(TransactiondId: %v, StrongOrderingTags: %v)",
-            Transaction_->GetId(),
-            options.StrongOrderingTags);
+            "Commit options have non-empty strong ordering tags")
+            .With("TransactionId", Transaction_->GetId())
+            .With("StrongOrderingTags", options.StrongOrderingTags);
 
         options.StrongOrderingTags = ComputeStrongOrderingTags();
 
@@ -298,6 +297,12 @@ public:
                 .AsyncVia(SerializedInvoker_))
             .Apply(BIND(&TSequoiaTransaction::DoCommitTransaction, MakeStrong(this), options)
                 .AsyncVia(SerializedInvoker_))
+            .Apply(BIND([groundClient = GroundClient_] (const TError& error) {
+                // Tablet resolution happens against the cached mount info, so a retry
+                // is pointless unless the stale entry is dropped.
+                groundClient->GetTableMountCache()->InvalidateOnError(error, /*forceRetry*/ true);
+                return error;
+            }))
             .Apply(BIND(TransformSequoiaTransactionCommitError<void>))
             .Apply(BIND([type = Type_] (const TError& error) {
                 auto* counters = GetPerTransactionTypeCounters(type);
@@ -369,11 +374,10 @@ public:
         auto commitSession = GetOrCreateTableCommitSession(descriptor);
         commitSession->Requests.push_back(request);
 
-        YT_LOG_DEBUG_IF(SequoiaTransactionOptions_.EnableVerboseLogging,
-            "Row locked (SequoiaTable: %v, Key: %v, LockType: %v)",
-            table,
-            key,
-            lockType);
+        YT_TLOG_DEBUG_IF(SequoiaTransactionOptions_.EnableVerboseLogging, "Row locked")
+            .With("SequoiaTable", table)
+            .With("Key", key)
+            .With("LockType", lockType);
     }
 
     void WriteRow(
@@ -406,11 +410,10 @@ public:
         auto commitSession = GetOrCreateTableCommitSession(tableDescriptor);
         commitSession->Requests.push_back(request);
 
-        YT_LOG_DEBUG_IF(SequoiaTransactionOptions_.EnableVerboseLogging,
-            "Row written (SequoiaTable: %v, Row: %v, LockType: %v)",
-            tableDescriptor.Table,
-            row,
-            lockType);
+        YT_TLOG_DEBUG_IF(SequoiaTransactionOptions_.EnableVerboseLogging, "Row written")
+            .With("SequoiaTable", tableDescriptor.Table)
+            .With("Row", row)
+            .With("LockType", lockType);
     }
 
     void DeleteRow(
@@ -430,10 +433,9 @@ public:
         auto commitSession = GetOrCreateTableCommitSession(descriptor);
         commitSession->Requests.push_back(request);
 
-        YT_LOG_DEBUG_IF(SequoiaTransactionOptions_.EnableVerboseLogging,
-            "Row deleted (SequoiaTable: %v, Key: %v)",
-            table,
-            key);
+        YT_TLOG_DEBUG_IF(SequoiaTransactionOptions_.EnableVerboseLogging, "Row deleted")
+            .With("SequoiaTable", table)
+            .With("Key", key);
     }
 
     void AddTransactionAction(
@@ -663,7 +665,7 @@ private:
 
         Transaction_ = transaction;
 
-        RandomGenerator_ = std::make_unique<TRandomGenerator>(Transaction_->GetStartTimestamp());
+        RandomGenerator_ = std::make_unique<TRandomGenerator>(Transaction_->GetStartTimestamp().Underlying());
 
         CellCommitSessionProvider_ = CreateCellCommitSessionProvider(
             CreateRegisterTransactionActionsRequestFactory(GroundClient_, Logger),
@@ -671,11 +673,11 @@ private:
             Logger,
             /*useUniformPrepareSignatures*/ false);
 
-        Logger.AddTag("TransactionId: %v", Transaction_->GetId());
+        Logger.AddTag("TransactionId", Transaction_->GetId());
 
-        YT_LOG_DEBUG("Transaction started (StartTimestamp: %v, PrerequisiteTransactionIds: %v)",
-            Transaction_->GetStartTimestamp(),
-            SequoiaTransactionOptions_.CypressPrerequisiteTransactionIds);
+        YT_TLOG_DEBUG("Transaction started")
+            .With("StartTimestamp", Transaction_->GetStartTimestamp())
+            .With("PrerequisiteTransactionIds", SequoiaTransactionOptions_.CypressPrerequisiteTransactionIds);
 
         return MakeStrong(this);
     }
@@ -964,10 +966,14 @@ private:
 
         std::vector<TFuture<void>> futures;
         futures.reserve(MasterCellCommitSessions_.size());
+
+        const auto& connection = AuthenticatedLocalClient_->GetNativeConnection();
+        const auto& cellDirectory = connection->GetMasterCellDirectory();
+
         for (const auto& [cellTag, session] : MasterCellCommitSessions_) {
-            auto channel = AuthenticatedLocalClient_->GetNativeConnection()->GetMasterChannelOrThrow(
-                EMasterChannelKind::Leader,
-                cellTag);
+            auto channel = SequoiaTransactionOptions_.RetrySequoiaRetriableErrors
+                ? connection->GetMasterChannelOrThrow(EMasterChannelKind::Leader, cellTag)
+                : cellDirectory->GetNonRetryingMasterChannelOrThrow(EMasterChannelKind::Leader, cellTag);
             TSequoiaTransactionServiceProxy proxy(std::move(channel));
             auto req = proxy.StartTransaction();
             ToProto(req->mutable_id(), Transaction_->GetId());

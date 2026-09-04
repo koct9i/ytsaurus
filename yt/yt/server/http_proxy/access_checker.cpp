@@ -17,7 +17,7 @@ using namespace NYTree;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "AccessChecker");
+static YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "AccessChecker");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -63,12 +63,13 @@ public:
 
         if (error.FindMatching(NSecurityClient::EErrorCode::AuthorizationError)) {
             return TError("User %Qv is not allowed to use HTTP proxies with role %Qv", user, proxyRole)
-                << error;
+                .With(error);
         }
 
-        YT_LOG_INFO(error, "Failed to check if user is allowed to use HTTP proxy (User: %v, Role: %v)",
-            user,
-            proxyRole);
+        YT_TLOG_INFO("Failed to check if user is allowed to use HTTP proxy")
+            .With("User", user)
+            .With("Role", proxyRole)
+            .With(error);
 
         return TError();
     }

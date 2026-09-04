@@ -11,6 +11,9 @@ from sqlglot.typing.postgres import EXPRESSION_METADATA
 class Postgres(Dialect):
     EXPRESSION_METADATA = EXPRESSION_METADATA.copy()
     INDEX_OFFSET = 1
+    # Normalizing `x IS NOT NULL` to `NOT x IS NULL` is unsafe due to row values,
+    # e.g. `ROW(1, NULL) IS NOT NULL` is false whereas `NOT ROW(1, NULL) IS NULL` is true
+    NORMALIZE_NOT_NULL = False
     TYPED_DIVISION = True
     CONCAT_COALESCE = True
     CONCAT_WS_COALESCE = True
@@ -51,12 +54,16 @@ class Postgres(Dialect):
         "TMDy": "%a",
         "TMMon": "%b",  # Sep
         "TMMonth": "%B",  # September
+        "day": "%Aenlower",  # tuesday
+        "dy": "%aenlower",  # tue
         "TZ": "%Z",  # uppercase timezone name
         "US": "%f",  # zero padded microsecond
         "ww": "%U",  # 1-based week of year
         "WW": "%U",  # 1-based week of year
         "yy": "%y",  # 15
         "YY": "%y",  # 15
+        "yyy": "%Ythree",  # 015
+        "YYY": "%Ythree",  # 015
         "yyyy": "%Y",  # 2015
         "YYYY": "%Y",  # 2015
     }
@@ -65,6 +72,7 @@ class Postgres(Dialect):
         BIT_STRINGS = [("b'", "'"), ("B'", "'")]
         HEX_STRINGS = [("x'", "'"), ("X'", "'")]
         BYTE_STRINGS = [("e'", "'"), ("E'", "'")]
+        UNICODE_STRINGS = [("U&'", "'"), ("u&'", "'")]
         BYTE_STRING_ESCAPES = ["'", "\\"]
         HEREDOC_STRINGS = ["$"]
 
@@ -75,6 +83,7 @@ class Postgres(Dialect):
             **tokens.Tokenizer.KEYWORDS,
             "~": TokenType.RLIKE,
             "@@": TokenType.DAT,
+            "@?": TokenType.AT_QMARK,
             "@>": TokenType.AT_GT,
             "<@": TokenType.LT_AT,
             "?&": TokenType.QMARK_AMP,

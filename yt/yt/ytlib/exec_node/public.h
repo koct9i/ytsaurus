@@ -1,6 +1,6 @@
 #pragma once
 
-#include <yt/yt/core/misc/error_code.h>
+#include <library/cpp/yt/error/error_code.h>
 
 #include <library/cpp/yt/misc/enum.h>
 
@@ -32,7 +32,7 @@ YT_DEFINE_ERROR_ENUM(
     ((SetupCommandFailed)                    (1121))
     ((GpuLayerNotFetched)                    (1122))
     ((GpuJobWithoutLayers)                   (1123))
-    ((TmpfsOverflow)                         (1124))
+    ((VolumeSizeLimitExceeded)               (1124))
     ((GpuCheckCommandFailed)                 (1125))
     ((GpuCheckCommandPreparationFailed)      (1126))
     ((JobProxyUnavailable)                   (1127))
@@ -58,6 +58,7 @@ YT_DEFINE_ERROR_ENUM(
     ((NonRootVolumePreparationFailed)        (1147))
     ((NonRootVolumeLinkingFailed)            (1148))
     ((NbdServerDisabledOnNode)               (1149))
+    ((OverlayLayerPreparationFailed)         (1150))
 );
 
 DEFINE_ENUM(EJobPhase,

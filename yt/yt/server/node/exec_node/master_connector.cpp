@@ -46,7 +46,7 @@ public:
             bootstrap,
             /*reportHeartbeatsToAllSecondaryMasters*/ false,
             ENodeHeartbeatType::Exec,
-            ExecNodeLogger().WithTag("HeartbeatType: %v", ENodeHeartbeatType::Exec))
+            ExecNodeLogger().WithTag("HeartbeatType", ENodeHeartbeatType::Exec))
         , Bootstrap_(bootstrap)
         , DynamicConfig_(New<TMasterConnectorDynamicConfig>())
     {
@@ -70,7 +70,7 @@ public:
 
         Reconfigure(DynamicConfig_->HeartbeatExecutor);
 
-        YT_LOG_INFO("Dynamic config changed");
+        YT_TLOG_INFO("Dynamic config changed");
     }
 
     TExecNodeTrackerServiceProxy::TReqHeartbeatPtr BuildHeartbeatRequest(TCellTag cellTag) const

@@ -11,8 +11,6 @@
 #include <yt/yt/core/concurrency/action_queue.h>
 #include <yt/yt/core/concurrency/thread_affinity.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <yt/yt/server/node/cluster_node/public.h>
 
 #include <yt/yt/ytlib/misc/public.h>
@@ -20,6 +18,8 @@
 #include <yt/yt/ytlib/chunk_client/proto/location_indexes.pb.h>
 
 #include <library/cpp/yt/memory/atomic_intrusive_ptr.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 #include <library/cpp/yt/threading/rw_spin_lock.h>
 #include <library/cpp/yt/threading/spin_lock.h>
@@ -48,7 +48,7 @@ struct IChunkStoreHost
 
 DEFINE_REFCOUNTED_TYPE(IChunkStoreHost)
 
-IChunkStoreHostPtr CreateChunkStoreHost(NClusterNode::IBootstrapBase* bootstrap);
+IChunkStoreHostPtr CreateChunkStoreHost(IBootstrap* bootstrap);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -197,6 +197,10 @@ public:
     //! Triggers medium change for all chunks in location.
     void ChangeLocationMedium(const TChunkLocationPtr& location, int oldMediumIndex);
 
+    void SetMediumAwareBlockCacheManager(IMediumAwareBlockCacheManagerPtr manager);
+
+    TLocationCountPerMedium GetLocationCountPerMedium() const;
+
     //! Finds a suitable storage location for a new chunk.
     /*!
      *  The initial set of candidates consists of locations that are not full,
@@ -245,6 +249,8 @@ private:
     const TChunkContextPtr ChunkContext_;
     const IChunkStoreHostPtr ChunkStoreHost_;
     const NConcurrency::TPeriodicExecutorPtr ProfilingExecutor_;
+
+    IMediumAwareBlockCacheManagerPtr MediumAwareBlockCacheManager_;
 
     TAtomicIntrusivePtr<TDataNodeDynamicConfig> DynamicConfig_;
 

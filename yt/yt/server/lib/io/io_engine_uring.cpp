@@ -76,8 +76,6 @@ struct TUringIOEngineConfig
     //! Limits the number of concurrent (outstanding) #IIOEngine requests per a single uring thread.
     int MaxConcurrentRequestsPerThread;
 
-    int DirectIOBlockSize;
-
     bool FlushAfterWrite;
 
     // Request size in bytes.
@@ -101,11 +99,6 @@ struct TUringIOEngineConfig
             .GreaterThan(0)
             .LessThanOrEqual(MaxUringConcurrentRequestsPerThread)
             .Default(22);
-
-        registrar.Parameter("direct_io_block_size", &TThis::DirectIOBlockSize)
-            .Alias("direct_io_page_size")
-            .GreaterThan(0)
-            .Default(4_KB);
 
         registrar.Parameter("flush_after_write", &TThis::FlushAfterWrite)
             .Default(false);
@@ -145,7 +138,7 @@ public:
         auto result = HandleUringEintr(io_uring_queue_init, queueSize, &Uring_, /*flags*/ 0);
         if (result < 0) {
             THROW_ERROR_EXCEPTION("Failed to initialize uring")
-                << TError::FromSystem(-result);
+                .With(TError::FromSystem(-result));
         }
 
         CheckUringResult(
@@ -227,8 +220,9 @@ private:
 
     static void CheckUringResult(int result, TStringBuf callName)
     {
-        YT_LOG_FATAL_IF(result < 0, TError::FromSystem(-result), "Uring %Qv call failed",
-            callName);
+        YT_TLOG_FATAL_IF(result < 0, "Uring call failed")
+            .With("CallName", callName)
+            .With(TError::FromSystem(-result));
     }
 
     static bool ValidateUringNonBlockingResult(int result, TStringBuf callName)
@@ -256,6 +250,7 @@ struct TUringRequest
     };
 
     EUringRequestType Type;
+    EWorkloadCategory Category;
     std::optional<TRequestStatsGuard> RequestTimeGuard_;
     TRequestCounterGuard RequestCounterGuard;
 
@@ -427,8 +422,9 @@ struct TUringConfigProvider final
 {
     const std::optional<i64> SimulatedMaxBytesPerRead;
     const std::optional<i64> SimulatedMaxBytesPerWrite;
-    const int MaxBytesPerRead;
-    const int MaxBytesPerWrite;
+
+    const i64 MaxBytesPerRead;
+    const i64 MaxBytesPerWrite;
     const bool EnableIOUringLogging;
 
     YT_DECLARE_ATOMIC_FIELD(int, UringThreadCount)
@@ -549,7 +545,7 @@ private:
 
     void ThreadMain() override
     {
-        YT_LOG_INFO("Uring thread started");
+        YT_TLOG_INFO("Uring thread started");
 
         ArmStopNotificationRead();
         ArmRequestNotificationRead();
@@ -559,15 +555,15 @@ private:
             ThreadMainStep();
         } while (!IsUringDrained());
 
-        YT_LOG_INFO("Uring thread stopped");
+        YT_TLOG_INFO("Uring thread stopped");
     }
 
     bool IsUringDrained()
     {
         if (Stopping_) {
-            YT_LOG_DEBUG("Uring thread stopping (PendingSubmissionsCount_: %v, UndersubmittedRequestsSize: %v)",
-                PendingSubmissionsCount_,
-                UndersubmittedRequests_.GetSize());
+            YT_TLOG_DEBUG("Uring thread stopping")
+                .With("PendingSubmissionCount", PendingSubmissionsCount_)
+                .With("UndersubmittedRequestsSize", UndersubmittedRequests_.GetSize());
         }
         return Stopping_ && PendingSubmissionsCount_ == 0;
     }
@@ -594,7 +590,7 @@ private:
         }
 
         while (UndersubmittedRequests_.GetSize() > 0 && CanHandleMoreSubmissions()) {
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Submitting extra request from undersubmitted list.");
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Submitting extra request from undersubmitted list");
             auto* request = UndersubmittedRequests_.GetFront();
             HandleRequest(request);
         }
@@ -614,15 +610,15 @@ private:
             return nullptr;
         }
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Request dequeued (Request: %v)",
-            request.get());
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Request dequeued")
+            .With("Request", request.get());
         return request;
     }
 
     void HandleStop()
     {
-        YT_LOG_INFO("Stop received by uring thread (PendingRequestCount: %v)",
-            PendingSubmissionsCount_);
+        YT_TLOG_INFO("Stop received by uring thread")
+            .With("PendingRequestCount", PendingSubmissionsCount_);
 
         YT_VERIFY(!Stopping_);
         Stopping_ = true;
@@ -643,7 +639,7 @@ private:
 
         while (true) {
             if (!CanHandleMoreSubmissions()) {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Cannot handle more submissions");
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Cannot handle more submissions");
                 break;
             }
 
@@ -680,10 +676,10 @@ private:
     {
         auto totalSubrequestCount = std::ssize(request->ReadSubrequests);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling read request (Request: %p, FinishedSubrequestCount: %v, TotalSubrequestCount: %v)",
-            request,
-            request->FinishedSubrequestCount,
-            totalSubrequestCount);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling read request")
+            .WithFormat("Request", "%p", request)
+            .With("FinishedSubrequestCount", request->FinishedSubrequestCount)
+            .With("TotalSubrequestCount", totalSubrequestCount);
 
         if (request->Prev || UndersubmittedRequests_.GetFront() == request) {
             UndersubmittedRequests_.Remove(request);
@@ -708,19 +704,23 @@ private:
             auto& subrequestState = request->ReadSubrequestStates[subrequestIndex];
             auto& buffer = subrequestState.Buffer;
 
+            auto maxBytesPerRead = Config_->MaxBytesPerRead;
+            if (subrequest.Handle->IsOpenForDirectIO()) {
+                auto directIoBlockSize = Config_->GetDirectIOBlockSize();
+                maxBytesPerRead = AlignDown<i64>(maxBytesPerRead, directIoBlockSize);
+            }
+
             auto* sqe = AllocateSqe();
             subrequestState.Iov = {
                 .iov_base = buffer.Begin(),
-                .iov_len = Min<size_t>(buffer.Size(), Config_->MaxBytesPerRead)
+                .iov_len = Min<size_t>(buffer.Size(), maxBytesPerRead)
             };
 
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Submitting read operation (Request: %p/%v, FD: %v, Offset: %v, Buffer: %p@%v)",
-                request,
-                subrequestIndex,
-                static_cast<FHANDLE>(*subrequest.Handle),
-                subrequest.Offset,
-                subrequestState.Iov.iov_base,
-                subrequestState.Iov.iov_len);
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Submitting read operation")
+                .WithFormat("Request", "%p/%v", request, subrequestIndex)
+                .With("FD", static_cast<FHANDLE>(*subrequest.Handle))
+                .With("Offset", subrequest.Offset)
+                .WithFormat("Buffer", "%p@%v", subrequestState.Iov.iov_base, subrequestState.Iov.iov_len);
 
             io_uring_prep_readv(
                 sqe,
@@ -731,7 +731,7 @@ private:
 
             ++request->IORequests;
 
-            SetRequestUserData(sqe, request, Sensors_->ReadSensors, subrequestIndex);
+            SetRequestUserData(sqe, request, Sensors_->ReadSensors[request->Category], subrequestIndex);
         }
 
         if (!request->PendingReadSubrequestIndexes.empty()) {
@@ -760,7 +760,7 @@ private:
 
         ++request->IOSyncRequests;
 
-        SetRequestUserData(sqe, request, Sensors_->DataSyncSensors);
+        SetRequestUserData(sqe, request, Sensors_->DataSyncSensors[request->Category]);
         return true;
     }
 
@@ -768,10 +768,10 @@ private:
     {
         auto totalSubrequestCount = std::ssize(request->WriteRequest.Buffers);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling write request (Request: %p, FinishedSubrequestCount: %v, TotalSubrequestCount: %v)",
-            request,
-            request->FinishedSubrequestCount,
-            totalSubrequestCount);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling write request")
+            .WithFormat("Request", "%p", request)
+            .With("FinishedSubrequestCount", request->FinishedSubrequestCount)
+            .With("TotalSubrequestCount", totalSubrequestCount);
 
         if (request->CurrentWriteSubrequestIndex == totalSubrequestCount) {
             ReleaseIovBuffer(request);
@@ -792,11 +792,17 @@ private:
             request->WriteIovBuffer = AllocateIovBuffer();
         }
 
+        auto maxBytesPerWrite = Config_->MaxBytesPerWrite;
+        if (request->WriteRequest.Handle->IsOpenForDirectIO()) {
+            auto directIoBlockSize = Config_->GetDirectIOBlockSize();
+            maxBytesPerWrite = AlignDown<i64>(maxBytesPerWrite, directIoBlockSize);
+        }
+
         int iovCount = 0;
         i64 toWrite = 0;
         while (request->CurrentWriteSubrequestIndex + iovCount < totalSubrequestCount &&
             iovCount < std::ssize(*request->WriteIovBuffer) &&
-            toWrite < Config_->MaxBytesPerWrite)
+            toWrite < maxBytesPerWrite)
         {
             const auto& buffer = request->WriteRequest.Buffers[request->CurrentWriteSubrequestIndex + iovCount];
             auto& iov = (*request->WriteIovBuffer)[iovCount];
@@ -804,18 +810,18 @@ private:
                 .iov_base = const_cast<char*>(buffer.Begin()),
                 .iov_len = buffer.Size()
             };
-            if (toWrite + static_cast<i64>(iov.iov_len) > Config_->MaxBytesPerWrite) {
-                iov.iov_len = Config_->MaxBytesPerWrite - toWrite;
+            if (toWrite + static_cast<i64>(iov.iov_len) > maxBytesPerWrite) {
+                iov.iov_len = maxBytesPerWrite - toWrite;
             }
             toWrite += iov.iov_len;
             ++iovCount;
         }
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Submitting write operation (Request: %p, FD: %v, Offset: %v, Buffers: %v)",
-            request,
-            static_cast<FHANDLE>(*request->WriteRequest.Handle),
-            request->WriteRequest.Offset,
-            MakeFormattableView(
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Submitting write operation")
+            .WithFormat("Request", "%p", request)
+            .With("FD", static_cast<FHANDLE>(*request->WriteRequest.Handle))
+            .With("Offset", request->WriteRequest.Offset)
+            .With("Buffers", MakeFormattableView(
                 xrange(request->WriteIovBuffer->begin(), request->WriteIovBuffer->begin() + iovCount),
                 [] (auto* builder, const auto* iov) {
                     builder->AppendFormat("%p@%v",
@@ -833,7 +839,7 @@ private:
 
         ++request->IOWriteRequests;
 
-        SetRequestUserData(sqe, request, Sensors_->WriteSensors);
+        SetRequestUserData(sqe, request, Sensors_->WriteSensors[request->Category]);
     }
 
     static ui32 GetSyncFlags(EFlushFileMode mode)
@@ -848,22 +854,34 @@ private:
         }
     }
 
+    const TIOEngineSensors::TRequestSensors& GetSyncSensors(EFlushFileMode mode, EWorkloadCategory category) const
+    {
+        switch (mode) {
+            case EFlushFileMode::All:
+                return Sensors_->SyncSensors[category];
+            case EFlushFileMode::Data:
+                return Sensors_->DataSyncSensors[category];
+            default:
+                YT_ABORT();
+        }
+    }
+
     void HandleFlushFileRequest(TFlushFileUringRequest* request)
     {
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling flush file request (Request: %p)",
-            request);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling flush file request")
+            .WithFormat("Request", "%p", request);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Submitting flush file request (Request: %p, FD: %v, Mode: %v)",
-            request,
-            static_cast<FHANDLE>(*request->FlushFileRequest.Handle),
-            request->FlushFileRequest.Mode);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Submitting flush file request")
+            .WithFormat("Request", "%p", request)
+            .With("FD", static_cast<FHANDLE>(*request->FlushFileRequest.Handle))
+            .With("Mode", request->FlushFileRequest.Mode);
 
         auto* sqe = AllocateSqe();
         io_uring_prep_fsync(sqe, *request->FlushFileRequest.Handle, GetSyncFlags(request->FlushFileRequest.Mode));
 
         ++request->IOSyncRequests;
 
-        SetRequestUserData(sqe, request, Sensors_->SyncSensors);
+        SetRequestUserData(sqe, request, GetSyncSensors(request->FlushFileRequest.Mode, request->Category));
     }
 
     void HandleCompletion(const io_uring_cqe* cqe)
@@ -890,9 +908,8 @@ private:
     {
         auto [request, subrequestIndex] = GetRequestUserData<TReadUringRequest>(cqe);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling read completion (Request: %p/%v)",
-            request,
-            subrequestIndex);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling read completion")
+            .WithFormat("Request", "%p/%v", request, subrequestIndex);
 
         auto& subrequest = request->ReadSubrequests[subrequestIndex];
         auto& subrequestState = request->ReadSubrequestStates[subrequestIndex];
@@ -900,16 +917,14 @@ private:
         if (cqe->res == 0 && subrequestState.Buffer.Size() > 0) {
             auto error = request->ReadRequestCombiner->CheckEof(subrequestState.Buffer);
             if (!error.IsOK()) {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest failed at EOF (Request: %p/%v, Remaining: %v)",
-                    request,
-                    subrequestIndex,
-                    subrequestState.Buffer.Size());
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest failed at EOF")
+                    .WithFormat("Request", "%p/%v", request, subrequestIndex)
+                    .With("Remaining", subrequestState.Buffer.Size());
                 request->TrySetFailed(std::move(error));
             } else {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest succeeded at EOF (Request: %p/%v, Remaining: %v)",
-                    request,
-                    subrequestIndex,
-                    subrequestState.Buffer.Size());
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest succeeded at EOF")
+                    .WithFormat("Request", "%p/%v", request, subrequestIndex)
+                    .With("Remaining", subrequestState.Buffer.Size());
             }
             subrequestState.Buffer = { };
             ++request->FinishedSubrequestCount;
@@ -921,21 +936,19 @@ private:
             if (Config_->SimulatedMaxBytesPerRead) {
                 readSize = Min(readSize, *Config_->SimulatedMaxBytesPerRead);
             }
-            Sensors_->RegisterReadBytes(readSize);
+            Sensors_->RegisterReadBytes(readSize, request->Category);
             auto bufferSize = std::ssize(subrequestState.Buffer);
             subrequest.Offset += readSize;
             if (bufferSize == readSize) {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest fully succeeded (Request: %p/%v, Size: %v)",
-                    request,
-                    subrequestIndex,
-                    readSize);
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest fully succeeded")
+                    .WithFormat("Request", "%p/%v", request, subrequestIndex)
+                    .With("Size", readSize);
                 subrequestState.Buffer = { };
                 ++request->FinishedSubrequestCount;
             } else {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest partially succeeded (Request: %p/%v, Size: %v)",
-                    request,
-                    subrequestIndex,
-                    readSize);
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Read subrequest partially succeeded")
+                    .WithFormat("Request", "%p/%v", request, subrequestIndex)
+                    .With("Size", readSize);
                 subrequestState.Buffer = subrequestState.Buffer.Slice(readSize, bufferSize);
                 request->PendingReadSubrequestIndexes.push_back(subrequestIndex);
             }
@@ -948,8 +961,8 @@ private:
     {
         auto [request, _] = GetRequestUserData<TWriteUringRequest>(cqe);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling write completion (Request: %p)",
-            request);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling write completion")
+            .WithFormat("Request", "%p", request);
 
         if (cqe->res < 0) {
             request->TrySetFailed(cqe);
@@ -966,7 +979,7 @@ private:
         if (Config_->SimulatedMaxBytesPerWrite) {
             writtenSize = Min(writtenSize, *Config_->SimulatedMaxBytesPerWrite);
         }
-        Sensors_->RegisterWrittenBytes(writtenSize);
+        Sensors_->RegisterWrittenBytes(writtenSize, request->Category);
         request->WriteRequest.Offset += writtenSize;
         request->WrittenBytes += writtenSize;
 
@@ -974,18 +987,16 @@ private:
             auto& buffer = request->WriteRequest.Buffers[request->CurrentWriteSubrequestIndex];
             auto bufferSize = std::ssize(buffer);
             if (bufferSize <= writtenSize) {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Write subrequest fully succeeded (Request: %p/%v, Size: %v)",
-                    request,
-                    request->CurrentWriteSubrequestIndex,
-                    writtenSize);
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Write subrequest fully succeeded")
+                    .WithFormat("Request", "%p/%v", request, request->CurrentWriteSubrequestIndex)
+                    .With("Size", writtenSize);
                 writtenSize -= bufferSize;
                 buffer = { };
                 ++request->CurrentWriteSubrequestIndex;
             } else {
-                YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Write subrequest partially succeeded (Request: %p/%v, Size: %v)",
-                    request,
-                    request->CurrentWriteSubrequestIndex,
-                    writtenSize);
+                YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Write subrequest partially succeeded")
+                    .WithFormat("Request", "%p/%v", request, request->CurrentWriteSubrequestIndex)
+                    .With("Size", writtenSize);
                 buffer = buffer.Slice(writtenSize, bufferSize);
                 writtenSize = 0;
             }
@@ -998,8 +1009,8 @@ private:
     {
         auto [request, _] = GetRequestUserData<TFlushFileUringRequest>(cqe);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling sync completion (Request: %p)",
-            request);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling sync completion")
+            .WithFormat("Request", "%p", request);
 
         request->TrySetFinished(cqe);
         DisposeRequest(request);
@@ -1009,8 +1020,8 @@ private:
     {
         auto [request, _] = GetRequestUserData<TAllocateUringRequest>(cqe);
 
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Handling allocate completion (Request: %p)",
-            request);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Handling allocate completion")
+            .WithFormat("Request", "%p", request);
 
         request->TrySetFinished(cqe);
         DisposeRequest(request);
@@ -1038,7 +1049,7 @@ private:
 
     void ArmStopNotificationRead()
     {
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Arming stop notification read");
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Arming stop notification read");
         ArmNotificationRead(StopNotificationIndex, StopNotificationHandle_, StopNotificationUserData);
     }
 
@@ -1050,8 +1061,8 @@ private:
         {
             RequestNotificationReadArmed_ = true;
             auto& handle = ThreadPool_->GetNotificationHandle(ThreadIndex_);
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Arming request notification read (Handle: %v)",
-                handle.GetFD());
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Arming request notification read")
+                .With("Handle", handle.GetFD());
 
             ArmNotificationRead(
                 RequestNotificationIndex,
@@ -1087,8 +1098,8 @@ private:
             --PendingSubmissionsCount_;
         }
         YT_VERIFY(PendingSubmissionsCount_ >= 0);
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "CQE received (PendingRequestCount: %v)",
-            PendingSubmissionsCount_);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "CQE received")
+            .With("PendingRequestCount", PendingSubmissionsCount_);
 
         Uring_.CqeSeen(cqe);
         return cqe;
@@ -1117,9 +1128,9 @@ private:
             count = Uring_.Submit();
         }
         if (count > 0) {
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "SQEs submitted (SqeCount: %v, PendingRequestCount: %v)",
-                count,
-                PendingSubmissionsCount_);
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "SQEs submitted")
+                .With("SqeCount", count)
+                .With("PendingRequestCount", PendingSubmissionsCount_);
         }
     }
 
@@ -1150,8 +1161,8 @@ private:
 
     void DisposeRequest(TUringRequest* request)
     {
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Request disposed (Request: %v)",
-            request);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Request disposed")
+            .With("Request", request);
 
         ThreadPool_->MarkFinished(ThreadIndex_, TUringRequestPtr(request));
     }
@@ -1177,8 +1188,9 @@ public:
         Queue_.enqueue(std::move(request));
 
         if (!RequestNotificationHandleRaised_.exchange(true)) {
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Request notification raise (Handle: %v, Reason: Enqueue)",
-                RequestNotificationHandle_.GetFD());
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Request notification raise")
+                .With("Handle", RequestNotificationHandle_.GetFD())
+                .With("Reason", "Enqueue");
 
             RequestNotificationHandle_.Raise();
         }
@@ -1196,8 +1208,9 @@ public:
         }
 
         if (!RequestNotificationHandleRaised_.exchange(true)) {
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Request notification raise (Handle: %v, Reason: EnqueueMany)",
-                RequestNotificationHandle_.GetFD());
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Request notification raise")
+                .With("Handle", RequestNotificationHandle_.GetFD())
+                .With("Reason", "EnqueueMany");
 
             RequestNotificationHandle_.Raise();
         }
@@ -1230,8 +1243,9 @@ public:
 
     void Reconfigure(int /*threadCount*/)
     {
-        YT_LOG_DEBUG("Request notification raise (Handle: %v, Reason: Reconfigure)",
-            RequestNotificationHandle_.GetFD());
+        YT_TLOG_DEBUG("Request notification raise")
+            .With("Handle", RequestNotificationHandle_.GetFD())
+            .With("Reason", "Reconfigure");
 
         RequestNotificationHandle_.Raise();
     }
@@ -1347,8 +1361,9 @@ public:
 
         for (int shardIndex = 0; shardIndex < threadCount; ++shardIndex) {
             auto& shard = Shards_[shardIndex];
-            YT_LOG_DEBUG("Request notification raise (Handle: %v, Reason: Reconfigure)",
-                shard.RequestNotificationHandle.GetFD());
+            YT_TLOG_DEBUG("Request notification raise")
+                .With("Handle", shard.RequestNotificationHandle.GetFD())
+                .With("Reason", "Reconfigure");
 
             shard.RequestNotificationHandle.Raise();
         }
@@ -1385,8 +1400,9 @@ private:
         }
 
         if (!shard.RequestNotificationHandleRaised.exchange(true)) {
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Request notification raise (Handle: %v, Reason: NotifyIfNeeded)",
-                shard.RequestNotificationHandle.GetFD());
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Request notification raise")
+                .With("Handle", shard.RequestNotificationHandle.GetFD())
+                .With("Reason", "NotifyIfNeeded");
 
             shard.RequestNotificationHandle.Raise();
         }
@@ -1548,9 +1564,9 @@ public:
         EWorkloadCategory category,
         TIOSessionId sessionId)
     {
-        YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Request enqueued (Request: %v, Type: %v)",
-            request.get(),
-            request->Type);
+        YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Request enqueued")
+            .With("Request", request.get())
+            .With("Type", request->Type);
 
         auto result = RequestQueue_->Enqueue(std::move(request), category, sessionId);
         ReconfigureQueueIfNeeded(result);
@@ -1562,9 +1578,9 @@ public:
         TIOSessionId sessionId)
     {
         if (!requests.empty()) {
-            YT_LOG_DEBUG_IF(EnableIOUringLogging_, "Requests enqueued (RequestCount: %v, Type: %v)",
-            std::ssize(requests),
-            requests.front()->Type);
+            YT_TLOG_DEBUG_IF(EnableIOUringLogging_, "Requests enqueued")
+                .With("RequestCount", std::ssize(requests))
+                .With("Type", requests.front()->Type);
         }
 
         auto result = RequestQueue_->Enqueue(requests, category, sessionId);
@@ -1577,7 +1593,7 @@ public:
             return;
         }
 
-        YT_LOG_DEBUG("Reconfiguring request queue is requested");
+        YT_TLOG_DEBUG("Reconfiguring request queue is requested");
 
         ReconfigureInvoker_->Invoke(BIND(&TUringThreadPoolBase::ReconfigureQueue, MakeWeak(this)));
     }
@@ -1637,10 +1653,10 @@ private:
             thread->Stop();
         }
 
-        YT_LOG_DEBUG("Uring thread pool reconfigured (ThreadNamePrefix: %v, ThreadPoolSize: %v -> %v)",
-            ThreadNamePrefix_,
-            oldThreadCount,
-            newThreadCount);
+        YT_TLOG_DEBUG("Uring thread pool reconfigured")
+            .With("ThreadNamePrefix", ThreadNamePrefix_)
+            .With("OldThreadPoolSize", oldThreadCount)
+            .With("NewThreadPoolSize", newThreadCount);
 
         RequestQueue_->Reconfigure(std::ssize(Threads_));
     }
@@ -1726,9 +1742,23 @@ public:
         EWorkloadCategory category,
         TIOSessionId sessionId) override
     {
+        YT_VERIFY(request.Handle);
+        bool useDirectIO = request.Handle->IsOpenForDirectIO();
+        auto directIoBlockSize = Config_->GetDirectIOBlockSize();
+
+        if (useDirectIO && request.Offset % directIoBlockSize != 0) {
+            return MakeFuture<TWriteResponse>(TError(
+                "File offset %v is not aligned to direct IO block size %v",
+                request.Offset,
+                directIoBlockSize)
+                .With("handle", static_cast<FHANDLE>(*request.Handle))
+                .With("request_size", GetByteSize(request.Buffers))
+                .With("file_size", request.Handle->GetLength()));
+        }
+
         TRequestSlicer requestSlicer(Config_->GetDesiredRequestSize(), Config_->GetMinRequestSize(), Config_->GetEnableSlicing());
 
-        auto slices = requestSlicer.Slice(std::move(request), Config_->GetDirectIOBlockSize());
+        auto slices = requestSlicer.Slice(std::move(request), directIoBlockSize);
 
         std::vector<TFuture<TWriteResponse>> futures;
         std::vector<TUringRequestPtr> uringRequests;
@@ -1737,10 +1767,15 @@ public:
         uringRequests.reserve(slices.size());
 
         for (auto& slice : slices) {
+            if (useDirectIO) {
+                slice.Buffers = PrepareDirectIOWriteBuffers(slice.Buffers, directIoBlockSize);
+            }
+
             auto uringRequest = std::make_unique<TWriteUringRequest>();
             uringRequest->Type = EUringRequestType::Write;
+            uringRequest->Category = category;
             uringRequest->WriteRequest = std::move(slice);
-            uringRequest->RequestCounterGuard = CreateInFlightRequestGuard(EIOEngineRequestType::Write);
+            uringRequest->RequestCounterGuard = CreateInFlightRequestGuard(EIOEngineRequestType::Write, category);
 
             futures.push_back(uringRequest->Promise.ToFuture());
             uringRequests.push_back(std::move(uringRequest));
@@ -1768,6 +1803,7 @@ public:
     {
         auto uringRequest = std::make_unique<TFlushFileUringRequest>();
         uringRequest->Type = EUringRequestType::FlushFile;
+        uringRequest->Category = category;
         uringRequest->FlushFileRequest = std::move(request);
         return SubmitRequest(std::move(uringRequest), category, { });
     }
@@ -1828,11 +1864,12 @@ private:
             for (auto& slice : slicer.Slice(std::move(request.ReadRequest), request.ResultBuffer, Config_->GetDirectIOBlockSize())) {
                 auto uringRequest = std::make_unique<TReadUringRequest>(readRequestCombiner);
                 uringRequest->Type = EUringRequestType::Read;
+                uringRequest->Category = category;
 
                 uringRequest->ReadSubrequests.reserve(1);
                 uringRequest->ReadSubrequestStates.reserve(1);
                 uringRequest->PendingReadSubrequestIndexes.reserve(1);
-                uringRequest->RequestCounterGuard = CreateInFlightRequestGuard(EIOEngineRequestType::Read);
+                uringRequest->RequestCounterGuard = CreateInFlightRequestGuard(EIOEngineRequestType::Read, category);
 
                 uringRequest->PaddedBytes += GetPaddedSize(
                     slice.Request.Offset,

@@ -815,7 +815,7 @@ public:
                 if (TypeFromId(id) != EObjectType::Account) {
                     if (throwOnInvalidId) {
                         THROW_ERROR_EXCEPTION("Invalid account id")
-                            << TErrorAttribute("account_id", id);
+                            .With("account_id", id);
                     }
                     return nullptr;
                 }
@@ -910,7 +910,7 @@ public:
         writer.Flush();
 
         THROW_ERROR_EXCEPTION(format, std::forward<TArgs>(args)...)
-            << TErrorAttribute("violated_resources", TYsonString(output.Str()));
+            .With("violated_resources", TYsonString(output.Str()));
     }
 
     void ThrowInvalidResourceLimitsChange(
@@ -926,7 +926,7 @@ public:
             "Failed to change resource limits for account %Qv: "
             "either invalid infinity-related operation or just an integer overflow occurred",
             accountName)
-            << TErrorAttribute("violated_resources", TYsonString(output.Str()));
+            .With("violated_resources", TYsonString(output.Str()));
     }
 
     TClusterResourceLimits ComputeAccountTotalChildrenLimitsForValidation(TAccount* account)
@@ -1132,8 +1132,8 @@ public:
         try {
             auto* lcaAccount = FindMapObjectLCA(srcAccount, dstAccount);
             if (!lcaAccount) {
-                YT_LOG_ALERT("Two accounts do not have a common ancestor (AccountIds: %v)",
-                    std::vector({srcAccount->GetId(), dstAccount->GetId()}));
+                YT_TLOG_ALERT("Two accounts do not have a common ancestor")
+                    .With("AccountIds", std::vector({srcAccount->GetId(), dstAccount->GetId()}));
                 THROW_ERROR_EXCEPTION("Accounts do not have a common ancestor");
             }
 
@@ -1185,7 +1185,7 @@ public:
             THROW_ERROR_EXCEPTION("Failed to transfer resources from account %Qv to account %Qv",
                 srcAccount->GetName(),
                 dstAccount->GetName())
-                << ex;
+                .With(ex);
         }
     }
 
@@ -1214,6 +1214,7 @@ public:
             chunk,
             requisition,
             delta,
+            delta * chunk->GetMasterMemoryUsage(),
             [&] (TAccount* account, int mediumIndex, i64 chunkCount, i64 diskSpace, i64 chunkMasterMemory, bool committed) {
                 account->DetailedMasterMemoryUsage()[EMasterMemoryType::Chunks] += chunkMasterMemory;
 
@@ -1226,6 +1227,27 @@ public:
                 }
 
                 IncreaseLocalAndClusterAccountStatistics(account, statisticsDelta);
+            });
+    }
+
+    void UpdateChunkMasterMemoryUsage(const TChunk* chunk, i64 masterMemoryUsageDelta) override
+    {
+        if (masterMemoryUsageDelta == 0) {
+            return;
+        }
+
+        YT_VERIFY(chunk->IsNative());
+
+        const auto& chunkManager = Bootstrap_->GetChunkManager();
+        const auto& requisition = chunk->GetAggregatedRequisition(chunkManager->GetChunkRequisitionRegistry());
+
+        ComputeChunkResourceDelta(
+            chunk,
+            requisition,
+            /*delta*/ 0,
+            masterMemoryUsageDelta,
+            [&] (TAccount* account, int /*mediumIndex*/, i64 /*chunkCount*/, i64 /*diskSpace*/, i64 chunkMasterMemoryUsage, bool /*committed*/) {
+                account->DetailedMasterMemoryUsage()[EMasterMemoryType::Chunks] += chunkMasterMemoryUsage;
             });
     }
 
@@ -1273,8 +1295,9 @@ public:
             auto backupAccountId = account->GetBackupConfig()->BackupAccountId;
             InsertOrCrash(BackupSourceAccountsMap_[backupAccountId], account->GetId());
         } catch (const std::exception& ex) {
-            YT_LOG_ALERT(ex, "Invalid backup config for account (AccountId: %v)",
-                account->GetId());
+            YT_TLOG_ALERT("Invalid backup config for account")
+                .With("AccountId", account->GetId())
+                .With(ex);
         }
     }
 
@@ -1294,14 +1317,14 @@ public:
         auto oldBackupAccountId = account->GetBackupConfig()->BackupAccountId;
         auto oldBackupAccount = FindAccount(oldBackupAccountId);
         if (!oldBackupAccount) {
-            YT_LOG_ALERT("Account had invalid backup account (AccountId: %v, BackupAccountId: %v)",
-                account->GetId(),
-                oldBackupAccountId);
+            YT_TLOG_ALERT("Account had invalid backup account")
+                .With("AccountId", account->GetId())
+                .With("BackupAccountId", oldBackupAccountId);
         }
         auto it = BackupSourceAccountsMap_.find(oldBackupAccountId);
         if (it == BackupSourceAccountsMap_.end()) {
-            YT_LOG_ALERT("Account that was used as backup account has no entry in BackupSourceAccountsMap (BackupAccountId: %v)",
-                oldBackupAccountId);
+            YT_TLOG_ALERT("Account that was used as backup account has no entry in BackupSourceAccountsMap")
+                .With("BackupAccountId", oldBackupAccountId);
         } else {
             it->second.erase(account->GetId());
             if (it->second.empty()) {
@@ -1322,15 +1345,15 @@ public:
         for (const auto& sourceAccountId : it->second) {
             auto sourceAccount = FindAccount(sourceAccountId);
             if (!sourceAccount) {
-                YT_LOG_ALERT("Invalid account is used as backup source account (BackupSourceAccountId: %v, BackupAccountId: %v)",
-                    sourceAccountId,
-                    account->GetId());
+                YT_TLOG_ALERT("Invalid account is used as backup source account")
+                    .With("BackupSourceAccountId", sourceAccountId)
+                    .With("BackupAccountId", account->GetId());
                 continue;
             }
             if (!IsObjectActive(sourceAccount)) {
-                YT_LOG_ALERT("Non active account is used as backup source account (BackupSourceAccountId: %v, BackupAccountId: %v)",
-                    sourceAccountId,
-                    account->GetId());
+                YT_TLOG_ALERT("Non active account is used as backup source account")
+                    .With("BackupSourceAccountId", sourceAccountId)
+                    .With("BackupAccountId", account->GetId());
                 continue;
             }
             result.push_back(sourceAccount->GetName());
@@ -1370,7 +1393,7 @@ public:
             transactionUsage->SetChunkCount(transactionUsage->GetChunkCount() + chunkCount);
         };
 
-        ComputeChunkResourceDelta(chunk, requisition, delta, chargeTransaction);
+        ComputeChunkResourceDelta(chunk, requisition, delta, delta * chunk->GetMasterMemoryUsage(), chargeTransaction);
     }
 
     void ResetMasterMemoryUsage(TCypressNode* node)
@@ -1525,10 +1548,10 @@ public:
         const TDetailedMasterMemory& chargedDetailedMasterMemoryUsage)
     {
         auto delta = currentDetailedMasterMemoryUsage - chargedDetailedMasterMemoryUsage;
-        YT_LOG_TRACE("Updating master memory usage (Account: %v, MasterMemoryUsage: %v, Delta: %v)",
-            account->GetName(),
-            account->DetailedMasterMemoryUsage(),
-            delta);
+        YT_TLOG_TRACE("Updating master memory usage")
+            .With("Account", account->GetName())
+            .With("MasterMemoryUsage", account->DetailedMasterMemoryUsage())
+            .With("Delta", delta);
 
         ChargeAccountAncestry(
             account,
@@ -1537,9 +1560,9 @@ public:
             });
 
         if (account->DetailedMasterMemoryUsage().IsNegative()) {
-            YT_LOG_ALERT("Master memory usage is negative (Account: %v, MasterMemoryUsage: %v)",
-                account->GetName(),
-                account->DetailedMasterMemoryUsage());
+            YT_TLOG_ALERT("Master memory usage is negative")
+                .With("Account", account->GetName())
+                .With("MasterMemoryUsage", account->DetailedMasterMemoryUsage());
         }
 
         return currentDetailedMasterMemoryUsage;
@@ -1720,11 +1743,10 @@ public:
         // Therefore we should not call RefObject on the transaction object.
         YT_VERIFY(transaction->AccountResourceUsageLeases().insert(accountResourceUsageLease).second);
 
-        YT_LOG_DEBUG(
-            "Account usage lease created (Id: %v, Account: %v, TransactionId: %v)",
-            accountResourceUsageLease->GetId(),
-            accountResourceUsageLease->Account()->GetName(),
-            accountResourceUsageLease->GetTransaction()->GetId());
+        YT_TLOG_DEBUG("Account usage lease created")
+            .With("Id", accountResourceUsageLease->GetId())
+            .With("Account", accountResourceUsageLease->Account()->GetName())
+            .With("TransactionId", accountResourceUsageLease->GetTransaction()->GetId());
 
         return accountResourceUsageLease;
     }
@@ -1740,9 +1762,8 @@ public:
 
         accountResourceUsageLease->SetTransaction(nullptr);
 
-        YT_LOG_DEBUG(
-            "Account resource usage lease zombified (LeaseId: %v)",
-            accountResourceUsageLeaseId);
+        YT_TLOG_DEBUG("Account resource usage lease zombified")
+            .With("LeaseId", accountResourceUsageLeaseId);
     }
 
     void DestroySubject(TSubject* subject)
@@ -1778,7 +1799,8 @@ public:
 
         user->SetLastSeenTime(GetCurrentMutationContext()->GetTimestamp());
 
-        YT_LOG_DEBUG("User created (User: %v)", name);
+        YT_TLOG_DEBUG("User created")
+            .With("User", name);
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::UserCreated)
             .Item("name").Value(user->GetName());
@@ -1909,7 +1931,8 @@ public:
         auto id = objectManager->GenerateId(EObjectType::Group, hintId);
         auto* group = DoCreateGroup(id, name);
         if (group) {
-            YT_LOG_DEBUG("Group created (Group: %v)", name);
+            YT_TLOG_DEBUG("Group created")
+                .With("Group", name);
             LogStructuredEventFluently(Logger(), ELogLevel::Info)
                 .Item("event").Value(EAccessControlEvent::GroupCreated)
                 .Item("name").Value(name);
@@ -2028,7 +2051,8 @@ public:
         const auto& objectManager = Bootstrap_->GetObjectManager();
         auto id = objectManager->GenerateId(EObjectType::NetworkProject, hintId);
         auto* networkProject = DoCreateNetworkProject(id, name);
-        YT_LOG_DEBUG("Network project created (NetworkProject: %v)", name);
+        YT_TLOG_DEBUG("Network project created")
+            .With("NetworkProject", name);
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::NetworkProjectCreated)
             .Item("name").Value(networkProject->GetName());
@@ -2039,8 +2063,8 @@ public:
     {
         YT_VERIFY(NetworkProjectNameMap_.erase(networkProject->GetName()) == 1);
 
-        YT_LOG_DEBUG("Network project destroyed (NetworkProject: %v)",
-            networkProject->GetName());
+        YT_TLOG_DEBUG("Network project destroyed")
+            .With("NetworkProject", networkProject->GetName());
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::NetworkProjectDestroyed)
             .Item("name").Value(networkProject->GetName());
@@ -2135,10 +2159,10 @@ public:
         YT_VERIFY(NetworkProjectNameMap_.erase(networkProject->GetName()) == 1);
         YT_VERIFY(NetworkProjectNameMap_.emplace(newName, networkProject).second);
 
-        YT_LOG_DEBUG("Network project renamed (NetworkProject: %v, OldName: %v, NewName: %v",
-            networkProject->GetId(),
-            networkProject->GetName(),
-            newName);
+        YT_TLOG_DEBUG("Network project renamed")
+            .With("NetworkProject", networkProject->GetId())
+            .With("OldName", networkProject->GetName())
+            .With("NewName", newName);
 
         networkProject->SetName(newName);
     }
@@ -2161,9 +2185,9 @@ public:
         auto id = objectManager->GenerateId(EObjectType::ProxyRole, hintId);
         auto* proxyRole = DoCreateProxyRole(id, name, proxyKind);
 
-        YT_LOG_DEBUG("Proxy role created (Name: %v, ProxyKind: %v)",
-            name,
-            proxyKind);
+        YT_TLOG_DEBUG("Proxy role created")
+            .With("Name", name)
+            .With("ProxyKind", proxyKind);
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::ProxyRoleCreated)
             .Item("name").Value(name)
@@ -2179,9 +2203,9 @@ public:
 
         YT_VERIFY(ProxyRoleNameMaps_[proxyKind].erase(name) == 1);
 
-        YT_LOG_DEBUG("Proxy role destroyed (Name: %v, ProxyKind: %v)",
-            name,
-            proxyKind);
+        YT_TLOG_DEBUG("Proxy role destroyed")
+            .With("Name", name)
+            .With("ProxyKind", proxyKind);
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::ProxyRoleDestroyed)
             .Item("name").Value(name)
@@ -2220,9 +2244,9 @@ public:
         DoAddMember(group, member);
         MaybeRecomputeMembershipClosure();
 
-        YT_LOG_DEBUG("Group member added (Group: %v, Member: %v)",
-            group->GetName(),
-            member->GetName());
+        YT_TLOG_DEBUG("Group member added")
+            .With("Group", group->GetName())
+            .With("Member", member->GetName());
 
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::MemberAdded)
@@ -2247,9 +2271,9 @@ public:
         DoRemoveMember(group, member);
         MaybeRecomputeMembershipClosure();
 
-        YT_LOG_DEBUG("Group member removed (Group: %v, Member: %v)",
-            group->GetName(),
-            member->GetName());
+        YT_TLOG_DEBUG("Group member removed")
+            .With("Group", group->GetName())
+            .With("Member", member->GetName());
 
         LogStructuredEventFluently(Logger(), ELogLevel::Info)
             .Item("event").Value(EAccessControlEvent::MemberRemoved)
@@ -2416,15 +2440,13 @@ public:
     {
         TWallTimer checkPermissionTimer;
 
-        YT_LOG_ALERT_IF(
-            user->GetPendingRemoval(),
-            "User pending for removal was mentioned in permission check for object (User: %v, ObjectId: %v)",
-            user->GetName(),
-            object->GetId());
+        YT_TLOG_ALERT_IF(user->GetPendingRemoval(), "User pending for removal was mentioned in permission check for object")
+            .With("User", user->GetName())
+            .With("ObjectId", object->GetId());
 
         if (IsVersionedType(object->GetType()) && object->IsForeign()) {
-            YT_LOG_DEBUG("Checking permission for a versioned foreign object (ObjectId: %v)",
-                object->GetId());
+            YT_TLOG_DEBUG("Checking permission for a versioned foreign object")
+                .With("ObjectId", object->GetId());
         }
 
         if (permission == EPermission::FullRead) {
@@ -2432,7 +2454,7 @@ public:
                 THROW_ERROR_EXCEPTION(
                     "Cannot specify columns for %Qlv permission check",
                     permission)
-                    << TErrorAttribute("columns", options.Columns);
+                    .With("columns", options.Columns);
             }
             const auto& objectManager = Bootstrap_->GetObjectManager();
             const auto& handler = objectManager->GetHandler(object);
@@ -2504,15 +2526,15 @@ public:
         CheckPermissionTimeCounter_.Add(checkPermissionTimer.GetElapsedTime());
         auto response = std::move(checker).GetResponse();
 
-        YT_LOG_ERROR_IF(response.Action == ESecurityAction::Allow && response.DeniedColumnResult,
-            "Checking all ACE columns would result in unexpected permission denial "
-            "(Permission: %v, ObjectId: %v, SubjectName: %v, SubjectId: %v, DeniedById: %v, DeniedForId: %v)",
-            permission,
-            object->GetId(),
-            user->GetName(),
-            user->GetId(),
-            response.DeniedColumnResult->ObjectId,
-            response.DeniedColumnResult->SubjectId);
+        YT_TLOG_ERROR_IF(
+            response.Action == ESecurityAction::Allow && response.DeniedColumnResult,
+            "Checking all ACE columns would result in unexpected permission denial")
+            .With("Permission", permission)
+            .With("ObjectId", object->GetId())
+            .With("SubjectName", user->GetName())
+            .With("SubjectId", user->GetId())
+            .With("DeniedById", response.DeniedColumnResult->ObjectId)
+            .With("DeniedForId", response.DeniedColumnResult->SubjectId);
 
         return response;
     }
@@ -2579,11 +2601,9 @@ public:
         EPermission permission,
         TPermissionCheckOptions options = {}) override
     {
-        YT_LOG_ALERT_IF(
-            user->GetPendingRemoval(),
-            "User pending for removal was mentioned in validating permission for object (User: %v, ObjectId: %v)",
-            user->GetName(),
-            object->GetId());
+        YT_TLOG_ALERT_IF(user->GetPendingRemoval(), "User pending for removal was mentioned in validating permission for object")
+            .With("User", user->GetName())
+            .With("ObjectId", object->GetId());
 
         if (IsPermissionValidationSuppressed()) {
             return {};
@@ -2718,9 +2738,9 @@ public:
 
             THROW_ERROR_EXCEPTION(
                 NSecurityClient::EErrorCode::AccountLimitExceeded, std::move(errorMessage), TError::DisableFormat)
-                << TErrorAttribute("usage", usage)
-                << TErrorAttribute("increase", increase)
-                << TErrorAttribute("limit", limit.ToUnderlying());
+                .With("usage", usage)
+                .With("increase", increase)
+                .With("limit", limit.ToUnderlying());
         };
 
         auto validateMasterMemoryIncrease = [&] (TAccount* account) {
@@ -2874,19 +2894,19 @@ public:
         if (user->GetBanned() != banned) {
             user->SetBanned(banned);
             if (banned) {
-                YT_LOG_INFO("User is banned (User: %v)", user->GetName());
+                YT_TLOG_INFO("User is banned")
+                    .With("User", user->GetName());
             } else {
-                YT_LOG_INFO("User is no longer banned (User: %v)", user->GetName());
+                YT_TLOG_INFO("User is no longer banned")
+                    .With("User", user->GetName());
             }
         }
     }
 
     TError CheckUserAccess(TUser* user) override
     {
-        YT_LOG_ALERT_IF(
-            user->GetPendingRemoval(),
-            "User pending for removal was mentioned in check user access (User: %v)",
-            user->GetName());
+        YT_TLOG_ALERT_IF(user->GetPendingRemoval(), "User pending for removal was mentioned in check user access")
+            .With("User", user->GetName());
 
         if (user->GetBanned()) {
             return TError(
@@ -3024,8 +3044,8 @@ public:
             }
             if (std::ssize(ace.SubjectTagFilter->GetFormula()) > maxSubjectTagFilterSize) {
                 THROW_ERROR_EXCEPTION("Cannot set tag filter as tag filter size limit exceeded")
-                    << TErrorAttribute("max_subject_tag_filter_size", maxSubjectTagFilterSize)
-                    << TErrorAttribute("ace", ConvertToYsonString(ace));
+                    .With("max_subject_tag_filter_size", maxSubjectTagFilterSize)
+                    .With("ace", ConvertToYsonString(ace));
             }
         }
     }
@@ -3060,8 +3080,8 @@ public:
         const auto& cypressManager = Bootstrap_->GetCypressManager();
         cypressManager->UpdateGroundUpdateQueueManagerSequenceNumber(node, lastRecordSequenceNumber);
 
-        YT_LOG_DEBUG("Scheduled ACLs table update (ObjectId: %v)",
-            object->GetId());
+        YT_TLOG_DEBUG("Scheduled ACLs table update")
+            .With("ObjectId", object->GetId());
     }
 
     DEFINE_SIGNAL_OVERRIDE(void(TUser*, const TUserWorkload&), UserCharged);
@@ -3073,6 +3093,13 @@ public:
         }
         account->IncreaseStatistics(delta);
         AddStatisticsUpdateToGossipQueue(account);
+    }
+
+    std::string GetAuthenticatedUserNameToForward() override
+    {
+        return GetDynamicConfig()->ForwardAuthenticatedUser
+            ? GetAuthenticatedUser()->GetName()
+            : RootUserName;
     }
 
 private:
@@ -3229,7 +3256,12 @@ private:
     }
 
     template <class T>
-    void ComputeChunkResourceDelta(const TChunk* chunk, const TChunkRequisition& requisition, i64 delta, T&& doCharge)
+    void ComputeChunkResourceDelta(
+        const TChunk* chunk,
+        const TChunkRequisition& requisition,
+        i64 delta,
+        i64 chunkMasterMemoryUsageDelta,
+        T&& doCharge)
     {
         auto chunkDiskSpace = chunk->GetDiskSpace();
         auto erasureCodec = chunk->GetErasureCodec();
@@ -3237,7 +3269,6 @@ private:
         const TAccount* lastAccount = nullptr;
         auto lastMediumIndex = GenericMediumIndex;
         i64 lastDiskSpace = 0;
-        auto chunkMasterMemoryUsageDelta = delta * chunk->GetMasterMemoryUsage();
 
         for (const auto& entry : requisition.AllEntries()) {
             auto account = entry.Account;
@@ -3385,7 +3416,7 @@ private:
         if (dynamicConfig->EnableDelayedMembershipClosureRecomputation) {
             if (!MustRecomputeMembershipClosure_) {
                 MustRecomputeMembershipClosure_ = true;
-                YT_LOG_DEBUG("Will recompute membership closure");
+                YT_TLOG_DEBUG("Will recompute membership closure");
             }
         } else {
             DoRecomputeMembershipClosure();
@@ -3394,7 +3425,7 @@ private:
 
     void DoRecomputeMembershipClosure()
     {
-        YT_LOG_DEBUG("Started recomputing membership closure");
+        YT_TLOG_DEBUG("Started recomputing membership closure");
 
         for (auto [userId, user] : UserMap_) {
             user->RecursiveMemberOf().clear();
@@ -3412,7 +3443,7 @@ private:
 
         MustRecomputeMembershipClosure_ = false;
 
-        YT_LOG_DEBUG("Finished recomputing membership closure");
+        YT_TLOG_DEBUG("Finished recomputing membership closure");
     }
 
     void OnRecomputeMembershipClosure()
@@ -3430,7 +3461,6 @@ private:
         buffer.AddGauge("/account_statistics_gossip_queue_size", AccountStatisticsUpdatesGossipQueue_.size());
         BufferedProducer_->Update(std::move(buffer));
     }
-
 
     void DoAddMember(TGroup* group, TSubject* member)
     {
@@ -3530,14 +3560,15 @@ private:
             }
 
             if (!account->GetParent() && account->GetId() != RootAccountId_) {
-                YT_LOG_ALERT("Unattended account found in snapshot (Id: %v)",
-                    account->GetId());
+                YT_TLOG_ALERT("Unattended account found in snapshot")
+                    .With("Id", account->GetId());
             } else {
                 auto name = account->GetName();
                 if (auto error = CheckObjectName(name); !error.IsOK()) {
-                    YT_LOG_ALERT(error, "Account with invalid name encountered (Id: %v, Name: %v)",
-                        account->GetId(),
-                        name);
+                    YT_TLOG_ALERT("Account with invalid name encountered")
+                        .With("Id", account->GetId())
+                        .With("Name", name)
+                        .With(error);
                 }
                 // Reconstruct account name map.
                 RegisterAccountName(name, account);
@@ -3707,7 +3738,7 @@ private:
 
             if (chunk->IsDiskSizeFinal()) {
                 auto requisition = chunk->GetAggregatedRequisition(requisitionRegistry);
-                ComputeChunkResourceDelta(chunk, requisition, +1, chargeAccount);
+                ComputeChunkResourceDelta(chunk, requisition, +1, chunk->GetMasterMemoryUsage(), chargeAccount);
             }  // Else this'll be done later when the chunk is confirmed/sealed.
         }
 
@@ -3753,13 +3784,10 @@ private:
             actualUsage,
             expectedUsage))
         {
-            YT_LOG_EVENT(
-                Logger(),
-                mismatchLogLevel,
-                "Account usage mismatch (Account: %v, SnapshotUsage: %v, RecomputedUsage: %v)",
-                account->GetName(),
-                actualUsage,
-                expectedUsage);
+            YT_TLOG_EVENT(Logger(), mismatchLogLevel, "Account usage mismatch")
+                .With("Account", account->GetName())
+                .With("SnapshotUsage", actualUsage)
+                .With("RecomputedUsage", expectedUsage);
             mismatchFound = true;
         }
 
@@ -3770,19 +3798,16 @@ private:
             actualCommittedUsage,
             expectedCommittedUsage))
         {
-            YT_LOG_EVENT(
-                Logger(),
-                mismatchLogLevel,
-                "Account committed usage mismatch (Account: %v, SnapshotUsage: %v, RecomputedUsage: %v)",
-                account->GetName(),
-                actualUsage,
-                expectedUsage);
+            YT_TLOG_EVENT(Logger(), mismatchLogLevel, "Account committed usage mismatch")
+                .With("Account", account->GetName())
+                .With("SnapshotUsage", actualUsage)
+                .With("RecomputedUsage", expectedUsage);
             mismatchFound = true;
         }
 
         if (mismatchFound && recompute) {
-            YT_LOG_ALERT("Setting recomputed resource usage for account (Account: %v)",
-                account->GetName());
+            YT_TLOG_ALERT("Setting recomputed resource usage for account")
+                .With("Account", account->GetName());
 
             auto newLocalStatistics = TAccountStatistics(
                 expectedUsage,
@@ -3798,7 +3823,7 @@ private:
 
     void ValidateAccountResourceUsages()
     {
-        YT_LOG_INFO("Started validating account resource usage");
+        YT_TLOG_INFO("Started validating account resource usage");
 
         auto resourceUsages = ComputeAccountResourceUsages();
         for (auto [accountId, account] : Accounts()) {
@@ -3811,12 +3836,12 @@ private:
                 /*recompute*/ false);
         }
 
-        YT_LOG_INFO("Finished validating account resource usage");
+        YT_TLOG_INFO("Finished validating account resource usage");
     }
 
     void RecomputeAccountMasterMemoryUsage()
     {
-        YT_LOG_INFO("Started recomputing account master memory usage");
+        YT_TLOG_INFO("Started recomputing account master memory usage");
 
         for (auto [id, account] : AccountMap_) {
             if (!IsObjectAlive(account)) {
@@ -3860,7 +3885,7 @@ private:
             }
 
             auto requisition = chunk->GetAggregatedRequisition(requisitionRegistry);
-            ComputeChunkResourceDelta(chunk, requisition, +1, chargeAccount);
+            ComputeChunkResourceDelta(chunk, requisition, +1, chunk->GetMasterMemoryUsage(), chargeAccount);
         }
 
         // Master table schema memory usage is recalculated separately.
@@ -3873,7 +3898,7 @@ private:
             }
         }
 
-        YT_LOG_INFO("Finished recomputing account master memory usage");
+        YT_TLOG_INFO("Finished recomputing account master memory usage");
     }
 
     void CheckInvariants() override
@@ -3882,29 +3907,31 @@ private:
         for (auto [accountId, account] : AccountMap_) {
             auto expectedRefCounter = GetOrCrash(accountRefCounters, account);
             auto actualRefCounter = account->GetObjectRefCounter();
-            YT_LOG_FATAL_UNLESS(expectedRefCounter == actualRefCounter,
-                "Account has unexpected ref counter "
-                "(AccountName: %v, AccountId: %v, ExpectedRefCounter: %v, ActualRefCounter: %v)",
-                account->GetName(),
-                account->GetId(),
-                expectedRefCounter,
-                actualRefCounter);
+            YT_TLOG_FATAL_UNLESS(expectedRefCounter == actualRefCounter, "Account has unexpected ref counter")
+                .With("AccountName", account->GetName())
+                .With("AccountId", account->GetId())
+                .With("ExpectedRefCounter", expectedRefCounter)
+                .With("ActualRefCounter", actualRefCounter);
         }
 
         for (const auto& [backupAccountId, sourceAccounts] : BackupSourceAccountsMap_) {
             auto* backupAccount = FindAccount(backupAccountId);
             if (!backupAccount) {
-                YT_LOG_ALERT("Backup account not found (BackupAccountId: %v)", backupAccountId);
+                YT_TLOG_ALERT("Backup account not found")
+                    .With("BackupAccountId", backupAccountId);
             }
 
             if (sourceAccounts.empty()) {
-                YT_LOG_ALERT("Backup account in BackupSourceAccountsMap has no source accounts (BackupAccountId: %v)", backupAccountId);
+                YT_TLOG_ALERT("Backup account in BackupSourceAccountsMap has no source accounts")
+                    .With("BackupAccountId", backupAccountId);
             }
 
             for (const auto& sourceAccountId : sourceAccounts) {
                 auto* sourceAccount = FindAccount(sourceAccountId);
                 if (!sourceAccount) {
-                    YT_LOG_ALERT("Source account not found (BackupAccountId: %v, SourceAccountId: %v)", backupAccountId, sourceAccountId);
+                    YT_TLOG_ALERT("Source account not found")
+                        .With("BackupAccountId", backupAccountId)
+                        .With("SourceAccountId", sourceAccountId);
                 }
             }
         }
@@ -4013,6 +4040,8 @@ private:
         }
 
         BackupSourceAccountsMap_.clear();
+
+        AccountsAwaitingGossipDispatch_.clear();
 
         RootUser_ = nullptr;
         GuestUser_ = nullptr;
@@ -4240,10 +4269,9 @@ private:
         if (auto* user = FindUserByName(name, /*activeLifeStageOnly*/ false)) {
             // User could have been created manually.
             if (!IsWellKnownId(user->GetId())) {
-                YT_LOG_ALERT("User is builtin, but doesn't have well known id, will fix it (User: %v, Id: %v -> %v)",
-                    name,
-                    user->GetId(),
-                    id);
+                YT_TLOG_ALERT("User is builtin, but doesn't have well known id, will fix it")
+                    .With("User", name)
+                    .WithFormat("Id", "%v -> %v", user->GetId(), id);
 
                 auto userHolder = UserMap_.Release(user->GetId());
                 userHolder->SetId(id);
@@ -4366,8 +4394,8 @@ private:
             producer->SetEnabled(shouldEnableAccountsProfiling);
         }
 
-        YT_LOG_DEBUG("Account profiling %v",
-            shouldEnableAccountsProfiling ? "started" : "stopped");
+        YT_TLOG_DEBUG("Account profiling toggled")
+            .With("Enabled", shouldEnableAccountsProfiling);
 
         AccountsProfilingEnabled_ = shouldEnableAccountsProfiling;
     }
@@ -4508,16 +4536,16 @@ private:
     void SendAccountStatisticsGossipFromPrimaryCell()
     {
         // For each secondary cell, account statistics are being combined and sent.
-        // Note, however, that every cell receives the sum of all other cells' information with it's own data excluded.
+        // Note, however, that every cell receives the sum of all other cells' information with its own data excluded.
         // This is done because cell statistics on the primary master might be outdated for any particular cell.
 
         const auto& multicellManager = Bootstrap_->GetMulticellManager();
 
         if (GetDynamicConfig()->SendOnlyUpdatesInAccountGossip) {
             auto batchSize = Bootstrap_->GetConfigManager()->GetConfig()->SecurityManager->PrimaryCellAccountGossipBatchSize;
-            YT_LOG_INFO("Sending statistics gossip message with updated accounts to secondary cells (BatchSize: %v, AccountStatisticsUpdatesGossipQueueSize: %v)",
-                batchSize,
-                AccountStatisticsUpdatesGossipQueue_.size());
+            YT_TLOG_INFO("Sending statistics gossip message with updated accounts to secondary cells")
+                .With("BatchSize", batchSize)
+                .With("AccountStatisticsUpdatesGossipQueueSize", AccountStatisticsUpdatesGossipQueue_.size());
             THashMap<TCellTag, NProto::TReqSetAccountStatistics> cellTagToRequest;
             for (auto cellTag : multicellManager->GetRegisteredMasterCellTags()) {
                 cellTagToRequest.emplace(cellTag, NProto::TReqSetAccountStatistics());
@@ -4548,7 +4576,7 @@ private:
                 }
             }
         } else {
-            YT_LOG_INFO("Sending account statistics gossip message to secondary cells");
+            YT_TLOG_INFO("Sending account statistics gossip message to secondary cells");
             for (auto cellTag : multicellManager->GetRegisteredMasterCellTags()) {
                 NProto::TReqSetAccountStatistics request;
                 for (auto account : GetValuesSortedByKey(AccountMap_)) {
@@ -4575,9 +4603,9 @@ private:
 
         if (GetDynamicConfig()->SendOnlyUpdatesInAccountGossip) {
             auto batchSize = Bootstrap_->GetConfigManager()->GetConfig()->SecurityManager->SecondaryCellAccountGossipBatchSize;
-            YT_LOG_INFO("Sending statistics gossip message with updated accounts to primary cell (BatchSize: %v, AccountStatisticsUpdatesGossipQueueSize: %v)",
-                batchSize,
-                AccountStatisticsUpdatesGossipQueue_.size());
+            YT_TLOG_INFO("Sending statistics gossip message with updated accounts to primary cell")
+                .With("BatchSize", batchSize)
+                .With("AccountStatisticsUpdatesGossipQueueSize", AccountStatisticsUpdatesGossipQueue_.size());
             NProto::TReqSetAccountStatistics request;
             request.set_cell_tag(multicellManager->GetCellTag().Underlying());
             for (int batchMessageIndex = 0; batchMessageIndex < batchSize && !AccountStatisticsUpdatesGossipQueue_.empty(); ++batchMessageIndex) {
@@ -4598,7 +4626,7 @@ private:
                 multicellManager->PostToPrimaryMaster(request, true);
             }
         } else {
-            YT_LOG_INFO("Sending account statistics gossip message to primary cell");
+            YT_TLOG_INFO("Sending account statistics gossip message to primary cell");
             NProto::TReqSetAccountStatistics request;
             request.set_cell_tag(multicellManager->GetCellTag().Underlying());
             for (auto account : GetValuesSortedByKey(AccountMap_)) {
@@ -4635,12 +4663,13 @@ private:
         YT_VERIFY(multicellManager->IsPrimaryMaster());
 
         if (!multicellManager->IsRegisteredMasterCell(cellTag)) {
-            YT_LOG_ERROR("Received account statistics gossip message from unknown cell (CellTag: %v)",
-                cellTag);
+            YT_TLOG_ERROR("Received account statistics gossip message from unknown cell")
+                .With("CellTag", cellTag);
             return;
         }
 
-        YT_LOG_INFO("Received account statistics gossip message (CellTag: %v)", cellTag);
+        YT_TLOG_INFO("Received account statistics gossip message")
+            .With("CellTag", cellTag);
 
         for (const auto& entry : request->entries()) {
             auto accountId = FromProto<TAccountId>(entry.account_id());
@@ -4671,7 +4700,7 @@ private:
         const auto& multicellManager = Bootstrap_->GetMulticellManager();
         YT_VERIFY(multicellManager->IsSecondaryMaster());
 
-        YT_LOG_INFO("Received account statistics gossip message");
+        YT_TLOG_INFO("Received account statistics gossip message");
 
         for (const auto& entry : request->entries()) {
             auto accountId = FromProto<TAccountId>(entry.account_id());
@@ -4919,10 +4948,8 @@ private:
                 impl->GetOwnerUser())
             , Underlying_(permission, MatchAceSubjectCallback_, options, impl->GetDynamicConfig()->CheckAllAceColumnsFullRead)
         {
-            YT_LOG_ALERT_IF(
-                PopCount(permission) > 1 && Any(permission & EPermission::FullRead),
-                "Checking \"full_read\" and some other permission (FullPermissions: %v)",
-                permission);
+            YT_TLOG_ALERT_IF(PopCount(permission) > 1 && Any(permission & EPermission::FullRead), "Checking \"full_read\" and some other permission")
+                .With("FullPermissions", permission);
 
             if (auto fastAction = FastCheckPermission(user, permission, impl);
                 fastAction != ESecurityAction::Undefined)
@@ -4943,10 +4970,9 @@ private:
             int depth)
         {
             if (auto error = NSecurityClient::CheckAceCorrect(ace); !error.IsOK()) {
-                YT_LOG_ALERT(
-                    error,
-                    "Got invalid ACE; skipping (Ace: %v)",
-                    ConvertToYsonString(ace, EYsonFormat::Text));
+                YT_TLOG_ALERT("Got invalid ACE; skipping")
+                    .With("Ace", ConvertToYsonString(ace, EYsonFormat::Text))
+                    .With(error);
                 return;
             }
 
@@ -5124,11 +5150,13 @@ private:
                     IncreaseLocalAndClusterAccountStatistics(account, statisticsDelta);
 
                     if (account->ClusterStatistics().ResourceUsage.GetChunkHostCellMasterMemory() < 0) {
-                        YT_LOG_ALERT("Chunk host cell memory is negative after removing chunk host role from cell %v", cellTag);
+                        YT_TLOG_ALERT("Chunk host cell memory is negative after removing chunk host role from cell")
+                            .With("CellTag", cellTag);
                     }
 
                     if (account->ClusterStatistics().CommittedResourceUsage.GetChunkHostCellMasterMemory() < 0) {
-                        YT_LOG_ALERT("Committed chunk host cell memory is negative after removing chunk host role from cell %v", cellTag);
+                        YT_TLOG_ALERT("Committed chunk host cell memory is negative after removing chunk host role from cell")
+                            .With("CellTag", cellTag);
                     }
                 } else {
                     auto statisticsDelta = TAccountStatistics(

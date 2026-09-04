@@ -7,7 +7,7 @@ from yt_commands import (
     sort, wait_for_nodes, update_nodes_dynamic_config, update_controller_agent_config,
     wait_breakpoint, with_breakpoint, release_breakpoint, print_debug,
     make_random_string, sync_create_cells, get_allocation_id_from_job_id,
-    create_domestic_medium,
+    create_domestic_medium, create_account, set_account_disk_space_limit,
 )
 
 from yt.common import YtError, YtResponseError, update
@@ -1950,6 +1950,66 @@ class TestLocalSquashFSLayers(YTEnvSetup):
         for node in ls("//sys/cluster_nodes"):
             assert len(get("//sys/cluster_nodes/{}/@alerts".format(node))) == 0
 
+    @authors("yuryalekseev")
+    @pytest.mark.parametrize("access_method, filesystem", [
+        ("nbd", "archive"),
+        ("local", "ext3"),
+        ("local", "ext4"),
+    ])
+    def test_incompatible_access_method_and_filesystem(self, access_method, filesystem):
+        self.setup_files()
+
+        create("file", "//tmp/incompatible_layer", attributes={"replication_factor": 1})
+        write_file("//tmp/incompatible_layer", open("layers/squashfs.img", "rb").read())
+        set("//tmp/incompatible_layer/@access_method", access_method)
+        set("//tmp/incompatible_layer/@filesystem", filesystem)
+
+        create("table", "//tmp/t_in", attributes={"replication_factor": 1})
+        create("table", "//tmp/t_out", attributes={"replication_factor": 1})
+
+        write_table("//tmp/t_in", [{"k": 0, "u": 1, "v": 2}])
+        with raises_yt_error("Incompatible combination of access method"):
+            map(
+                in_="//tmp/t_in",
+                out="//tmp/t_out",
+                command="ls $YT_ROOT_FS 1>&2",
+                spec={
+                    "max_failed_job_count": 1,
+                    "mapper": {
+                        "layer_paths": ["//tmp/incompatible_layer"],
+                    },
+                },
+            )
+
+    @authors("yuryalekseev")
+    @pytest.mark.parametrize("attribute, value", [
+        ("access_method", "garbage"),
+        ("filesystem", "garbage"),
+    ])
+    def test_invalid_access_method_or_filesystem(self, attribute, value):
+        self.setup_files()
+
+        create("file", "//tmp/invalid_layer", attributes={"replication_factor": 1})
+        write_file("//tmp/invalid_layer", open("layers/squashfs.img", "rb").read())
+        set(f"//tmp/invalid_layer/@{attribute}", value)
+
+        create("table", "//tmp/t_in", attributes={"replication_factor": 1})
+        create("table", "//tmp/t_out", attributes={"replication_factor": 1})
+
+        write_table("//tmp/t_in", [{"k": 0, "u": 1, "v": 2}])
+        with raises_yt_error():
+            map(
+                in_="//tmp/t_in",
+                out="//tmp/t_out",
+                command="ls $YT_ROOT_FS 1>&2",
+                spec={
+                    "max_failed_job_count": 1,
+                    "mapper": {
+                        "layer_paths": ["//tmp/invalid_layer"],
+                    },
+                },
+            )
+
     @authors("pogorelov")
     def test_squashfs_layer_deduplication(self):
         self.setup_files()
@@ -1969,7 +2029,7 @@ class TestLocalSquashFSLayers(YTEnvSetup):
 
         finished_job_counter = profiler.with_tags({"origin": "scheduler"}).counter("job_controller/job_final_state")
         squashfs_volume_count = profiler.with_tags({"type": "squashfs"}).gauge("volumes/count")
-        assert not squashfs_volume_count.get()
+        wait(lambda: not squashfs_volume_count.get())
 
         initial_adding_log_count = len(self._get_node_debug_logs("Volume added to cache"))
         initial_removing_log_count = len(self._get_node_debug_logs("Volume removed from cache"))
@@ -2248,6 +2308,30 @@ class TestNbdSquashFSLayers(YTEnvSetup):
 
         wait(lambda: profiler.get("volumes/removed", tags) is not None)
         wait(lambda: profiler.get("volumes/remove_time", tags) is not None)
+
+    @authors("babenko")
+    @pytest.mark.timeout(150)
+    def test_nbd_disk_request_with_account_and_no_input(self):
+        create_account("my_account")
+        set_account_disk_space_limit("my_account", 16 * 1024 * 1024, "ssd_nbd")
+
+        vanilla(spec={
+            "max_failed_job_count": 1,
+            "tasks": {
+                "task": {
+                    "job_count": 1,
+                    "command": "true",
+                    "disk_request": {
+                        "medium_name": "ssd_nbd",
+                        "account": "my_account",
+                        "disk_space": 16 * 1024 * 1024,
+                        "nbd_disk": {},
+                    },
+                },
+            },
+        })
+
+        assert get("//sys/accounts/my_account/@resource_usage/disk_space_per_medium/ssd_nbd") == 0
 
     @authors("yuryalekseev")
     @pytest.mark.timeout(150)
@@ -2556,6 +2640,7 @@ class TestFailOperationAfterSuccessiveJobAbortsOnPrepareVolume(YTEnvSetup):
         "controller_agent": {
             "max_job_aborts_until_operation_failure": {
                 "root_volume_preparation_failed": 2,
+                "overlay_layer_preparation_failed": 2,
             },
         }
     }
@@ -2591,6 +2676,60 @@ class TestFailOperationAfterSuccessiveJobAbortsOnPrepareVolume(YTEnvSetup):
                 "slot_manager": {
                     "volume_manager": {
                         "throw_on_prepare_volume": True,
+                    },
+                }
+            },
+        })
+
+        with Restarter(self.Env, NODES_SERVICE):
+            pass
+
+        wait_for_nodes()
+
+        create("table", "//tmp/t_in")
+        create("table", "//tmp/t_out")
+
+        write_table("//tmp/t_in", [{"k": 0, "u": 1, "v": 2}])
+
+        with raises_yt_error("Operation failed due to excessive successive job aborts"):
+            map(
+                in_="//tmp/t_in",
+                out="//tmp/t_out",
+                command="ls $YT_ROOT_FS/dir 1>&2",
+                spec={
+                    "mapper": {
+                        "layer_paths": ["//tmp/squashfs.img"],
+                    },
+                },
+            )
+
+        # YT-14186: Corrupted user layer should not disable jobs on node.
+        for node in ls("//sys/cluster_nodes"):
+            assert len(get("//sys/cluster_nodes/{}/@alerts".format(node))) == 0
+
+    @authors("yuryalekseev")
+    def test_abort_on_prepare_layers(self):
+        self.setup_files()
+
+        update_nodes_dynamic_config({
+            "exec_node": {
+                "nbd": {
+                    "block_cache_compressed_data_capacity": 536870912,
+                    "client": {
+                        # Set read I/O timeout to 1 second
+                        "io_timeout": 1000,
+                        "connection_count": 2,
+                    },
+                    "enabled": True,
+                    "server": {
+                        "unix_domain_socket": {
+                            "path": _make_random_uds_path(),
+                        },
+                    },
+                },
+                "slot_manager": {
+                    "volume_manager": {
+                        "throw_on_prepare_layers": True,
                     },
                 }
             },
@@ -3637,6 +3776,7 @@ class TestVolumeReuseInGangOperation(TestPortoLayersBase):
 class TestLayerReuseInAllocationBase(TestPortoLayersBase):
     NUM_NODES = 1
     NUM_SCHEDULERS = 1
+    USE_DYNAMIC_TABLES = True
 
     DELTA_DYNAMIC_NODE_CONFIG = {
         "%true": {
@@ -3646,6 +3786,30 @@ class TestLayerReuseInAllocationBase(TestPortoLayersBase):
                         "enable_multiple_jobs": True,
                     },
                 },
+                "job_reporter": {
+                    "reporting_period": 10,
+                    "min_repeat_delay": 10,
+                    "max_repeat_delay": 10,
+                },
+            },
+        },
+    }
+
+    DELTA_SCHEDULER_CONFIG = {
+        "scheduler": {
+            "enable_job_reporter": True,
+            "enable_job_spec_reporter": True,
+            "enable_job_stderr_reporter": True,
+        },
+    }
+
+    DELTA_CONTROLLER_AGENT_CONFIG = {
+        "controller_agent": {
+            "job_reporter": {
+                "enabled": True,
+                "reporting_period": 10,
+                "min_repeat_delay": 10,
+                "max_repeat_delay": 10,
             },
         },
     }
@@ -3686,6 +3850,10 @@ class TestLayerReuseInAllocationBase(TestPortoLayersBase):
 
     def setup_method(self, method):
         super().setup_method(method)
+        sync_create_cells(1)
+        init_operations_archive.create_tables_latest_version(
+            self.Env.create_native_client(), override_tablet_cell_bundle="default"
+        )
 
     def setup_files(self):
         create("file", "//tmp/layer1", attributes={"replication_factor": 1})
@@ -3767,6 +3935,19 @@ class TestLayerReuseInAllocation(TestLayerReuseInAllocationBase):
         assert new_imports == 1, \
             "Layer should be imported exactly once for the whole allocation; " \
             "new imports during this test: {}, all logs: {}".format(new_imports, logs)
+
+        # Check layer download statistics.
+        stats1 = op.get_job_statistics(job_id1)
+        stats2 = op.get_job_statistics(job_id2)
+
+        # First job must have downloaded and imported the layer.
+        assert stats1["exec_agent"]["artifacts"]["layers_downloaded_size"]["sum"] > 0
+
+        # Second job in same allocation must not have downloaded or imported any layers.
+        assert stats2["exec_agent"]["artifacts"]["layers_cached_size"]["sum"] == 0
+        assert stats2["exec_agent"]["artifacts"]["layers_downloaded_size"]["sum"] == 0
+        assert stats2["exec_agent"]["artifacts"]["layers_downloaded_total_duration"]["sum"] == 0
+        assert stats2["exec_agent"]["artifacts"]["layers_import_total_duration"]["sum"] == 0
 
     @authors("pogorelov")
     def test_layer_evicted_when_allocation_not_reused(self):

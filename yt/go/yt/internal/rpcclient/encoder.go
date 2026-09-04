@@ -64,7 +64,7 @@ func (e *Encoder) CreateNode(
 		Force:                &opts.Force,
 		IgnoreExisting:       &opts.IgnoreExisting,
 		LockExisting:         nil, // todo check unimportant
-		IgnoreTypeMismatch:   nil, // todo check unimportant
+		IgnoreTypeMismatch:   &opts.IgnoreTypeMismatch,
 		TransactionalOptions: convertTransactionOptions(opts.TransactionOptions),
 		PrerequisiteOptions:  convertPrerequisiteOptions(opts.PrerequisiteOptions),
 		MutatingOptions:      convertMutatingOptions(opts.MutatingOptions),
@@ -521,6 +521,22 @@ func (e *Encoder) ReadTable(
 	path ypath.YPath,
 	opts *yt.ReadTableOptions,
 ) (r yt.TableReader, err error) {
+	return nil, xerrors.New("implement me")
+}
+
+func (e *Encoder) PartitionTables(
+	ctx context.Context,
+	paths []ypath.YPath,
+	options *yt.PartitionTablesOptions,
+) (partitions yt.MultiTablePartitions, err error) {
+	return yt.MultiTablePartitions{}, xerrors.New("implement me")
+}
+
+func (e *Encoder) ReadTablePartition(
+	ctx context.Context,
+	cookie []byte,
+	options *yt.ReadTablePartitionOptions,
+) (r yt.TablePartitionReader, err error) {
 	return nil, xerrors.New("implement me")
 }
 

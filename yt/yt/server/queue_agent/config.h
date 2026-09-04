@@ -4,22 +4,22 @@
 
 #include <yt/yt/server/lib/misc/config.h>
 
-#include <yt/yt/client/ypath/public.h>
-#include <yt/yt/client/ypath/rich.h>
-
 #include <yt/yt/ytlib/api/native/public.h>
-
-#include <yt/yt/ytlib/discovery_client/public.h>
 
 #include <yt/yt/ytlib/queue_client/public.h>
 
+#include <yt/yt/client/ypath/public.h>
+#include <yt/yt/client/ypath/rich.h>
+
 #include <yt/yt/library/cypress_election/config.h>
+
+#include <yt/yt/library/discovery_client/public.h>
 
 #include <yt/yt/library/dynamic_config/config.h>
 
-#include <yt/yt/library/server_program/config.h>
-
 #include <yt/yt/library/program/config.h>
+
+#include <yt/yt/library/server_program/config.h>
 
 #include <yt/yt/core/concurrency/config.h>
 
@@ -75,6 +75,24 @@ struct TCypressSynchronizerDynamicConfig
 };
 
 DEFINE_REFCOUNTED_TYPE(TCypressSynchronizerDynamicConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct TMultiConsumerNamesGarbageCollectorDynamicConfig
+    : public NYTree::TYsonStruct
+{
+    //! Garbage collection pass period.
+    TDuration PassPeriod;
+
+    //! Flag for disabling multi consumer names garbage collector entirely.
+    bool Enable;
+
+    REGISTER_YSON_STRUCT(TMultiConsumerNamesGarbageCollectorDynamicConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TMultiConsumerNamesGarbageCollectorDynamicConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -195,6 +213,10 @@ struct TQueueControllerDynamicConfig
     bool EnableVerboseLogging;
     std::vector<NYPath::TRichYPath> VerboseLoggingObjects;
 
+    //! Maximum number of rows read from a multi consumer user table per select query while
+    //! paginating over consumer names.
+    i64 MultiConsumerSelectBatchSize;
+
     REGISTER_YSON_STRUCT(TQueueControllerDynamicConfig);
 
     static void Register(TRegistrar registrar);
@@ -241,6 +263,8 @@ struct TQueueAgentDynamicConfig
     //! NB: Even when set to true, mutating requests are only performed for objects with the corresponding stage.
     bool HandleReplicatedObjects;
 
+    TDuration QueueAgentChannelRequestTimeout;
+
     REGISTER_YSON_STRUCT(TQueueAgentDynamicConfig);
 
     static void Register(TRegistrar registrar);
@@ -282,7 +306,9 @@ struct TQueueAgentBootstrapConfig
 
     NYTree::IMapNodePtr CypressAnnotations;
 
-    NCypressElection::TCypressElectionManagerConfigPtr ElectionManager;
+    NCypressElection::TCypressElectionManagerConfigPtr CypressSynchronizerElectionManager;
+
+    NCypressElection::TCypressElectionManagerConfigPtr MultiConsumerNamesGarbageCollectorElectionManager;
 
     NDynamicConfig::TDynamicConfigManagerConfigPtr DynamicConfigManager;
     NYPath::TYPath DynamicConfigPath;
@@ -319,6 +345,9 @@ struct TQueueAgentComponentDynamicConfig
     TQueueAgentShardingManagerDynamicConfigPtr QueueAgentShardingManager;
     TQueueAgentDynamicConfigPtr QueueAgent;
     TCypressSynchronizerDynamicConfigPtr CypressSynchronizer;
+    TMultiConsumerNamesGarbageCollectorDynamicConfigPtr MultiConsumerNamesGarbageCollector;
+
+    NQueueClient::TQueueAgentDynamicStateDynamicConfigPtr DynamicState;
 
     REGISTER_YSON_STRUCT(TQueueAgentComponentDynamicConfig);
 

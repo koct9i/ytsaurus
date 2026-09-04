@@ -86,6 +86,8 @@
 #include <yt/yt/library/containers/container_devices_checker.h>
 #endif
 
+#include <yt/yt/library/disk_manager/hotswap_manager.h>
+
 #include <yt/yt/library/fusion/service_locator.h>
 
 #include <yt/yt/library/coredumper/public.h>
@@ -93,7 +95,7 @@
 #include <yt/yt/library/program/build_attributes.h>
 #include <yt/yt/library/program/helpers.h>
 
-#include <yt/yt/library/profiling/solomon/registry.h>
+#include <yt/yt/library/profiling/solomon/exporter.h>
 
 #include <yt/yt/library/monitoring/http_integration.h>
 #include <yt/yt/library/monitoring/monitoring_manager.h>
@@ -233,7 +235,7 @@ using namespace NServer;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "NodeBoot");
+static YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "NodeBoot");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -606,7 +608,7 @@ public:
     EJobEnvironmentType GetJobEnvironmentType() const override
     {
         const auto& slotManagerConfig = Config_->ExecNode->SlotManager;
-        return slotManagerConfig->JobEnvironment.GetCurrentType();
+        return slotManagerConfig->JobEnvironment.GetType();
     }
 
     const THashSet<ENodeFlavor>& GetFlavors() const override
@@ -817,12 +819,11 @@ private:
             EmplaceOrCrash(SecondaryMasterConnectionConfigs_, CellTagFromId(secondaryMaster->CellId), secondaryMaster);
         }
 
-        YT_LOG_INFO(
-            "Initializing cluster node (LocalAddresses: %v, PrimaryMasterAddresses: %v, NodeTags: %v, Flavors: %v)",
-            GetValues(localRpcAddresses),
-            PrimaryMaster_->Addresses,
-            Config_->Tags,
-            Flavors_);
+        YT_TLOG_INFO("Initializing cluster node")
+            .With("LocalAddresses", GetValues(localRpcAddresses))
+            .With("PrimaryMasterAddresses", PrimaryMaster_->Addresses)
+            .With("NodeTags", Config_->Tags)
+            .With("Flavors", Flavors_);
 
         NodeMemoryUsageTracker_ = CreateNodeMemoryTracker(
             Config_->ResourceLimits->TotalMemory,
@@ -876,14 +877,14 @@ private:
             Config_->InThrottler->TotalLimit = GetNetworkThrottlerLimit(nullptr, {});
             InThrottler_ = CreateFairThrottler(
                 Config_->InThrottler,
-                ClusterNodeLogger().WithTag("Direction: %v", "In"),
+                ClusterNodeLogger().WithTag("Direction", "In"),
                 ClusterNodeProfiler().WithPrefix("/in_throttler"));
             DefaultInThrottler_ = CreateInThrottler("default");
 
             Config_->OutThrottler->TotalLimit = GetNetworkThrottlerLimit(nullptr, {});
             OutThrottler_ = CreateFairThrottler(
                 Config_->OutThrottler,
-                ClusterNodeLogger().WithTag("Direction: %v", "Out"),
+                ClusterNodeLogger().WithTag("Direction", "Out"),
                 ClusterNodeProfiler().WithPrefix("/out_throttler"));
             DefaultOutThrottler_ = CreateOutThrottler("default");
         } else {
@@ -916,7 +917,8 @@ private:
                 ClusterNodeProfiler().WithPrefix("/huge_page_manager"),
                 NodeMemoryUsageTracker_->WithCategory(EMemoryCategory::HugePage));
         } catch (const std::exception& ex) {
-            YT_LOG_WARNING(ex, "Failed to initialize huge page manager");
+            YT_TLOG_WARNING("Failed to initialize huge page manager")
+                .With(ex);
         }
 
         RawUserJobContainerCreationThrottler_ = CreateNamedReconfigurableThroughputThrottler(
@@ -1077,7 +1079,8 @@ private:
 
             // Cycles are fine for bootstrap.
             portoExecutor->SubscribeFailed(BIND([this, this_ = MakeStrong(this)] (const TError& error) {
-                YT_LOG_ERROR(error, "Porto executor failed");
+                YT_TLOG_ERROR("Porto executor failed")
+                    .With(error);
                 ExecNodeBootstrap_->GetSlotManager()->OnPortoExecutorFailed(error);
             }));
 
@@ -1118,10 +1121,13 @@ private:
                 NodeResourceManager_->SubscribeSelfMemoryGuaranteeUpdated(BIND([self] (i64 memoryGuarantee) {
                     try {
                         self->SetMemoryGuarantee(memoryGuarantee);
-                        YT_LOG_DEBUG("Self memory guarantee updated (MemoryGuarantee: %v)", memoryGuarantee);
+                        YT_TLOG_DEBUG("Self memory guarantee updated")
+                            .With("MemoryGuarantee", memoryGuarantee);
                     } catch (const std::exception& ex) {
                         // This probably means container limits misconfiguration on host.
-                        YT_LOG_ALERT(ex, "Failed to set self memory guarantee (MemoryGuarantee: %v)", memoryGuarantee);
+                        YT_TLOG_ALERT("Failed to set self memory guarantee")
+                            .With("MemoryGuarantee", memoryGuarantee)
+                            .With(ex);
                     }
                 }));
             }
@@ -1161,7 +1167,7 @@ private:
 
         JobResourceManager_->Initialize();
 
-        YT_LOG_INFO("Cluster node initialization completed");
+        YT_TLOG_INFO("Cluster node initialization completed");
     }
 
     void DoStart()
@@ -1180,24 +1186,21 @@ private:
             &MonitoringManager_,
             &OrchidRoot_);
 
-        YT_LOG_INFO(
-            "Starting node (LocalAddresses: %v, PrimaryMasterAddresses: %v, NodeTags: %v)",
-            GetValues(localRpcAddresses),
-            PrimaryMaster_->Addresses,
-            Config_->Tags);
+        YT_TLOG_INFO("Starting node")
+            .With("LocalAddresses", GetValues(localRpcAddresses))
+            .With("PrimaryMasterAddresses", PrimaryMaster_->Addresses)
+            .With("NodeTags", Config_->Tags);
 
         // Do not start subsystems until everything is initialized.
         // Start MasterConnector to register at Master.
         MasterConnector_->Start();
 
         {
-            YT_LOG_INFO("Loading dynamic config for the first time");
+            YT_TLOG_INFO("Loading dynamic config for the first time");
             auto error = WaitFor(DynamicConfigManager_->GetConfigLoadedFuture());
-            YT_LOG_FATAL_UNLESS(
-                error.IsOK(),
-                error,
-                "Unexpected failure while waiting for the first dynamic config loaded");
-            YT_LOG_INFO("Dynamic config loaded");
+            YT_TLOG_FATAL_UNLESS(error.IsOK(), "Unexpected failure while waiting for the first dynamic config loaded")
+                .With(error);
+            YT_TLOG_INFO("Dynamic config loaded");
         }
 
         DoValidateConfig();
@@ -1298,13 +1301,16 @@ private:
             TabletNodeBootstrap_->Run();
         }
 
-        YT_LOG_INFO("Listening for RPC requests (Port: %v)", Config_->RpcPort);
+        YT_TLOG_INFO("Listening for RPC requests")
+            .With("Port", Config_->RpcPort);
         RpcServer_->Start();
 
-        YT_LOG_INFO("Listening for HTTP requests (Port: %v)", Config_->MonitoringPort);
+        YT_TLOG_INFO("Listening for HTTP requests")
+            .With("Port", Config_->MonitoringPort);
         HttpServer_->Start();
         if (HttpsServer_) {
-            YT_LOG_INFO("Listening for HTTPS requests (Port: %v)", HttpsServer_->GetAddress().GetPort());
+            YT_TLOG_INFO("Listening for HTTPS requests")
+                .With("Port", HttpsServer_->GetAddress().GetPort());
             HttpsServer_->Start();
         }
 
@@ -1316,7 +1322,7 @@ private:
         }
 #endif
 
-        YT_LOG_INFO("Node started successfully");
+        YT_TLOG_INFO("Node started successfully");
     }
 
     IYPathServicePtr GetSecondaryMasterConnectionConfigsOrchidService()
@@ -1340,15 +1346,15 @@ private:
                 UnrecognizedOptionsAlert_ = TError(
                     EErrorCode::UnrecognizedConfigOption,
                     "Node config contains unrecognized options")
-                    << TErrorAttribute("unrecognized", unrecognized);
+                    .With("unrecognized", unrecognized);
             }
             if (Config_->AbortOnUnrecognizedOptions) {
-                YT_LOG_ERROR("Node config contains unrecognized options, aborting (Unrecognized: %v)",
-                    ConvertToYsonString(unrecognized, NYson::EYsonFormat::Text));
+                YT_TLOG_ERROR("Node config contains unrecognized options, aborting")
+                    .With("Unrecognized", ConvertToYsonString(unrecognized, NYson::EYsonFormat::Text));
                 YT_ABORT();
             } else {
-                YT_LOG_WARNING("Node config contains unrecognized options (Unrecognized: %v)",
-                    ConvertToYsonString(unrecognized, NYson::EYsonFormat::Text));
+                YT_TLOG_WARNING("Node config contains unrecognized options")
+                    .With("Unrecognized", ConvertToYsonString(unrecognized, NYson::EYsonFormat::Text));
             }
         }
     }
@@ -1379,10 +1385,10 @@ private:
         {
             auto error = WaitFor(DynamicConfigManager_->GetConfigLoadedFuture());
 
-            YT_LOG_FATAL_UNLESS(
+            YT_TLOG_FATAL_UNLESS(
                 error.IsOK(),
-                error,
-                "Unexpected failure while waiting for the first dynamic config loaded during node registration compelition");
+                "Unexpected failure while waiting for the first dynamic config loaded during node registration compelition")
+                .With(error);
         }
     }
 
@@ -1482,6 +1488,10 @@ private:
         }
         TSingletonManager::Reconfigure(newConfig);
 
+        if (auto hotswapManager = TryGetHotswapManager()) {
+            hotswapManager->Reconfigure(newConfig->HotswapManager);
+        }
+
         NodeMemoryUsageTracker_->Reconfigure(newConfig->NodeMemoryTracker);
 
         StorageHeavyThreadPool_->SetThreadCount(
@@ -1492,6 +1502,7 @@ private:
         auto netTxLimit = NodeResourceManager_->GetNetTxLimit();
         auto netRxLimit = NodeResourceManager_->GetNetRxLimit();
         ReconfigureThrottlers(newConfig, netTxLimit, netRxLimit);
+        NetworkStatistics_->Reconfigure(newConfig->DataNode);
 
         RawReadRpsOutThrottler_->Reconfigure(newConfig->DataNode->ReadRpsOutThrottler
             ? newConfig->DataNode->ReadRpsOutThrottler
@@ -1507,6 +1518,8 @@ private:
 
         BusServer_->Reconfigure(newConfig->BusServer);
         RpcServer_->OnDynamicConfigChanged(newConfig->RpcServer);
+
+        ServiceLocator_->GetServiceOrThrow<TSolomonExporterPtr>()->Reconfigure(newConfig->SolomonExporter);
 
         ObjectServiceCache_->Reconfigure(newConfig->CachingObjectService);
         for (const auto& [_, service] : GetCachingObjectServices()) {
@@ -1591,12 +1604,12 @@ private:
 
         if (DynamicConfigManager_->GetConfig()->TotalMemoryLimitExceededThreshold * totalUsed > totalLimit) {
             alerts->push_back(TError(NChunkClient::EErrorCode::TotalMemoryLimitExceeded, "Total memory limit exceeded")
-                << TErrorAttribute("used", totalUsed)
-                << TErrorAttribute("limit", totalLimit));
+                .With("used", totalUsed)
+                .With("limit", totalLimit));
         } else if (DynamicConfigManager_->GetConfig()->MemoryUsageIsCloseToLimitThreshold * totalUsed > totalLimit) {
             alerts->push_back(TError("Memory usage is close to the limit")
-                << TErrorAttribute("used", totalUsed)
-                << TErrorAttribute("limit", totalLimit));
+                .With("used", totalUsed)
+                .With("limit", totalLimit));
         }
     }
 
@@ -1608,8 +1621,8 @@ private:
             if (used > limit * DynamicConfigManager_->GetConfig()->MemoryLimitExceededForCategoryThreshold) {
                 alerts->push_back(TError("Memory limit exceeded for category %Qlv",
                     category)
-                    << TErrorAttribute("used", used)
-                    << TErrorAttribute("limit", limit));
+                    .With("used", used)
+                    .With("limit", limit));
             }
         }
     }
@@ -1677,10 +1690,10 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY(ControlThread);
 
-        YT_LOG_ALERT_UNLESS(
+        YT_TLOG_ALERT_UNLESS(
             removedSecondaryMasterCellTags.empty(),
-            "Some cells disappeared in received configuration of secondary masters (RemovedCellTags: %v)",
-            removedSecondaryMasterCellTags);
+            "Some cells disappeared in received configuration of secondary masters")
+            .With("RemovedCellTags", removedSecondaryMasterCellTags);
 
         TSecondaryMasterConnectionConfigs newSecondaryMasterConfigs;
         {
@@ -1757,11 +1770,10 @@ private:
             }
         }
 
-        YT_LOG_INFO("Received new master cell cluster configuration "
-            "(NewCellTags: %v, ChangedCellTags: %v, RemovedCellTags: %v)",
-            newSecondaryMasterCellTags,
-            changedSecondaryMasterCellTags,
-            removedSecondaryMasterCellTags);
+        YT_TLOG_INFO("Received new master cell cluster configuration")
+            .With("NewCellTags", newSecondaryMasterCellTags)
+            .With("ChangedCellTags", changedSecondaryMasterCellTags)
+            .With("RemovedCellTags", removedSecondaryMasterCellTags);
     }
 
     TSecondaryMasterConnectionConfigs GetSecondaryMasterConnectionConfigs() const

@@ -116,7 +116,7 @@ void TNodeManager::OnMasterConnected(const TMasterHandshakeResult& result)
     auto invokerOrError = WaitFor(AllSucceeded(asyncInvokers));
     if (!invokerOrError.IsOK()) {
         THROW_ERROR_EXCEPTION("Error connecting node shards")
-                << invokerOrError;
+                .With(invokerOrError);
     }
 
     const auto& invokers = invokerOrError.Value();
@@ -283,7 +283,7 @@ TError TNodeManager::HandleNodesAttributes(const NYTree::IListNodePtr& nodeList)
 
     if (!handleErrors.empty()) {
         return TError("Failed to update some nodes")
-            << handleErrors;
+            .With(handleErrors);
     }
 
     return {};
@@ -558,10 +558,8 @@ void TNodeManager::RegisterAgentAtNodeShards(
     });
 
     auto error = WaitFor(AllSucceeded(std::move(futures)));
-    YT_LOG_FATAL_IF(
-        !error.IsOK(),
-        error,
-        "Failed to register agent at node shards");
+    YT_TLOG_FATAL_IF(!error.IsOK(), "Failed to register agent at node shards")
+        .With(error);
 }
 
 void TNodeManager::UnregisterAgentFromNodeShards(const TAgentId& id)
@@ -573,10 +571,8 @@ void TNodeManager::UnregisterAgentFromNodeShards(const TAgentId& id)
     });
 
     auto error = WaitFor(AllSucceeded(std::move(futures)));
-    YT_LOG_FATAL_IF(
-        !error.IsOK(),
-        error,
-        "Failed to unregister agents from node shards");
+    YT_TLOG_FATAL_IF(!error.IsOK(), "Failed to unregister agents from node shards")
+        .With(error);
 }
 
 const TNodeShardPtr& TNodeManager::GetNodeShard(NNodeTrackerClient::TNodeId nodeId) const

@@ -249,12 +249,13 @@ void TTransaction::Save(NCellMaster::TSaveContext& context) const
     // All transactions should have this flag set to true, unless they were started before 24.2
     // and something went wrong when attempting to abort it.
     // But let's write a detailed message here anyway.
-    YT_LOG_ALERT_UNLESS(
+    YT_TLOG_ALERT_UNLESS(
         NativeTxExternalizationEnabled_,
-        "A Cypress transaction has NativeTxExternalizationEnabled set to false; This can happen if a transaction "
-        "was started too long ago. New algorithm relies on all transactions being externalized. This issue may lead "
-        "to data corruption! Please abort said transaction (TransactionId: %v)",
-        Id_);
+        "A Cypress transaction has NativeTxExternalizationEnabled set to false; "
+        "this can happen if the transaction was started too long ago; the new algorithm "
+        "relies on all transactions being externalized, so this may lead to data corruption; "
+        "please abort said transaction")
+        .With("TransactionId", Id_);
 
     using NYT::Save;
     Save(context, GetPersistentState());
@@ -280,7 +281,8 @@ void TTransaction::Save(NCellMaster::TSaveContext& context) const
     Save(context, TablesWithBackupCheckpoints_);
     Save(context, Depth_);
     Save(context, RecursiveLockCount_);
-    Save(context, NativeCommitMutationRevision_);
+    Save(context, NativeCommitRevision_.Mutation);
+    Save(context, NativeCommitRevision_.Sequoia);
     Save(context, GetTransactionLeasesState());
     Save(context, LeaseCellIds_);
     Save(context, SuccessorTransactionLeaseCount_);
@@ -337,7 +339,17 @@ void TTransaction::Load(NCellMaster::TLoadContext& context)
         Load(context, upload);
     }
     Load(context, RecursiveLockCount_);
-    Load(context, NativeCommitMutationRevision_);
+    Load(context, NativeCommitRevision_.Mutation);
+
+    // Yes, this heavily relies on timestamps being significantly greater than
+    // every possible Hydra revision.
+    if (context.GetVersion() < EMasterReign::SequoiaRevision_26_1 ||
+        (context.GetVersion() >= EMasterReign::Start_26_2 && context.GetVersion() < EMasterReign::SequoiaRevision_26_2))
+    {
+        NativeCommitRevision_.Sequoia = NativeCommitRevision_.Mutation;
+    } else {
+        Load(context, NativeCommitRevision_.Sequoia);
+    }
     if (context.GetVersion() < EMasterReign::RemoveCompatsAroundStartTransaction) {
         bool isCypressTransaction;
         Load(context, isCypressTransaction);
@@ -438,11 +450,10 @@ void TTransaction::AttachLock(TLock* lock, const IObjectManagerPtr& objectManage
     while (currentTransaction) {
         currentTransaction->IncrementRecursiveLockCount();
 
-        YT_LOG_TRACE(
-            "Transaction recursive lock count increased (RecursiveLockCount: %v, TransactionId: %v, LockId: %v)",
-            currentTransaction->GetRecursiveLockCount(),
-            currentTransaction->GetId(),
-            lock->GetId());
+        YT_TLOG_TRACE("Transaction recursive lock count increased")
+            .With("RecursiveLockCount", currentTransaction->GetRecursiveLockCount())
+            .With("TransactionId", currentTransaction->GetId())
+            .With("LockId", lock->GetId());
 
         currentTransaction = currentTransaction->GetParent();
     }
@@ -465,11 +476,10 @@ void TTransaction::DetachLock(
     while (currentTransaction) {
         currentTransaction->DecrementRecursiveLockCount();
 
-        YT_LOG_TRACE(
-            "Transaction recursive lock count decreased (RecursiveLockCount: %v, TransactionId: %v, LockId: %v)",
-            currentTransaction->GetRecursiveLockCount(),
-            currentTransaction->GetId(),
-            lock->GetId());
+        YT_TLOG_TRACE("Transaction recursive lock count decreased")
+            .With("RecursiveLockCount", currentTransaction->GetRecursiveLockCount())
+            .With("TransactionId", currentTransaction->GetId())
+            .With("LockId", lock->GetId());
 
         currentTransaction = currentTransaction->GetParent();
     }
@@ -482,10 +492,9 @@ void TTransaction::IncrementRecursiveLockCount()
 
 void TTransaction::DecrementRecursiveLockCount()
 {
-    YT_LOG_ALERT_IF(--RecursiveLockCount_ < 0,
-        "Transaction recursive lock count is negative (TransactionId: %v, RecursiveLockCount: %v)",
-        GetId(),
-        RecursiveLockCount_);
+    YT_TLOG_ALERT_IF(--RecursiveLockCount_ < 0, "Transaction recursive lock count is negative")
+        .With("TransactionId", GetId())
+        .With("RecursiveLockCount", RecursiveLockCount_);
 }
 
 void TTransaction::SetTransactionLeasesState(ETransactionLeasesState newState)
@@ -505,7 +514,8 @@ void TTransaction::SetTransactionLeasesState(ETransactionLeasesState newState)
             LeasesRevokedPromise_ = NewPromise<void>();
         }
         LeasesRevokedPromise_.TrySet();
-        YT_LOG_DEBUG("Transaction leases revoked (TransactionId: %v)", Id_);
+        YT_TLOG_DEBUG("Transaction leases revoked")
+            .With("TransactionId", Id_);
     }
 }
 

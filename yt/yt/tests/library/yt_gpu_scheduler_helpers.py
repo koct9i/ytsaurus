@@ -43,20 +43,27 @@ def get_operation_gpu_assignments_from_gpu_policy_orchid(operation, tree="gpu"):
 
 
 def check_assignment_from_gpu_policy_orchid(assignment, operation_id, group_name, gpu_usage, preemptible, allocation_id=None):
+    assert not is_default_guid(assignment.get("id"))
     assert assignment["operation_id"] == operation_id
     assert assignment["allocation_group_name"] == group_name
     assert assignment["resource_usage"]["gpu"] == gpu_usage
     assert assignment["preemptible"] == preemptible
     if (allocation_id):
         assert assignment["allocation_id"] == allocation_id
+        # Assignment id is reused as the allocation id.
+        assert assignment["id"] == allocation_id
 
 
 def wait_for_operations_in_gpu_policy_orchid(operation_count, tree="gpu"):
     wait(lambda: len(get(scheduler_new_orchid_pool_tree_path(tree) + "/gpu_assignment_plan/operations")) == operation_count)
 
 
+def wait_for_operation_registered_in_gpu_policy_orchid(operation, tree="gpu"):
+    wait(lambda: exists(gpu_scheduler_orchid_operation_path(operation.id, tree=tree)))
+
+
 def wait_for_assignments_in_gpu_policy_orchid(operation, assignment_count, tree="gpu", exactly=False):
-    wait(lambda: exists(gpu_scheduler_orchid_operation_path(operation.id, tree=tree) + "/assignments"))
+    wait_for_operation_registered_in_gpu_policy_orchid(operation, tree=tree)
     if exactly:
         wait(lambda: len(get(gpu_scheduler_orchid_operation_path(operation.id, tree=tree) + "/assignments")) == assignment_count)
     else:

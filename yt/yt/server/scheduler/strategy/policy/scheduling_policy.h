@@ -95,7 +95,7 @@ struct ISchedulingPolicy
 
     //! Scheduling.
     //! Thread affinity: Any.
-    virtual void ProcessSchedulingHeartbeat(
+    virtual TFuture<void> ProcessSchedulingHeartbeat(
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
         const TPoolTreeSnapshotPtr& treeSnapshot,
         bool skipScheduleAllocations) = 0;
@@ -135,20 +135,18 @@ struct ISchedulingPolicy
         NNodeTrackerClient::TNodeId nodeId,
         TDelimitedStringBuilderWrapper& delimitedBuilder) const = 0;
     virtual void BuildSchedulingAttributesForNode(NNodeTrackerClient::TNodeId nodeId, NYTree::TFluentMap fluent) const = 0;
-    virtual void BuildSchedulingAttributesStringForOngoingAllocations(
+    virtual NLogging::TLoggingTagList BuildSchedulingAttributeTagsForOngoingAllocations(
         const TPoolTreeSnapshotPtr& treeSnapshot,
         const std::vector<TAllocationPtr>& allocations,
-        TInstant now,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const = 0;
+        TInstant now) const = 0;
 
     //! Thread affinity: Any.
-    virtual void BuildElementLoggingStringAttributes(
+    virtual NLogging::TLoggingTagList BuildElementLoggingTags(
         const TPoolTreeSnapshotPtr& treeSnapshot,
-        const TPoolTreeElement* element,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const = 0;
+        const TPoolTreeElement* element) const = 0;
 
     //! Thread affinity: Control.
-    virtual void PopulateOrchidService(const NYTree::TCompositeMapServicePtr& orchidService) const = 0;
+    virtual void PopulateOrchidService(const NYTree::ICompositeMapServicePtr& orchidService) const = 0;
 
     //! Thread affinity: Profiler thread.
     virtual void ProfileOperation(

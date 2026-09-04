@@ -13,10 +13,9 @@ namespace NYT::NYqlPlugin {
 
 using TQueryId = TGuid;
 
-class TVanillaJobFile
+struct TVanillaJobFile
     : public NYTree::TYsonStruct
 {
-public:
     TString Name;
     TString LocalPath;
 
@@ -29,11 +28,11 @@ DEFINE_REFCOUNTED_TYPE(TVanillaJobFile)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TDQYTBackend
+struct TDQYTBackend
     : public NYTree::TYsonStruct
 {
-public:
     TString ClusterName;
+    TString ProxyAddress;
     ui32 JobsPerOperation;
     ui32 MaxJobs;
     TString VanillaJobLite;
@@ -66,11 +65,11 @@ DEFINE_REFCOUNTED_TYPE(TDQYTBackend)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TDQYTCoordinator
+struct TDQYTCoordinator
     : public NYTree::TYsonStruct
 {
-public:
     TString ClusterName;
+    TString ProxyAddress;
     TString Prefix;
     TString TokenFile;
     TString User;
@@ -188,9 +187,6 @@ struct TYqlPluginConfig
 
     TString YTTokenPath;
 
-    //! Path to libyqlplugin.so. Ignored when built with -DYQL_NATIVE=yes.
-    std::optional<TString> YqlPluginSharedLibrary;
-
     std::vector<TAdditionalSystemLibPtr> AdditionalSystemLibs;
 
     TProcessYqlPluginConfigPtr ProcessPluginConfig;
@@ -201,6 +197,23 @@ struct TYqlPluginConfig
 };
 
 DEFINE_REFCOUNTED_TYPE(TYqlPluginConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct TYqlPluginDynamicConfig
+    : public NYTree::TYsonStruct
+{
+    NYson::TYsonString GatewaysConfig;
+    TString MaxSupportedYqlVersion;
+
+    THashMap<TString, TString> ProtoGatewaysConfigs;
+
+    REGISTER_YSON_STRUCT(TYqlPluginDynamicConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TYqlPluginDynamicConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 

@@ -3,8 +3,10 @@ from yt_env_setup import (YTEnvSetup, Restarter, NODES_SERVICE)
 from yt_helpers import profiler_factory, is_uring_supported, is_uring_disabled
 
 import pytest
+import errno
 import threading
 import os
+import tempfile
 import time
 
 import yt
@@ -127,6 +129,67 @@ class TestIoEngine(YTEnvSetup):
         assert len(read_table("//tmp/t")) != 0
         # we should receive read stats from at least one node
         wait(lambda: any(self.check_node_sensors(node_sensor) for node_sensor in read_sensors))
+
+    @authors("depression")
+    def test_use_direct_io_for_writes_option(self):
+        if not hasattr(os, "O_DIRECT"):
+            pytest.skip("Direct IO is not supported by the operating system")
+
+        for node_config in self.Env.configs["node"]:
+            for location in node_config["data_node"]["store_locations"]:
+                with tempfile.NamedTemporaryFile(dir=location["path"]) as probe_file:
+                    try:
+                        probe_fd = os.open(probe_file.name, os.O_WRONLY | os.O_DIRECT)
+                    except OSError as error:
+                        if error.errno in (errno.EINVAL, errno.EOPNOTSUPP):
+                            pytest.skip("Direct IO is not supported for {}".format(location["path"]))
+                        raise
+                    else:
+                        os.close(probe_fd)
+
+        direct_io_block_size = 64 * 1024
+        update_nodes_dynamic_config({
+            "data_node": {
+                "store_location_config_per_medium": {
+                    "default": {
+                        "io_config": {
+                            "direct_io_block_size": direct_io_block_size,
+                            "use_direct_io_for_writes": "on_demand",
+                        },
+                    },
+                },
+            },
+        })
+
+        def write_and_get_written_bytes(path, use_direct_io):
+            create("table", path, attributes={"replication_factor": 1})
+            counters = [
+                profiler_factory().at_node(node).counter(
+                    name="location/written_bytes",
+                    tags={
+                        "category": "user_batch",
+                        "location_type": "store",
+                    },
+                )
+                for node in ls("//sys/cluster_nodes")
+            ]
+
+            write_table(
+                path,
+                [{"value": "test"}],
+                table_writer={"use_direct_io": use_direct_io},
+            )
+
+            wait(lambda: sum(counter.get_delta() for counter in counters) > 0)
+            return sum(counter.get_delta() for counter in counters)
+
+        buffered_written_bytes = write_and_get_written_bytes("//tmp/buffered", False)
+        direct_written_bytes = write_and_get_written_bytes("//tmp/direct", True)
+
+        assert buffered_written_bytes < direct_io_block_size
+        assert buffered_written_bytes < direct_written_bytes
+        assert direct_written_bytes >= 2 * direct_io_block_size
+        assert direct_written_bytes % direct_io_block_size == 0
 
     @authors("don-dron")
     def test_pending_read_write_memory_tracking(self):
@@ -411,12 +474,14 @@ class TestIoEngine(YTEnvSetup):
             response.wait()
 
     @authors("vvshlyaga")
-    def test_probe_put_blocks(self):
+    @pytest.mark.parametrize("enable_probe_put_blocks_fair_share", [True, False])
+    def test_probe_put_blocks(self, enable_probe_put_blocks_fair_share):
         REPLICATION_FACTOR = self.NUM_NODES
 
         update_nodes_dynamic_config({
             "data_node": {
-                "use_probe_put_blocks": True
+                "use_probe_put_blocks": True,
+                "enable_probe_put_blocks_fair_share": enable_probe_put_blocks_fair_share
             }
         })
 
@@ -471,6 +536,95 @@ class TestIoEngine(YTEnvSetup):
             }
         }, False)
 
+    @authors("depression")
+    def test_probe_put_blocks_stress_low_memory(self):
+        REPLICATION_FACTOR = self.NUM_NODES
+        BLOCK_SIZE = 64 * 1024
+
+        GROUP_SIZE = 2 * BLOCK_SIZE
+        WRITE_MEMORY_LIMIT = int(6.25 * GROUP_SIZE)
+        GROUP_COUNT = 2
+        WRITER_COUNT = 20
+
+        group_string = os.urandom(GROUP_SIZE // 2).hex()
+        update_nodes_dynamic_config({
+            "data_node": {
+                "use_probe_put_blocks": True,
+                "enable_probe_put_blocks_fair_share": False,
+                "store_location_config_per_medium": {
+                    "default": {
+                        "memory_limit_fraction_for_starting_new_sessions": 0.8,
+                        "write_memory_limit": WRITE_MEMORY_LIMIT,  # about six groups
+                    }
+                },
+            }
+        })
+
+        chunk_writer = {
+            "block_size": BLOCK_SIZE,
+            "group_size": GROUP_SIZE,
+            "node_ping_period": 500,
+            "min_upload_replication_factor": REPLICATION_FACTOR,
+            "upload_replication_factor": REPLICATION_FACTOR,
+            "use_probe_put_blocks": True,
+        }
+
+        paths = ["//tmp/deadlock_writer_{}".format(index) for index in range(WRITER_COUNT)]
+        for path in paths:
+            create(
+                "table",
+                path,
+                attributes={
+                    "compression_codec": "none",
+                    "replication_factor": REPLICATION_FACTOR,
+                    "chunk_writer": chunk_writer,
+                })
+
+        rows = [{"key": group_string} for _ in range(GROUP_COUNT)]
+        start_barrier = threading.Barrier(len(paths))
+        errors = []
+
+        def write(path):
+            start_barrier.wait()
+            try:
+                write_table(path, rows)
+            except Exception as error:
+                print_debug("error in writer: ", error)
+                errors.append(error)
+
+        writers = [threading.Thread(target=write, args=(path,), daemon=True) for path in paths]
+        for writer in writers:
+            writer.start()
+        join_deadline = time.monotonic() + 25
+        for writer in writers:
+            writer.join(timeout=max(0, join_deadline - time.monotonic()))
+
+        assert all(not writer.is_alive() for writer in writers)
+        assert not errors
+
+    def _run_send_blocks_writes(self, need_send_blocks):
+        nodes = ls("//sys/cluster_nodes")
+        send_blocks_tags = {"yt_service": "DataNodeService", "method": "SendBlocks"}
+        counters = [
+            profiler_factory().at_node(node).counter(
+                "rpc/server/request_count", tags=send_blocks_tags)
+            for node in nodes
+        ]
+
+        table = "//tmp/test" if need_send_blocks else "//tmp/test2"
+        responses = []
+        for i in range(10):
+            responses.append(write_table(table, [{"key": "x"}], return_response=True))
+
+        if need_send_blocks:
+            wait(lambda: any(c.get_delta() > 0 for c in counters))
+            for response in responses:
+                response.wait()
+        else:
+            for response in responses:
+                response.wait()
+            assert all(c.get_delta() == 0 for c in counters)
+
     @authors("vvshlyaga")
     def test_write_without_send_blocks(self):
         update_nodes_dynamic_config({
@@ -513,6 +667,37 @@ class TestIoEngine(YTEnvSetup):
                 }
             }
         }, False, False)
+
+    @authors("jmvssnovikov")
+    def test_use_send_blocks(self):
+        REPLICATION_FACTOR = self.NUM_NODES
+
+        update_nodes_dynamic_config({}, replace=True)
+
+        create(
+            "table",
+            "//tmp/test",
+            attributes={
+                "primary_medium": "default",
+                "replication_factor": REPLICATION_FACTOR,
+            })
+
+        create(
+            "table",
+            "//tmp/test2",
+            attributes={
+                "primary_medium": "default",
+                "replication_factor": REPLICATION_FACTOR,
+                "chunk_writer": {
+                    "use_send_blocks": False,
+                },
+            })
+
+        self._run_send_blocks_writes(need_send_blocks=True)
+
+        time.sleep(2.0)
+
+        self._run_send_blocks_writes(need_send_blocks=False)
 
     @authors("don-dron")
     @pytest.mark.parametrize(
@@ -689,33 +874,44 @@ class TestIoEngine(YTEnvSetup):
 
     @authors("prime")
     def test_dynamic_sick_detector(self):
-        create("table", "//tmp/sick")
-        write_table("//tmp/sick", [{"a": i} for i in range(100)])
-
         def get_sick_count():
             return sum(
                 profiler_factory().at_node(node).gauge(name="location/sick", fixed_tags={"location_type": "store"}).get()
                 for node in ls("//sys/cluster_nodes")
             )
 
-        assert get_sick_count() == 0
+        old_dynamic_config = get("//sys/cluster_nodes/@config")
+        try:
+            create("table", "//tmp/sick")
+            write_table("//tmp/sick", [{"a": i} for i in range(100)])
 
-        update_nodes_dynamic_config({
-            "data_node": {
-                "store_location_config_per_medium": {
-                    "default": {
-                        "io_config": {
-                            "sick_write_time_threshold": 0,
-                            "sick_write_time_window": 0,
-                            "sickness_expiration_timeout": 1000000,
+            assert get_sick_count() == 0
+
+            update_nodes_dynamic_config({
+                "data_node": {
+                    "store_location_config_per_medium": {
+                        "default": {
+                            "io_config": {
+                                "sick_write_time_threshold": 0,
+                                "sick_write_time_window": 0,
+                                "sickness_expiration_timeout": 1000000,
+                            }
                         }
                     }
                 }
-            }
-        })
+            })
 
-        write_table("//tmp/sick", [{"a": i} for i in range(100)])
-        wait(lambda: get_sick_count() > 0)
+            write_table("//tmp/sick", [{"a": i} for i in range(100)])
+            wait(lambda: get_sick_count() > 0)
+        finally:
+            update_nodes_dynamic_config(old_dynamic_config, replace=True)
+
+            # Restart nodes to clear the sick state.
+            with Restarter(self.Env, NODES_SERVICE):
+                pass
+
+            self._wait_for_io_engine_enabled(self.NODE_IO_ENGINE_TYPE)
+            wait(lambda: get_sick_count() == 0)
 
     def _wait_for_io_engine_enabled(self, name):
         def enabled_engines():
@@ -958,7 +1154,8 @@ class TestFairShareHierarchicalIoEngine(TestIoEngine):
                     orchid = get("//sys/cluster_nodes/{}/orchid/fair_share_hierarchical_scheduler".format(node))
                     root = orchid["root"]
                     if all(
-                        root["buckets"].get(self._category_orchid_key(cat), {}).get("request_window_size", 0) > 0
+                        root["buckets"].get(self._category_orchid_key(cat), {}).get("slot_window_size", 0) > 0
+                        and root["buckets"].get(self._category_orchid_key(cat), {}).get("request_window_size", 0) > 0
                         for cat in categories
                     ):
                         self._verify_bucket_tree_on_node(node, category_weights)

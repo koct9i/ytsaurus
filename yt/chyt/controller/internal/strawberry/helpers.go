@@ -22,6 +22,15 @@ var (
 	prerequisiteCheckFailedRE = regexp.MustCompile("[Pp]rerequisite check failed")
 )
 
+func containsAnyErrorCode(err error, brokenStateSignalErrorCodes []yterrors.ErrorCode) bool {
+	for _, code := range brokenStateSignalErrorCodes {
+		if yterrors.ContainsErrorCode(err, code) {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	AccessControlNamespacesPath = ypath.Path("//sys/access_control_object_namespaces")
 	OpAliasFamilyDelimiter      = "::"
@@ -78,7 +87,7 @@ func specletDiff(oldSpeclet, newSpeclet any) map[string]FieldDiff {
 	}
 	diff := make(map[string]FieldDiff)
 	for _, field := range reflect.VisibleFields(reflect.TypeOf(oldSpeclet)) {
-		if field.Anonymous {
+		if field.Anonymous || !field.IsExported() {
 			continue
 		}
 		if field.Tag.Get("requires_restart") == "false" {

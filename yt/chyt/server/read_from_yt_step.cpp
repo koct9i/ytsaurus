@@ -18,13 +18,18 @@
 #include <Planner/PlannerActionsVisitor.h>
 #include <Planner/PlannerContext.h>
 
-#include <Parsers/ASTIdentifier.h>
-#include <Parsers/ASTFunction.h>
+#include <Parsers/ASTAsterisk.h>
 #include <Parsers/ASTExplainQuery.h>
+#include <Parsers/ASTFunction.h>
+#include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTSelectWithUnionQuery.h>
+#include <Parsers/ASTSetQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
-#include <Parsers/ASTAsterisk.h>
+
+#include <Processors/Chunk.h>
+#include <Processors/Executors/PullingPipelineExecutor.h>
+#include <Processors/QueryPlan/QueryPlan.h>
 
 #include <Functions/FunctionsMiscellaneous.h>
 
@@ -60,13 +65,23 @@ DB::ASTPtr TryBuildAdditionalFilterAST(
         return nullptr;
     }
 
+    struct Projection
+    {
+        DB::QueryTreeNodePtr node;
+        std::string outputName;
+    };
+    std::unordered_map<std::string, Projection> executionNameToProjection;
     std::unordered_set<std::string> projectionNames;
-    for (const auto& col : queryNode->getProjectionColumns()) {
-        projectionNames.insert(col.name);
-    }
-    std::unordered_map<std::string, DB::QueryTreeNodePtr> execution_name_to_projection_query_tree;
-    for (const auto & node : queryNode->getProjection()) {
-        execution_name_to_projection_query_tree[DB::calculateActionNodeName(node, *plannerContext)] = node;
+    {
+        const auto& projectionNodes = queryNode->getProjection().getNodes();
+        const auto& projectionColumns = queryNode->getProjectionColumns();
+        YT_VERIFY(projectionNodes.size() == projectionColumns.size());
+        for (int index = 0; index < ssize(projectionNodes); ++index) {
+            projectionNames.insert(projectionColumns[index].name);
+
+            auto executionName = DB::calculateActionNodeName(projectionNodes[index], *plannerContext);
+            executionNameToProjection[executionName] = {projectionNodes[index], projectionColumns[index].name};
+        }
     }
 
     std::unordered_map<const DB::ActionsDAG::Node*, DB::ASTPtr> nodeToAst;
@@ -136,9 +151,14 @@ DB::ASTPtr TryBuildAdditionalFilterAST(
             if (projectionNames.contains(node->result_name)) {
                 res = std::make_shared<DB::ASTIdentifier>(node->result_name);
             } else {
-                auto it = execution_name_to_projection_query_tree.find(node->result_name);
-                if (it != execution_name_to_projection_query_tree.end()) {
-                    res = it->second->toAST();
+                auto it = executionNameToProjection.find(node->result_name);
+                if (it != executionNameToProjection.end()) {
+                    // Qualified names do not resolve in the re-serialized secondary query.
+                    if (it->second.node->getNodeType() == DB::QueryTreeNodeType::COLUMN) {
+                        res = std::make_shared<DB::ASTIdentifier>(it->second.outputName);
+                    } else {
+                        res = it->second.node->toAST();
+                    }
                 }
             }
         }
@@ -209,6 +229,44 @@ bool AddFilterToQuery(
     return data.rewriteSubquery(ast->as<DB::ASTSelectQuery&>(), DB::Names{});
 }
 
+// A copy of the same static function inside ReadFromRemote.cpp
+void FormatExplain(DB::IQueryPlanStep::FormatSettings& settings, DB::Pipes pipes)
+{
+    String prefix(settings.offset + settings.indent, settings.indent_char);
+    for (auto & pipe : pipes) {
+        DB::QueryPipeline pipeline(std::move(pipe));
+        DB::PullingPipelineExecutor executor(pipeline);
+
+        DB::Chunk chunk;
+        while (executor.pull(chunk)) {
+            if (!chunk.hasColumns() || !chunk.hasRows()) {
+                continue;
+            }
+
+            const auto & col = chunk.getColumns().front();
+            size_t numRows = col->size();
+
+            for (size_t row = 0; row < numRows; ++row) {
+                settings.out << prefix << col->getDataAt(row).toView() << '\n';
+            }
+        }
+    }
+}
+
+// A copy of the same static function inside ReadFromRemote.cpp
+DB::ASTPtr MakeExplain(const DB::ExplainPlanOptions& options, DB::ASTPtr query)
+{
+    auto explainSettings = std::make_shared<DB::ASTSetQuery>();
+    explainSettings->is_standalone = false;
+    explainSettings->changes = options.toSettingsChanges();
+
+    auto explainQuery = std::make_shared<DB::ASTExplainQuery>(DB::ASTExplainQuery::ExplainKind::QueryPlan);
+    explainQuery->setExplainedQuery(query);
+    explainQuery->setSettings(explainSettings);
+
+    return explainQuery;
+}
+
 } // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -235,10 +293,12 @@ TReadFromYTStep::TReadFromYTStep(
 
 String TReadFromYTStep::getName() const
 {
-    return "ReadFromYT";
+    return "ReadFromYTRemote";
 }
 
-void TReadFromYTStep::initializePipeline(DB::QueryPipelineBuilder& pipeline, const DB::BuildQueryPipelineSettings&)
+// Calling this method makes sense only _after_ the interpreter has processed the initial query and fields such as
+// |filter_actions_dag| are set by it.
+void TReadFromYTStep::AddAdditionalFiltersSuggestedByInterpreter()
 {
     const auto& plannerContext = QueryInfo_.planner_context;
     const auto& context = plannerContext->getMutableQueryContext();
@@ -252,6 +312,11 @@ void TReadFromYTStep::initializePipeline(DB::QueryPipelineBuilder& pipeline, con
             });
         }
     }
+}
+
+void TReadFromYTStep::initializePipeline(DB::QueryPipelineBuilder& pipeline, const DB::BuildQueryPipelineSettings&)
+{
+    AddAdditionalFiltersSuggestedByInterpreter();
 
     Executor_.Fire();
     auto pipe = Executor_.ExtractUnitedPipe();
@@ -313,6 +378,18 @@ void TReadFromYTStep::describeActions(FormatSettings& formatSettings) const
     }
 }
 
+void TReadFromYTStep::describeDistributedPlan(FormatSettings& formatSettings, const DB::ExplainPlanOptions& options)
+{
+    AddAdditionalFiltersSuggestedByInterpreter();
+
+    Executor_.ModifySecondaryQueries([&] (DB::ASTPtr& query) {
+        query = MakeExplain(options, query);
+    });
+
+    Executor_.Fire();
+    FormatExplain(formatSettings, Executor_.ExtractPipes());
+}
+
 void TReadFromYTStep::describeActions(DB::JSONBuilder::JSONMap& map) const
 {
     if (auto pushedFilter = DescribeFilterPushDown()) {
@@ -344,14 +421,13 @@ DB::ASTPtr TReadFromYTStep::DescribeFilterPushDown() const
         return nullptr;
     }
 
-    DB::ASTPtr filterAst = TryBuildAdditionalFilterAST(plannerContext, QueryInfo_.query_tree, *filter_actions_dag);
+    auto filterAst = TryBuildAdditionalFilterAST(plannerContext, QueryInfo_.query_tree, *filter_actions_dag);
     if (!AddFilterToQuery(context, QueryInfo_.query->clone(), filterAst)) {
         filterAst = nullptr;
     }
 
     return filterAst;
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////
 

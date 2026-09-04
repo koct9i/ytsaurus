@@ -6,7 +6,7 @@
 
 #include <yt/yt/library/profiling/solomon/config.h>
 
-#include <yt/yt/server/lib/signature/components/config.h>
+#include <yt/yt/library/signature/components/config.h>
 
 #include <yt/yt/core/misc/config.h>
 
@@ -110,7 +110,7 @@ void TSlotManagerConfig::Register(TRegistrar registrar)
         for (const auto& numaNode : config->NumaNodes) {
             if (numaNodeIds.contains(numaNode->NumaNodeId)) {
                 THROW_ERROR_EXCEPTION("Numa nodes ids must be unique in \"numa_nodes\" list, but duplicate found")
-                    << TErrorAttribute("numa_node_id", numaNode->NumaNodeId);
+                    .With("numa_node_id", numaNode->NumaNodeId);
             }
             numaNodeIds.insert(numaNode->NumaNodeId);
         }
@@ -188,9 +188,6 @@ void TSlotManagerDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("enable_async_artifact_copy", &TThis::EnableAsyncArtifactCopy)
         .Default(false);
 
-    registrar.Parameter("artifact_pipe_size", &TThis::ArtifactPipeSize)
-        .Default(1_MB);
-
     registrar.Parameter("copy_rate_aggregator_half_life", &TThis::CopyRateAggregatorHalfLife)
         .Default(TDuration::Minutes(1));
 
@@ -253,6 +250,9 @@ void TLayerCacheDynamicConfig::Register(TRegistrar registrar)
 void TVolumeManagerDynamicConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("throw_on_prepare_volume", &TThis::ThrowOnPrepareVolume)
+        .Default(false);
+
+    registrar.Parameter("throw_on_prepare_layers", &TThis::ThrowOnPrepareLayers)
         .Default(false);
 
     registrar.Parameter("layer_cache", &TThis::LayerCache)
@@ -1037,7 +1037,7 @@ void TExecNodeConfig::Register(TRegistrar registrar)
             for (int idx = 0; idx < std::ssize(config->JobProxyLogManager->Locations); ++idx) {
                 THROW_ERROR_EXCEPTION_IF(
                     config->JobProxyLogManager->Locations[idx]->Path.empty(),
-                    "Location has empty path (LocationIndex: %v)",
+                    "Location with index %v has empty path",
                     idx);
             }
         }

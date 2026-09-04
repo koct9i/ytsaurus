@@ -5,8 +5,8 @@
 #include <yt/yt/ytlib/node_tracker_client/channel.h>
 #include <yt/yt/ytlib/security_client/permission_cache.h>
 
-#include <yt/yt/flow/lib/client/authentication.h>
-#include <yt/yt/flow/lib/client/public.h>
+#include <yt/yt/flow/library/cpp/client/authentication.h>
+#include <yt/yt/flow/library/cpp/client/public.h>
 
 #include <yt/yt/client/object_client/helpers.h>
 
@@ -44,7 +44,7 @@ namespace {
 //! Signs each request with the cluster key so the Flow Controller can verify it was
 //! forwarded by an authorized RPC proxy and is addressed to this exact pipeline and
 //! controller. Guards against source spoofing / direct endpoint access (SSRF).
-//! See yt/yt/flow/lib/client/authentication.md for the signing scheme and threat model.
+//! See yt/yt/flow/library/cpp/client/authentication.md for the signing scheme and threat model.
 class TFlowSignatureInjectingChannel
     : public TChannelWrapper
 {
@@ -114,9 +114,8 @@ TFlowExecuteOptions MakeFlowExecuteOptions(const TOptions& options)
 
 TClient::TPipelineLeaderDescriptor TClient::DiscoverPipelineControllerLeader(const TYPath& pipelinePath)
 {
-    YT_LOG_DEBUG(
-        "Started discovering pipeline controller leader (PipelinePath: %v)",
-        pipelinePath);
+    YT_TLOG_DEBUG("Started discovering pipeline controller leader")
+        .With("PipelinePath", pipelinePath);
 
     TGetNodeOptions options{
         .Attributes = TAttributeFilter(
@@ -158,12 +157,10 @@ TClient::TPipelineLeaderDescriptor TClient::DiscoverPipelineControllerLeader(con
     auto address = attributes.Get<std::string>(LeaderControllerAddressAttribute);
     auto pipelineObjectId = attributes.Get<TObjectId>(IdAttribute);
 
-    YT_LOG_DEBUG(
-        "Finished discovering pipeline controller leader "
-        "(PipelinePath: %v, Address: %v, PipelineObjectId: %v)",
-        pipelinePath,
-        address,
-        pipelineObjectId);
+    YT_TLOG_DEBUG("Finished discovering pipeline controller leader")
+        .With("PipelinePath", pipelinePath)
+        .With("Address", address)
+        .With("PipelineObjectId", pipelineObjectId);
 
     return TPipelineLeaderDescriptor{
         .Address = std::move(address),
@@ -340,10 +337,10 @@ TFlowExecuteResult TClient::DoFlowExecute(
         if (rspOrError.GetCode() == NRpc::EErrorCode::TransportError) {
             THROW_ERROR_EXCEPTION("Cannot connect to pipeline controller leader. "
                 "Probably controller is stopped or it is failing")
-                << TErrorAttribute("flow_execute_command", req->command())
-                << TErrorAttribute("pipeline_path", pipelinePath)
-                << TErrorAttribute("pipeline_controller_leader_address", descriptor.Address)
-                << rspOrError;
+                .With("flow_execute_command", req->command())
+                .With("pipeline_path", pipelinePath)
+                .With("pipeline_controller_leader_address", descriptor.Address)
+                .With(rspOrError);
         }
         return rspOrError.ValueOrThrow();
     };

@@ -247,6 +247,14 @@ class TestYsonFunctions(ClickHouseTestBase):
             assert result == [{"i": object["a"]}]
             result = clique.make_query("select YPathExtract(a, '/b', 'String') as i from \"//tmp/s1\"")
             assert result == [{"i": ""}]
+            # A numeric node extracted as String must be written in text form ("42"),
+            # not as binary YSON (which would yield bytes like "\x02T").
+            result = clique.make_query(
+                "select YPathExtract('{key1={key2=42}}', '/key1/key2', 'String') as i")
+            assert result == [{"i": "42"}]
+            result = clique.make_query(
+                "select YPathExtract('{key1={key2=42}}', '/key1/key2', 'Int64') as i")
+            assert result == [{"i": 42}]
 
     # CHYT-370.
     @authors("max42")
@@ -263,6 +271,15 @@ class TestYsonFunctions(ClickHouseTestBase):
             assert clique.make_query("select YPathRaw(v, '', fmt) as a from `//tmp/t[#1:#5]`") == [
                 {"a": yson.dumps(row["v"], row["fmt"]).decode()} for row in read_table("//tmp/t[#1:#5]")
             ]
+
+    @authors("iharbychyk")
+    def test_yson_extract_keys(self):
+        with Clique(1) as clique:
+            assert clique.make_query("select YSONExtractKeys('{a=hello;b=[-100;200.0;300]}') as res") == [{"res": ["a", "b"]}]
+            assert clique.make_query("select YSONExtractKeys('{x={a=1;b=2};y={z={c=3}}}', 'y', 'z') as res") == [{"res": ["c"]}]
+            assert clique.make_query("select YSONExtractKeys('{a=1;b=2}', 'c') as res") == [{"res": []}]
+            assert clique.make_query("select YSONExtractKeys('[1;2;3]') as res") == [{"res": []}]
+            assert clique.make_query("select YSONExtractKeys('{a=1,b=2}') as res") == [{"res": []}]
 
     @authors("a-dyu")
     def test_yson_to_json(self):

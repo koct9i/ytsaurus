@@ -4,7 +4,7 @@
 
 #include <yt/yt/ytlib/api/native/public.h>
 
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_session_pool.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_pool.h>
 
 #include <yt/yt/ytlib/table_client/public.h>
 
@@ -47,7 +47,7 @@ IPushBasedShuffleWriterPtr CreatePushBasedShuffleWriter(
     IPartitionWriteSessionProviderPtr sessionProvider,
     NTableClient::IPartitionerPtr partitioner,
     NApi::NNative::IConnectionPtr connection,
-    i32 mapperId,
+    i32 writerId,
     IInvokerPtr invoker,
     THashMap<int, NDistributedChunkSessionClient::TSessionDescriptor> seededSessions = {});
 

@@ -37,12 +37,14 @@ struct IChunkFragmentReader
         int BackendReadRequestCount = 0;
         int BackendHedgingReadRequestCount = 0;
         int BackendProbingRequestCount = 0;
+
+        TMemoryUsageTrackerGuard MemoryGuard;
     };
 
     //! Asynchronously reads a given set of chunk fragments.
     virtual TFuture<TReadFragmentsResponse> ReadFragments(
-        TClientChunkReadOptions options,
-        std::vector<TChunkFragmentRequest> requests) = 0;
+        std::vector<TChunkFragmentRequest> requests,
+        TClientChunkReadOptions options) = 0;
 };
 
 DEFINE_REFCOUNTED_TYPE(IChunkFragmentReader)

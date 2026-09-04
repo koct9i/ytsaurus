@@ -49,7 +49,7 @@ type Controller interface {
 	//
 	// Given speclet should have suitable type for the specific controller.
 	// Otherwise, GetOpBriefAttributes may panic.
-	GetOpBriefAttributes(parsedSpeclet any) map[string]any
+	GetOpBriefAttributes(parsedSpeclet any, opletInfo yson.RawValue) map[string]any
 
 	// GetScalerTarget checks whether YT operation should be scaled and returns required scaling parameters.
 	// Returns `nil` if scaling is not required.
@@ -61,6 +61,23 @@ type Controller interface {
 
 	// CheckState gets family specific info about oplet health state and if it needs to be restarted.
 	CheckState(ctx context.Context, oplet *Oplet) (ControllerOpletState, error)
+}
+
+// Metric is a gauge sample provided by a controller for export by its agent.
+// The agent adds the oplet alias to its tags.
+type Metric struct {
+	Name  string
+	Tags  map[string]string
+	Value float64
+}
+
+// MetricsProvider is an optional controller extension for custom metrics.
+type MetricsProvider interface {
+	// GetMetrics may be called concurrently for different oplets.
+	// The agent takes ownership of returned metrics and may mutate their tags.
+	// Metric names in the returned slice must be unique, and label names for
+	// each metric must be consistent across oplets and calls.
+	GetMetrics(oplet *Oplet) []Metric
 }
 
 type ControllerFactory struct {

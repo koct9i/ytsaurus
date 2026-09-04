@@ -90,16 +90,16 @@ class TOverloadReporter
     : public IOverloadReporter
 {
 public:
-    TOverloadReporter(IBootstrap* const bootstrap)
+    explicit TOverloadReporter(IBootstrap* bootstrap)
         : Bootstrap_(bootstrap)
-        , Logger(TabletNodeLogger().WithTag("OverloadReporter"))
+        , Logger(TabletNodeLogger().WithTag("Reporter", "Overload"))
         , Config_(Bootstrap_->GetTabletNodeDynamicConfig()->OverloadReporter)
         , EvaluatorCache_(Config_.Acquire()->MaxEvaluatorCacheSize)
     { }
 
     void Start() override
     {
-        YT_LOG_INFO("Starting overload reporter");
+        YT_TLOG_INFO("Starting overload reporter");
 
         YT_VERIFY(!Executor_);
 
@@ -117,7 +117,7 @@ public:
 
     void Reconfigure(const TTabletNodeDynamicConfigPtr& config) override
     {
-        YT_LOG_INFO("Reconfiguring overload reporter");
+        YT_TLOG_INFO("Reconfiguring overload reporter");
 
         Config_.Store(config->OverloadReporter);
 
@@ -159,15 +159,14 @@ private:
         const TTabletBalancerServiceProxy::TErrorOrRspRequestBalancingPtr& rspOrError) const
     {
         if (rspOrError.IsOK()) {
-            YT_LOG_DEBUG("Successfully sent balancing request caused by tablets overload "
-                "(BundleName: %v, TabletCount: %v)",
-                bundleName,
-                tabletIds.size());
+            YT_TLOG_DEBUG("Successfully sent balancing request for overloaded tablets")
+                .With("BundleName", bundleName)
+                .With("TabletCount", tabletIds.size());
         } else {
-            YT_LOG_DEBUG(rspOrError, "Failed to send balancing request caused by tablets overload "
-                "(BundleName: %v, TabletCount: %v)",
-                bundleName,
-                tabletIds.size());
+            YT_TLOG_DEBUG("Failed to send balancing request for overloaded tablets")
+                .With("BundleName", bundleName)
+                .With("TabletCount", tabletIds.size())
+                .With(rspOrError);
         }
     }
 
@@ -181,7 +180,7 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG("Starting overload reporter iteration");
+        YT_TLOG_DEBUG("Starting overload reporter iteration");
 
         THashMap<std::string, TBundleTabletBalancerConfigPtr> bundleToTabletBalancerConfig;
         THashMap<std::string, std::vector<TTabletId>> bundleToTabletIds;
@@ -205,7 +204,7 @@ private:
             }
         }
 
-        for (const auto& [bundleName, tabletIds] : bundleToTabletIds) {
+        for (auto& [bundleName, tabletIds] : bundleToTabletIds) {
             TTabletBalancerServiceProxy proxy(Bootstrap_->GetConnection()->GetTabletBalancerChannel());
             auto req = proxy.RequestBalancing();
 
@@ -218,11 +217,11 @@ private:
             req->Invoke().Subscribe(BIND(
                 &TOverloadReporter::LogTabletBalancerResponse,
                 MakeWeak(this),
-                std::move(bundleName),
+                bundleName,
                 std::move(tabletIds)));
         }
 
-        YT_LOG_DEBUG("Finished overload reporter iteration");
+        YT_TLOG_DEBUG("Finished overload reporter iteration");
     }
 
     bool IsTabletOverloaded(
@@ -249,10 +248,10 @@ private:
             rowBuffer);
 
         if (!metricValueOrError.IsOK()) {
-            YT_LOG_DEBUG(metricValueOrError, "Failed to calculate if tablet is overloaded, ignored "
-                "(%v, Metric: %v)",
-                tabletSnapshot->LoggingTag,
-                metric);
+            YT_TLOG_DEBUG("Failed to calculate if tablet is overloaded, ignored")
+                .With(tabletSnapshot->LoggingTags)
+                .With("Metric", metric)
+                .With(metricValueOrError);
 
             return false;
         }
@@ -266,18 +265,18 @@ private:
 
             bool overloaded = metricValue > limit;
 
-            YT_LOG_DEBUG_IF(overloaded, "Tablet is overloaded (%v, Metric: %v, MetricValue: %v, Limit: %v)",
-                tabletSnapshot->LoggingTag,
-                metric,
-                metricValue,
-                limit);
+            YT_TLOG_DEBUG_IF(overloaded, "Tablet is overloaded")
+                .With(tabletSnapshot->LoggingTags)
+                .With("Metric", metric)
+                .With("MetricValue", metricValue)
+                .With("Limit", limit);
 
             return overloaded;
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Failed to extract metric value calculating tablet is overloaded "
-                "(%v, Metric: %v)",
-                tabletSnapshot->LoggingTag,
-                metric);
+            YT_TLOG_DEBUG("Failed to extract metric value calculating tablet is overloaded")
+                .With(tabletSnapshot->LoggingTags)
+                .With("Metric", metric)
+                .With(ex);
 
             return false;
         }
@@ -346,8 +345,9 @@ private:
 
             return ConvertTo<TBundleTabletBalancerConfigPtr>(bundleConfig);
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Failed to get bundle tablet balancer config (BundleName: %v)",
-                bundleName);
+            YT_TLOG_DEBUG("Failed to get bundle tablet balancer config")
+                .With("BundleName", bundleName)
+                .With(ex);
 
             return nullptr;
         }
@@ -392,11 +392,10 @@ private:
 
         auto groupIt = bundleConfig->Groups.find(*groupName);
         if (groupIt == bundleConfig->Groups.end()) {
-            YT_LOG_DEBUG("Cannot report tablet overload: balancing group not found in bundle config"
-                "(%v, BundleName: %v, GroupName: %v)",
-                tabletSnapshot->LoggingTag,
-                tabletSnapshot->TabletCellBundle,
-                *groupName);
+            YT_TLOG_DEBUG("Cannot report tablet overload: balancing group not found in bundle config")
+                .With(tabletSnapshot->LoggingTags)
+                .With("BundleName", tabletSnapshot->TabletCellBundle)
+                .With("GroupName", *groupName);
             return std::nullopt;
         }
 
@@ -417,7 +416,7 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-IOverloadReporterPtr CreateOverloadReporter(IBootstrap* const bootstrap)
+IOverloadReporterPtr CreateOverloadReporter(IBootstrap* bootstrap)
 {
     return New<TOverloadReporter>(bootstrap);
 }

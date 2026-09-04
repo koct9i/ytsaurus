@@ -3,6 +3,7 @@
 #include "alien_cluster_client_cache.h"
 #include "backing_store_cleaner.h"
 #include "chunk_replica_cache_pinger.h"
+#include "compaction_hint_fetching.h"
 #include "compression_dictionary_builder.h"
 #include "compression_dictionary_manager.h"
 #include "distributed_throttler_manager.h"
@@ -53,6 +54,7 @@
 
 #include <yt/yt/server/lib/tablet_node/performance_counters.h>
 
+#include <yt/yt/ytlib/api/native/client_cache.h>
 #include <yt/yt/ytlib/api/native/pool_weight_provider.h>
 
 #include <yt/yt/ytlib/chaos_client/config.h>
@@ -87,6 +89,7 @@
 
 namespace NYT::NTabletNode {
 
+using namespace NApi::NNative;
 using namespace NCellarAgent;
 using namespace NCellarClient;
 using namespace NCellarNode;
@@ -132,7 +135,7 @@ public:
 
     void Initialize() override
     {
-        YT_LOG_INFO("Initializing tablet node");
+        YT_TLOG_INFO("Initializing tablet node");
 
         // Cycles are fine for bootstrap.
         GetDynamicConfigManager()
@@ -255,6 +258,9 @@ public:
             }
         }
 
+        CompactionHintFetchThrottlers_ = New<TCompactionHintFetchThrottlers>(
+            GetTabletNodeDynamicConfig()->StoreCompactor->CompactionHintFetchers);
+
         auto selfAddress = NNet::BuildServiceAddress(GetLocalHostName(), GetConfig()->RpcPort);
         DistributedThrottlerManager_ = CreateDistributedThrottlerManager(
             this,
@@ -298,6 +304,9 @@ public:
         if (ReplicationCardUpdatesBatcher_) {
             ReplicationCardUpdatesBatcher_->Start();
         }
+        ClientCache_ = New<TClientCache>(
+            GetConfig()->TabletNode->ClientCache,
+            GetConnection());
 
         InitializeOverloadController();
 
@@ -312,7 +321,7 @@ public:
         }
 
         if (!GetConfig()->TabletNode->AllowReignChange) {
-            YT_LOG_DEBUG("Tablet cell reign change is forbidden by config");
+            YT_TLOG_DEBUG("Tablet cell reign change is forbidden by config");
             SetReignChangeAllowed(false);
         }
     }
@@ -548,6 +557,11 @@ public:
             : Throttlers_[it->second];
     }
 
+    const TCompactionHintFetchThrottlersPtr& GetCompactionHintFetchThrottlers() const override
+    {
+        return CompactionHintFetchThrottlers_;
+    }
+
     const IDistributedThrottlerManagerPtr& GetDistributedThrottlerManager() const override
     {
         return DistributedThrottlerManager_;
@@ -620,6 +634,11 @@ public:
         return ReplicationCardUpdatesBatcher_;
     }
 
+    const NApi::NNative::TClientCachePtr& GetClientCache() const override
+    {
+        return ClientCache_;
+    }
+
 private:
     NClusterNode::IBootstrap* const ClusterNodeBootstrap_;
 
@@ -645,6 +664,7 @@ private:
 
     TEnumIndexedArray<ETabletNodeThrottlerKind, IReconfigurableThroughputThrottlerPtr> LegacyRawThrottlers_;
     TEnumIndexedArray<ETabletNodeThrottlerKind, IThroughputThrottlerPtr> Throttlers_;
+    TCompactionHintFetchThrottlersPtr CompactionHintFetchThrottlers_;
     IDistributedThrottlerManagerPtr DistributedThrottlerManager_;
     IMediumThrottlerManagerFactoryPtr MediumThrottlerManagerFactory_;
 
@@ -669,6 +689,7 @@ private:
     NRpc::IOverloadControllerPtr OverloadController_;
     IAlienClusterClientCachePtr ReplicatorClientCache_;
     IReplicationCardUpdatesBatcherPtr ReplicationCardUpdatesBatcher_;
+    TClientCachePtr ClientCache_;
 
     DECLARE_THREAD_AFFINITY_SLOT(ControlThread);
 
@@ -689,6 +710,9 @@ private:
                 LegacyRawThrottlers_[kind]->Reconfigure(std::move(throttlerConfig));
             }
         }
+
+        CompactionHintFetchThrottlers_->Reconfigure(
+            tabletNodeConfig->StoreCompactor->CompactionHintFetchers);
 
         TableReplicatorThreadPool_->SetThreadCount(
             tabletNodeConfig->TabletManager->ReplicatorThreadPoolSize.value_or(
@@ -714,6 +738,8 @@ private:
                 GetConfig()->TabletNode->ChaosReplicationCardUpdatesBatcher->ApplyDynamic(
                     tabletNodeConfig->ChaosReplicationCardUpdatesBatcher));
         }
+
+        ClientCache_->Reconfigure(newConfig->TabletNode->ClientCache);
 
         NTesting::SetCurrentReignOverride(newConfig->TabletNode->Testing.ReignOverride);
 

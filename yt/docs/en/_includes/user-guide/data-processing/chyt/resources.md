@@ -1,6 +1,6 @@
 # Resources and preemption
 
-A CHYT clique is a Vanilla {{product-name}} operation and instances are run in the jobs of this operation and consume resources. A typical CHYT instance runs on about 10 CPU cores and about 60 GB of RAM.
+A CHYT clique is a Vanilla {{product-name}} operation and instances are run in the jobs of this operation and consume resources.
 
 Before continuing with this article, consider reading about the [Scheduler and pools](../../../../user-guide/data-processing/scheduler/scheduler-and-pools.md) first.
 
@@ -22,6 +22,7 @@ When receiving the signal, the instance goes into completion mode, sends this in
 
 ## Regular preemption and graceful preemption { #preemption-dif }
 
+
 The {{product-name}} scheduler preempts jobs based on the following logic: if a node has jobs whose operations have a lower `fair_share` than their `usage_share`, this job is considered `preemptible`. If the scheduler has a job of the starving operation that can be run on a node if preemptible jobs are preempted, then it does it — it preempts the required number of preemptible jobs and plans new ones in their place. In this model, it is unacceptable to wait very long to preempt jobs, so the `interruption_timeout` is only 15 seconds.
 
 A typical usage scenario for CHYT is small and medium queries that run from single-digit seconds to several minutes; `interruption_timeout = 15 sec` is often less than the standard query time, which means that many queries that were running on a given instance will end with an error.
@@ -32,6 +33,6 @@ To solve this problem, a new operation scheduling mode — *Graceful Preemption*
 
 Below is an example of how `usage_share` (the orange graph) and `fair_share` (the green graph) change after a heavyweight operation is started in the same pool as the clique.
 
-![](../../../../../../images/chyt_graceful_preemption.png){ .center }
+![](../../../../../images/chyt_graceful_preemption.png){ .center }
 
 To use *Graceful Preemption*, set it with the `--spec {preemption_mode = graceful}` parameter.

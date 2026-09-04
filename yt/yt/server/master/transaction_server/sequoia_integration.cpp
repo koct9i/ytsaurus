@@ -172,7 +172,8 @@ TFuture<TSharedRefArray> FinishNonAliveCypressTransactionInSequoia(
 TFuture<void> ReplicateCypressTransactionsInSequoiaAndSyncWithLeader(
     NCellMaster::TBootstrap* bootstrap,
     std::vector<TTransactionId> transactionIds,
-    std::unique_ptr<NProto::TReqReturnBoomerang> boomerang)
+    std::unique_ptr<NProto::TReqReturnBoomerang> boomerang,
+    NCypressClient::TNodeId sequoiaNodeIdToLock)
 {
     auto features = GetSequoiaTransactionFeatures(bootstrap);
 
@@ -183,7 +184,9 @@ TFuture<void> ReplicateCypressTransactionsInSequoiaAndSyncWithLeader(
     }
 
     auto replicationFuture = OKFuture;
+    bool sequoiaTransactionNeeded = false;
     if (!transactionIds.empty() || boomerang) {
+        sequoiaTransactionNeeded = true;
         replicationFuture = ReplicateCypressTransactionsToCell(
             bootstrap
                 ->GetSequoiaConnection()
@@ -191,6 +194,7 @@ TFuture<void> ReplicateCypressTransactionsInSequoiaAndSyncWithLeader(
             std::move(transactionIds),
             bootstrap->GetCellId(),
             std::move(boomerang),
+            sequoiaNodeIdToLock,
             cypressTransactionCoordinatorCellId,
             features,
             TDispatcher::Get()->GetHeavyInvoker(),
@@ -201,7 +205,8 @@ TFuture<void> ReplicateCypressTransactionsInSequoiaAndSyncWithLeader(
         .Apply(BIND([
             hydraManager = bootstrap->GetHydraFacade()->GetHydraManager(),
             latePrepare = cypressTransactionCoordinatorCellId == bootstrap->GetCellId(),
-            transactionManager = bootstrap->GetTransactionManager()
+            transactionManager = bootstrap->GetTransactionManager(),
+            sequoiaTransactionNeeded
         ] {
             // NB: |sequoiaTransaction->Commit()| is set when Sequoia tx is
             // prepared on leader (and probably some of followers). Since we
@@ -214,7 +219,7 @@ TFuture<void> ReplicateCypressTransactionsInSequoiaAndSyncWithLeader(
             // coordinator.
             auto future = hydraManager->SyncWithLeader();
 
-            if (!latePrepare) {
+            if (!latePrepare && sequoiaTransactionNeeded) {
                 future = future.Apply(BIND([transactionManager] {
                     return transactionManager->WaitUntilPreparedTransactionsFinished({NApi::NNative::SequoiaCypressOrderingTag});
                 }));

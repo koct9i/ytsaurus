@@ -732,7 +732,7 @@ public:
         const auto& objectManager = Bootstrap_->GetObjectManager();
 
         // NB: zombifying a child will remove it from the member set.
-        auto members = thisImpl->Members();
+        auto members = SortHashMapByKeys(thisImpl->Members());
         for (const auto& [name, member] : members) {
             YT_VERIFY(IsObjectAlive(member));
             objectManager->RemoveObject(member);
@@ -776,13 +776,10 @@ private:
         auto* thisImpl = GetThisImpl();
 
         if (!recursive) {
-            YT_LOG_ALERT_IF(
-                !thisImpl->Members().empty(),
-                "Non-recursive removal of a non-empty access control object namespace detected; skipped "
-                "(NamespaceId: %v, Namespace: %v, MemberCount: %v)",
-                thisImpl->GetId(),
-                thisImpl->GetName(),
-                ssize(thisImpl->Members()));
+            YT_TLOG_ALERT_IF(!thisImpl->Members().empty(), "Non-recursive removal of a non-empty access control object namespace detected; skipped")
+                .With("NamespaceId", thisImpl->GetId())
+                .With("Namespace", thisImpl->GetName())
+                .With("MemberCount", ssize(thisImpl->Members()));
             return;
         }
 

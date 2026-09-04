@@ -18,7 +18,7 @@
 
 #include <yt/yt/ytlib/offshore_data_gateway/public.h>
 
-#include <yt/yt/ytlib/discovery_client/public.h>
+#include <yt/yt/library/discovery_client/public.h>
 
 #include <yt/yt/ytlib/scheduler/public.h>
 
@@ -218,6 +218,8 @@ struct TConnectionStaticConfig
     //! Visible in profiling as tag `connection_name`.
     std::string ConnectionName;
 
+    std::optional<std::string> Datacenter;
+
     //! Region defines geographical location, largest tier in cloud hierarchy.
     std::optional<std::string> Region;
 
@@ -309,6 +311,8 @@ struct TConnectionDynamicConfig
     TDuration LookupRowsRequestTimeoutSlack;
     std::optional<TDuration> LookupRowsInMemoryLoggingSuppressionTimeout;
     std::optional<TDuration> LookupRowsExtMemoryLoggingSuppressionTimeout;
+
+    std::optional<NCompression::ECodec> PullQueueResponseCodec;
 
     int DefaultGetTabletErrorsLimit;
 
@@ -416,7 +420,7 @@ struct TConnectionDynamicConfig
 
     bool DisableAdaptiveOrderedSchemafulReader;
 
-    bool UseWebAssembly;
+    bool AllowWebAssembly;
 
     // COMPAT(sabdenovch)
     bool GroupByWithLimitIsUnordered;

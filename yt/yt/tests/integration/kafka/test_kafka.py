@@ -1,5 +1,7 @@
 from yt_env_setup import YTEnvSetup, Restarter, KAFKA_PROXIES_SERVICE, with_additional_threads
 
+from yt_helpers import profiler_factory
+
 from yt_queue_agent_test_base import TestQueueAgentBase
 
 from yt_commands import (
@@ -480,8 +482,6 @@ class TestKafkaProxy(KafkaProxyBase):
             {"surname": "foo-0", "number": i, "$tablet_index": i} for i in range(row_count)
         ]
 
-        insert_rows(queue_path, rows)
-
         address = self.Env.get_kafka_proxy_address()
 
         consumers = []
@@ -494,6 +494,19 @@ class TestKafkaProxy(KafkaProxyBase):
             c = Consumer(consumer_config)
             c.subscribe([queue_path])
             consumers.append(c)
+
+        def is_assignments_balanced():
+            assert tablet_count % len(consumers) == 0, "Tablet count is not divisible by consumer count"
+            expected_partitions_per_consumer = tablet_count // len(consumers)
+
+            for consumer in consumers:
+                consumer.poll(0.1)
+
+            return all(len(consumer.assignment()) == expected_partitions_per_consumer for consumer in consumers)
+
+        wait(is_assignments_balanced)
+
+        insert_rows(queue_path, rows)
 
         none_message_count = 0
         error_count = 0
@@ -555,9 +568,7 @@ class TestKafkaProxy(KafkaProxyBase):
             consumers.append(c)
 
         # Wait rebalancing.
-        for _ in range(15):
-            for consumer_index, consumer in enumerate(consumers):
-                consumer.poll(0.1)
+        wait(is_assignments_balanced)
 
         consumer_count *= 2
         rows *= 2
@@ -693,6 +704,83 @@ class TestKafkaProxy(KafkaProxyBase):
 
         wait(lambda: get("//tmp/queue/foo/@tablet_count_by_state/mounted") == 2)
         wait(lambda: get("//tmp/queue/bar/@tablet_count_by_state/mounted") == 1)
+
+    @authors("panesher")
+    @pytest.mark.parametrize("expected_kafka_error", [KafkaError.TOPIC_AUTHORIZATION_FAILED, KafkaError.UNKNOWN])
+    def test_request_metrics(self, expected_kafka_error):
+        username = "u"
+        create_user(username)
+        token, _ = issue_token(username)
+
+        self._create_cells()
+
+        queue_path = f'primary:{self.create_queue_path("error")}'
+
+        TestKafkaProxy._create_kafka_queue(queue_path)
+
+        address = self.Env.get_kafka_proxy_address()
+        proxy_name = ls("//sys/kafka_proxies/instances")[0]
+        profiler = profiler_factory().at_kafka_proxy(proxy_name, fixed_tags={"request_type": "produce"})
+
+        request_count = profiler.counter("kafka_proxy/requests/count")
+        failed_request_count = profiler.counter("kafka_proxy/requests/failed_count")
+        authorization_error_count = profiler.counter(
+            "kafka_proxy/requests/error_count",
+            tags={"error_code": "topic_authorization_failed"})
+        unknown_error_count = profiler.counter(
+            "kafka_proxy/requests/error_count",
+            tags={"error_code": "unknown_server_error"})
+        request_time = profiler.histogram("kafka_proxy/requests/time")
+
+        p = Producer(get_producer_config(address, token))
+        serializer = StringSerializer("utf_8")
+
+        p.produce(topic=queue_path,
+                  key=serializer("key_0"),
+                  value=serializer("value_0"),
+                  on_delivery=_fail_on_error)
+        p.flush()
+
+        wait(lambda: request_count.get_delta() > 0)
+        wait(lambda: sum(bin["count"] for bin in request_time.get_bins()) > 0)
+        assert failed_request_count.get_delta() == 0
+        assert authorization_error_count.get_delta() == 0
+        assert unknown_error_count.get_delta() == 0
+
+        if expected_kafka_error == KafkaError.TOPIC_AUTHORIZATION_FAILED:
+            set(f"{queue_path}/@inherit_acl", False)
+        elif expected_kafka_error == KafkaError.UNKNOWN:
+            sync_unmount_table(queue_path)
+        else:
+            assert False, "Invalid expected Kafka error"
+
+        def produce_fails_with_expected_error():
+            error = None
+
+            def set_errror(err, msg):
+                nonlocal error
+                error = err
+
+            p.produce(
+                topic=queue_path,
+                key=serializer("key_1"),
+                value=serializer("value_1"),
+                on_delivery=set_errror,
+            )
+            p.flush()
+
+            if error is not None:
+                return isinstance(error, KafkaError) and error.code() == expected_kafka_error
+
+            if failed_request_count.get_delta() == 0:
+                return False
+
+            if expected_kafka_error == KafkaError.TOPIC_AUTHORIZATION_FAILED:
+                return authorization_error_count.get_delta() > 0
+            elif expected_kafka_error == KafkaError.UNKNOWN:
+                return unknown_error_count.get_delta() > 0
+
+        wait(produce_fails_with_expected_error)
 
     @authors("panesher")
     @with_additional_threads

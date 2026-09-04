@@ -14,9 +14,11 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"go.ytsaurus.tech/library/go/core/log"
 	"go.ytsaurus.tech/library/go/ptr"
+	"go.ytsaurus.tech/yt/chyt/controller/internal/discovery"
 	"go.ytsaurus.tech/yt/chyt/controller/internal/strawberry"
 	"go.ytsaurus.tech/yt/go/ypath"
 	"go.ytsaurus.tech/yt/go/yson"
@@ -41,7 +43,9 @@ type ResourcesConfig struct {
 type Config struct {
 	// LocalBinariesDir is set if we want to execute local binaries on the clique.
 	// This directory should contain trampoline and chyt binaries.
-	LocalBinariesDir           *string                 `yson:"local_binaries_dir"`
+	LocalBinariesDir *string `yson:"local_binaries_dir"`
+	// LocalLogsDir persists local clique logs outside job sandboxes.
+	LocalLogsDir               *string                 `yson:"local_logs_dir"`
 	LogRotationMode            *LogRotationModeType    `yson:"log_rotation_mode"`
 	AddressResolver            map[string]any          `yson:"address_resolver"`
 	BusServer                  map[string]any          `yson:"bus_server"`
@@ -143,7 +147,7 @@ type chytOpletInfo struct {
 
 type Controller struct {
 	ytc                     yt.Client
-	dc                      yt.DiscoveryClient
+	dc                      atomic.Value // yt.DiscoveryClient
 	l                       log.Logger
 	cachedClusterConnection map[string]any
 	root                    ypath.Path
@@ -289,7 +293,34 @@ func (c *Controller) buildCommand(speclet *Speclet) string {
 	if speclet.ODBCConfig.EnableOrDefault() {
 		args = append(args, "--prepare-odbc")
 	}
+
+	if speclet.logsDir != nil {
+		args = append(
+			args,
+			"--log-file", filepath.Join(*speclet.logsDir, "trampoline-$YT_JOB_INDEX.debug.log"),
+			"--stderr-file", filepath.Join(*speclet.logsDir, "stderr.clickhouse-$YT_JOB_INDEX"),
+		)
+	}
 	return strings.Join(args, " ")
+}
+
+func (c *Controller) prepareLocalLogs(oplet *strawberry.Oplet) (*string, error) {
+	if c.config.LocalLogsDir == nil {
+		return nil, nil
+	}
+
+	dir := filepath.Join(
+		*c.config.LocalLogsDir,
+		oplet.Alias(),
+		fmt.Sprint(oplet.NextIncarnationIndex()),
+	)
+	if err := os.MkdirAll(dir, 0777); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0777); err != nil {
+		return nil, err
+	}
+	return &dir, nil
 }
 
 func (c *Controller) Root() ypath.Path {
@@ -347,6 +378,11 @@ func (c *Controller) Prepare(ctx context.Context, oplet *strawberry.Oplet) (
 		opletInfo.CHYTRunningVersionPath = filepath.Join(*c.config.LocalBinariesDir, "ytserver-clickhouse")
 	}
 	oplet.SetOpletInfo(opletInfo)
+
+	speclet.logsDir, err = c.prepareLocalLogs(oplet)
+	if err != nil {
+		return nil, nil, nil, false, fmt.Errorf("failed to prepare local logs directory: %w", err)
+	}
 
 	// Build configs.
 	err = c.appendConfigs(ctx, oplet, &speclet, &filePaths)
@@ -454,19 +490,33 @@ func (c *Controller) needsRestart(ctx context.Context, oplet *strawberry.Oplet) 
 	return false, nil
 }
 
+func (c *Controller) initDiscoveryClient(ctx context.Context) {
+	if !c.config.EnableDiscoveryHealthCheckOrDefault() || c.dc.Load() != nil {
+		return
+	}
+
+	dc, err := discovery.CreateClient(ctx, c.ytc)
+	if err != nil {
+		c.l.Warn("failed to create discovery client", log.Error(err))
+		return
+	}
+	c.dc.Store(dc)
+}
+
 func (c *Controller) checkHealth(ctx context.Context, oplet *strawberry.Oplet) (strawberry.OpletHealth, string) {
 	if !oplet.Active() || !c.config.EnableDiscoveryHealthCheckOrDefault() {
 		return strawberry.OpletHealthGood, ""
 	}
 
 	// If discovery client hasn't been initialized for any reason, we consider this as the default case.
-	if c.dc == nil {
+	dc, ok := c.dc.Load().(yt.DiscoveryClient)
+	if !ok {
 		return c.config.DefaultOpletHealthOrDefault(), ""
 	}
 
 	group := "/chyt/" + oplet.Alias()
 	// NB: Strawberry doesn't limit the number of instances, but ListMember requires an explicit limit.
-	members, err := c.dc.ListMembers(ctx, group, &yt.ListMembersOptions{Limit: ptr.Int32(math.MaxInt32)})
+	members, err := dc.ListMembers(ctx, group, &yt.ListMembersOptions{Limit: ptr.Int32(math.MaxInt32)})
 	if err != nil && !yterrors.ContainsErrorCode(err, yterrors.CodeNoSuchGroup) {
 		return strawberry.OpletHealthUnknown, fmt.Sprintf("failed to discover instances: %s", err)
 	}
@@ -498,6 +548,7 @@ func (c *Controller) CheckState(ctx context.Context, oplet *strawberry.Oplet) (s
 }
 
 func (c *Controller) UpdateState() (changed bool, err error) {
+	c.initDiscoveryClient(context.Background())
 	connectionChanged, err := c.updateClusterConnection(context.Background())
 	if err != nil {
 		return false, err
@@ -645,7 +696,7 @@ func (c *Controller) DescribeOptions(parsedSpeclet any) []strawberry.OptionGroup
 	}
 }
 
-func (c *Controller) GetOpBriefAttributes(parsedSpeclet any) map[string]any {
+func (c *Controller) GetOpBriefAttributes(parsedSpeclet any, opletInfo yson.RawValue) map[string]any {
 	speclet := parsedSpeclet.(Speclet)
 	var instanceCount, totalCPU, totalMemory any
 	if err := c.populateResources(&speclet); err == nil {
@@ -653,15 +704,50 @@ func (c *Controller) GetOpBriefAttributes(parsedSpeclet any) map[string]any {
 		totalCPU = speclet.CliqueCPU
 		totalMemory = speclet.CliqueMemory
 	}
+
+	var runningVersion any
+	var info chytOpletInfo
+	if err := yson.Unmarshal(opletInfo, &info); err == nil {
+		runningVersion = info.CHYTRunningVersion
+	}
+
 	return map[string]any{
-		"instance_count": instanceCount,
-		"total_cpu":      totalCPU,
-		"total_memory":   totalMemory,
+		"instance_count":       instanceCount,
+		"total_cpu":            totalCPU,
+		"total_memory":         totalMemory,
+		"chyt_running_version": runningVersion,
 	}
 }
 
 func (c *Controller) GetScalerTarget(ctx context.Context, opletInfo strawberry.OpletInfoForScaler) (*strawberry.ScalerTarget, error) {
 	return nil, nil
+}
+
+func (c *Controller) GetMetrics(oplet *strawberry.Oplet) []strawberry.Metric {
+	if !oplet.HasYTOperation() {
+		return nil
+	}
+
+	metric, ok := getVersionMetric(oplet.GetBriefInfo().OpletInfo)
+	if !ok {
+		return nil
+	}
+	return []strawberry.Metric{metric}
+}
+
+func getVersionMetric(opletInfo yson.RawValue) (strawberry.Metric, bool) {
+	var info chytOpletInfo
+	if err := yson.Unmarshal(opletInfo, &info); err != nil || info.CHYTRunningVersion == "" {
+		return strawberry.Metric{}, false
+	}
+
+	return strawberry.Metric{
+		Name: "chyt_server_version",
+		Tags: map[string]string{
+			"version": info.CHYTRunningVersion,
+		},
+		Value: 1,
+	}, true
 }
 
 func (c *Controller) GetOpletInfo(ctx context.Context, oplet *strawberry.Oplet) (any, error) {
@@ -727,53 +813,18 @@ func parseConfig(rawConfig yson.RawValue) Config {
 	return controllerConfig
 }
 
-func createDiscoveryClient(ctx context.Context, ytc yt.Client) (yt.DiscoveryClient, error) {
-	var discoveryConnection struct {
-		Addresses *[]string `yson:"addresses"`
-		Endpoints *struct {
-			EndpointSetId string   `yson:"endpoint_set_id"`
-			Clusters      []string `yson:"clusters"`
-		} `yson:"endpoints"`
-	}
-
-	err := ytc.GetNode(ctx, ypath.Path("//sys/@cluster_connection/discovery_connection"), &discoveryConnection, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var cfg yt.DiscoveryConfig
-	if discoveryConnection.Addresses != nil {
-		cfg.DiscoveryServers = *discoveryConnection.Addresses
-	}
-	if discoveryConnection.Endpoints != nil {
-		cfg.EndpointSet = discoveryConnection.Endpoints.EndpointSetId
-		cfg.YPClusters = discoveryConnection.Endpoints.Clusters
-	}
-
-	return newDiscoveryClient(cfg)
-}
-
 func NewController(l log.Logger, ytc yt.Client, root ypath.Path, cluster string, rawConfig yson.RawValue) strawberry.Controller {
 	config := parseConfig(rawConfig)
-
-	var dc yt.DiscoveryClient
-	if config.EnableDiscoveryHealthCheckOrDefault() {
-		var err error
-		dc, err = createDiscoveryClient(context.Background(), ytc)
-		if err != nil {
-			panic(err)
-		}
-	}
 
 	c := &Controller{
 		l:       l,
 		ytc:     ytc,
-		dc:      dc,
 		root:    root,
 		cluster: cluster,
 		secrets: make(map[string][]byte),
 		config:  config,
 	}
 	c.prepareTvmSecret()
+	c.initDiscoveryClient(context.Background())
 	return c
 }

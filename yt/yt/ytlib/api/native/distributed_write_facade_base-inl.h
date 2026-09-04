@@ -53,8 +53,8 @@ TTraits::TSessionWithCookies TDistributedWriteStartFacadeBase<TDerived, TTraits>
     NYTree::INodePtr nodeWithAttributes;
 
     {
-        YT_LOG_DEBUG("Requesting extended object attributes (ObjectType: %Qlv)",
-            TTraits::ObjectType);
+        YT_TLOG_DEBUG("Requesting extended object attributes")
+            .With("ObjectType", TTraits::ObjectType);
 
         nodeWithAttributes = ToDerived()->RequestExtendedObjectAttributes(
             richPath,
@@ -62,9 +62,9 @@ TTraits::TSessionWithCookies TDistributedWriteStartFacadeBase<TDerived, TTraits>
             objectIdPath,
             userObject);
 
-        YT_LOG_DEBUG("Extended attributes received (Attributes: %v, ObjectType: %Qlv)",
-            ConvertToYsonString(nodeWithAttributes->Attributes(), NYson::EYsonFormat::Text),
-            TTraits::ObjectType);
+        YT_TLOG_DEBUG("Extended attributes received")
+            .With("Attributes", ConvertToYsonString(nodeWithAttributes->Attributes(), NYson::EYsonFormat::Text))
+            .With("ObjectType", TTraits::ObjectType);
     }
 
     auto [chunkSchemaId, uploadTransactionId] = ToDerived()->BeginUpload(
@@ -233,7 +233,7 @@ void TDistributedWriteFinishFacadeBase<TDerived, TTraits>::FinishSession(
         auto batchRspOrError = NConcurrency::WaitFor(batchReq->Invoke());
         THROW_ERROR_EXCEPTION_IF_FAILED(
             NChunkClient::GetCumulativeError(batchRspOrError),
-            "Error attaching output chunks (Path: %v)",
+            "Error attaching output chunks to %v",
             path);
 
         const auto& batchRsp = batchRspOrError.Value();
@@ -288,9 +288,9 @@ void TDistributedWriteFinishFacadeBase<TDerived, TTraits>::FinishSession(
     for (const auto& writeResult : writeResults) {
         if (!addedChunkTrees.insert(writeResult.ChunkListId).second) {
             THROW_ERROR_EXCEPTION("Duplicate chunk list ids")
-                << TErrorAttribute("session_id", writeResult.SessionId)
-                << TErrorAttribute("cookie_id", writeResult.CookieId)
-                << TErrorAttribute("chunk_list_id", writeResult.ChunkListId);
+                .With("session_id", writeResult.SessionId)
+                .With("cookie_id", writeResult.CookieId)
+                .With("chunk_list_id", writeResult.ChunkListId);
         }
         addChunkTree(writeResult.ChunkListId);
     }

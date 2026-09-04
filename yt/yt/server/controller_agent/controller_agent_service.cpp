@@ -68,7 +68,7 @@ private:
             func();
         } catch (const std::exception& ex) {
             THROW_ERROR_EXCEPTION(NControllerAgent::EErrorCode::AgentCallFailed, "Agent call failed")
-                << ex;
+                .With(ex);
         }
     }
 
@@ -318,7 +318,7 @@ private:
         WrapAgentException([&] {
             auto operation = controllerAgent->FindOperation(operationId);
             if (!operation) {
-                YT_LOG_DEBUG("Operation is missing; ignoring request");
+                YT_TLOG_DEBUG("Operation is missing; ignoring request");
                 context->Reply();
                 return;
             }

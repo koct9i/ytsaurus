@@ -56,6 +56,7 @@ struct TReadRequest
     i64 Offset = -1;
     i64 Size = -1;
     TFairShareSlotId FairShareSlotId = {};
+    std::optional<TIOFairShareState> FairShareState = {};
 };
 
 struct TReadResponse
@@ -73,12 +74,15 @@ struct TWriteRequest
     std::vector<TSharedRef> Buffers;
     bool Flush = false;
     TFairShareSlotId FairShareSlotId = {};
+    std::optional<TIOFairShareState> FairShareState = {};
 };
 
 struct TWriteResponse
 {
     i64 IOWriteRequests = 0;
     i64 IOSyncRequests = 0;
+
+    //! Number of bytes actually written, including direct IO padding.
     i64 WrittenBytes = 0;
 };
 
@@ -111,6 +115,7 @@ struct TFlushFileRequest
     TIOEngineHandlePtr Handle;
     EFlushFileMode Mode;
     TFairShareSlotId FairShareSlotId = {};
+    std::optional<TIOFairShareState> FairShareState = {};
 };
 
 struct TFlushFileResponse
@@ -125,6 +130,7 @@ struct TFlushFileRangeRequest
     i64 Size = -1;
     bool Async = false;
     TFairShareSlotId FairShareSlotId = {};
+    std::optional<TIOFairShareState> FairShareState = {};
 };
 
 struct TFlushFileRangeResponse
@@ -158,6 +164,10 @@ struct TResizeRequest
 struct TDefaultReadTag
 { };
 
+std::optional<TIOFairShareState> MakeIOFairShareState(
+    std::optional<i64> ioConsumed,
+    std::optional<double> ioFairShareWeight);
+
 struct IIOEngine
     : public TRefCounted
 {
@@ -167,6 +177,10 @@ struct IIOEngine
         TRefCountedTypeCookie tagCookie,
         TIOSessionId sessionId = {},
         bool useDedicatedAllocations = false) = 0;
+
+    //! For direct IO handles, \p request.Offset must be a multiple of the direct IO
+    //! block size, otherwise the write fails. Unaligned buffers are combined and
+    //! zero-padded to the next block boundary; the padding is written to the file.
     virtual TFuture<TWriteResponse> Write(
         TWriteRequest request,
         EWorkloadCategory category = EWorkloadCategory::Idle,
@@ -211,6 +225,7 @@ struct IIOEngine
     virtual i64 GetTotalReadBytes() const = 0;
     virtual i64 GetTotalWrittenBytes() const = 0;
     virtual EDirectIOPolicy UseDirectIOForReads() const = 0;
+    virtual EDirectIOPolicy UseDirectIOForWrites() const = 0;
 
     virtual bool IsInFlightRequestLimitExceeded() const = 0;
     virtual bool IsInFlightReadRequestLimitExceeded() const = 0;
@@ -232,7 +247,8 @@ struct IIOEngine
         const std::string& path,
         EWorkloadCategory category = EWorkloadCategory::Idle,
         TIOSessionId sessionId = {},
-        TFairShareSlotId fairShareSlot = {});
+        TFairShareSlotId fairShareSlot = {},
+        std::optional<TIOFairShareState> fairShareState = {});
 };
 
 DEFINE_REFCOUNTED_TYPE(IIOEngine)

@@ -17,14 +17,14 @@
 
 #include <yt/yt/library/erasure/public.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <library/cpp/yt/containers/intrusive_linked_list.h>
 
 #include <library/cpp/yt/compact_containers/compact_vector.h>
 #include <library/cpp/yt/compact_containers/compact_flat_map.h>
 
 #include <library/cpp/yt/memory/ref_tracked.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 #include <optional>
 
@@ -51,7 +51,7 @@ static_assert(sizeof(TCellTagToChunkExportData) == 56, "sizeof(TCellTagToChunkEx
 struct TChunkDynamicData
     : public NObjectServer::TObjectDynamicData
 {
-    using TMediumToRepairQueueIterator = TCompactFlatMap<int, TChunkRepairQueueIterator, 2>;
+    using TRepairQueueIteratorMap = TCompactFlatMap<int, TChunkRepairQueueIterator, 2>;
 
     using TJobSet = TCompactVector<TJobPtr, 1>;
 
@@ -73,8 +73,7 @@ struct TChunkDynamicData
 
     //! For each medium, contains a valid iterator for those chunks belonging to the repair queue
     //! and null (default iterator value) for others.
-    TMediumToRepairQueueIterator MissingPartRepairQueueIterators;
-    TMediumToRepairQueueIterator DecommissionedPartRepairQueueIterators;
+    TRepairQueueIteratorMap RepairQueueIterators;
 
     //! Set of jobs that are currently scheduled for this chunk.
     TJobSet Jobs;
@@ -85,14 +84,11 @@ struct TChunkDynamicData
 };
 
 // Think twice before increasing this.
-YT_STATIC_ASSERT_SIZEOF_SANITY(TChunkDynamicData, 144);
+YT_STATIC_ASSERT_SIZEOF_SANITY(TChunkDynamicData, 104);
 
 ////////////////////////////////////////////////////////////////////////////////
 
-DEFINE_ENUM(EChunkRepairQueue,
-    ((Missing)           (0))
-    ((Decommissioned)    (1))
-);
+static constexpr int ErasureChunkDecommissionPriority = RepairPriorityCount - 1;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -215,9 +211,9 @@ public:
     void SetPartLossTime(NProfiling::TCpuInstant partLossTime);
     void ResetPartLossTime();
 
-    TChunkRepairQueueIterator GetRepairQueueIterator(int mediumIndex, EChunkRepairQueue queue) const;
-    void SetRepairQueueIterator(int mediumIndex, EChunkRepairQueue queue, TChunkRepairQueueIterator value);
-    TChunkDynamicData::TMediumToRepairQueueIterator* SelectRepairQueueIteratorMap(EChunkRepairQueue queue) const;
+    TChunkRepairQueueIterator GetRepairQueueIterator(int mediumIndex, int priority) const;
+    void SetRepairQueueIterator(int mediumIndex, int priority, TChunkRepairQueueIterator value);
+    const TChunkDynamicData::TRepairQueueIteratorMap& SelectRepairQueueIteratorMap() const;
 
     const TChunkDynamicData::TJobSet& GetJobs() const;
 
@@ -235,10 +231,12 @@ public:
         const NObjectServer::IObjectManagerPtr& objectManager) const;
 
     TChunkRequisitionIndex GetLocalRequisitionIndex() const;
+    // COMPAT(theevilbird): Get rid of |force| after removing requisitions for chunk_wise_accounting_migration.
     void SetLocalRequisitionIndex(
         TChunkRequisitionIndex requisitionIndex,
         TChunkRequisitionRegistry* registry,
-        const NObjectServer::IObjectManagerPtr& objectManager);
+        const NObjectServer::IObjectManagerPtr& objectManager,
+        bool forceAggregatedRequisitionUpdate = false);
 
     //! Prerequisite: IsExportedToCell(cellTag).
     TChunkRequisitionIndex GetExternalRequisitionIndex(NObjectServer::TCellTag cellTag) const;
@@ -485,9 +483,11 @@ private:
     const TReplicasDataBase& ReplicasData() const;
     TReplicasDataBase* MutableReplicasData();
 
+    // COMPAT(theevilbird): Get rid of |force| after removing requisitions for chunk_wise_accounting_migration.
     void UpdateAggregatedRequisitionIndex(
         TChunkRequisitionRegistry* registry,
-        const NObjectServer::IObjectManagerPtr& objectManager);
+        const NObjectServer::IObjectManagerPtr& objectManager,
+        bool forceAggregatedRequisitionUpdate = false);
 
     void MaybeResetObsoleteEpochData();
 

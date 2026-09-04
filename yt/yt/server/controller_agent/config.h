@@ -1290,6 +1290,8 @@ struct TControllerAgentConfig
 
     // Supposed to be used in tests.
     std::optional<i64> FootprintMemory;
+    // Supposed to be set for asan builds to account for ytserver-exec's memory.
+    std::optional<i64> ExecFootprintMemory;
 
     //! Enables job profiling.
     bool EnableJobProfiling;
@@ -1348,6 +1350,9 @@ struct TControllerAgentConfig
     NServer::TOperationEventReporterConfigPtr OperationEventsReporter;
 
     bool FailOperationsInEmptyTrees;
+
+    //! If |true|, operations on tables whose primary medium is S3 (offshore) are forbidden.
+    bool ForbidOperationsOnOffshoreMedia;
 
     REGISTER_YSON_STRUCT(TControllerAgentConfig);
 

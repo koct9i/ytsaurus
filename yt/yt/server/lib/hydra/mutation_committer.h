@@ -24,9 +24,10 @@
 #include <yt/yt/core/logging/log.h>
 
 #include <yt/yt/core/misc/mpsc_queue.h>
-#include <yt/yt/core/misc/ring_queue.h>
 
 #include <yt/yt/library/tracing/async_queue_trace.h>
+
+#include <library/cpp/yt/containers/ring_queue.h>
 
 namespace NYT::NHydra {
 
@@ -40,6 +41,15 @@ struct TMutationDraft
 };
 
 using TMutationDraftQueue = TMpscQueue<TMutationDraft>;
+
+////////////////////////////////////////////////////////////////////////////////
+
+//! Given, for each voting peer, its last logged sequence number paired with its weight,
+//! returns the highest sequence number reached by peers whose weights sum to at least
+//! quorumWeight, or -1 if no such sequence number exists.
+i64 ComputeQuorumSequenceNumber(
+    std::vector<std::pair<i64, int>> loggedSequenceNumbersAndWeights,
+    int quorumWeight);
 
 ////////////////////////////////////////////////////////////////////////////////
 

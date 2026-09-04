@@ -1,4 +1,5 @@
 #include "response.h"
+#include "driver.h"
 #include "private.h"
 
 #include <yt/yt/python/common/error.h>
@@ -69,21 +70,27 @@ TDriverResponseHolder::~TDriverResponseHolder()
         return;
     }
 
+    // Unregister first so that OnBeforePythonFinalize can never observe a dying holder;
+    // the lock also orders this destructor with an in-flight Destroy() from its loop.
+    {
+        auto guard = Guard(AliveDriverResponseHoldersLock);
+        YT_VERIFY(AliveDriverResponseHolders.erase(this) == 1);
+    }
+
     if (!Destroyed_) {
         auto guard = Guard(DestructionSpinLock_);
-        if (ShuttingDown_) {
-            return;
-        }
-
-        {
+        if (!ShuttingDown_) {
             TGilGuard gilGuard;
             Destroy();
         }
     }
 
-    {
-        auto guard = Guard(AliveDriverResponseHoldersLock);
-        YT_VERIFY(AliveDriverResponseHolders.erase(this) == 1);
+    // Streams may still be alive here: either ShuttingDown_ was observed above,
+    // or they were attached after OnBeforePythonFinalize had already destroyed this holder.
+    // Prevent possible Py_DECREF off-GIL by leaking pointers. Safe since driver process is shutting down.
+    if (ShuttingDown_) {
+        Y_UNUSED(InputStream_.release());
+        Y_UNUSED(OutputStream_.release());
     }
 }
 
@@ -186,6 +193,9 @@ Py::Object TDriverResponse::ResponseParameters(Py::Tuple& /*args*/, Py::Dict& /*
 
 Py::Object TDriverResponse::Wait(Py::Tuple& /*args*/, Py::Dict& /*kwargs*/)
 {
+    // In a forked child the threads completing the future are gone and waiting would hang.
+    ValidateNoForkOccurred();
+
     {
         TReleaseAcquireGilGuard guard;
         Y_UNUSED(SignalFriendlyWaitFor(ResponseFuture_));

@@ -51,6 +51,8 @@ class TReqUnstageChunkTree;
 class TRspUnstageChunkTree;
 class TReqAttachChunkTrees;
 class TRspAttachChunkTrees;
+class TReqDetachChunkTrees;
+class TRspDetachChunkTrees;
 
 } // namespace NYT::NChunkClient::NProto
 
@@ -87,6 +89,7 @@ using NChunkClient::TChunkReplicaWithLocationList;
 using NChunkClient::ChunkShardCount;
 using NChunkClient::TypicalChunkLocationCount;
 using NChunkClient::EChunkListContentType;
+using NChunkClient::EChunkListKind;
 using NChunkClient::EChunkReplicaState;
 
 using NJobTrackerClient::EJobType;
@@ -164,6 +167,7 @@ DECLARE_REFCOUNTED_STRUCT(IMasterCellChunkStatisticsPieceCollector)
 
 DECLARE_REFCOUNTED_STRUCT(TChunkManagerConfig)
 DECLARE_REFCOUNTED_STRUCT(TDanglingLocationCleanerConfig)
+DECLARE_REFCOUNTED_STRUCT(TDynamicDataNodeTrackerTestingConfig)
 DECLARE_REFCOUNTED_STRUCT(TDynamicDataNodeTrackerConfig)
 DECLARE_REFCOUNTED_STRUCT(TDynamicChunkTreeBalancerConfig)
 DECLARE_REFCOUNTED_STRUCT(TDynamicChunkAutotomizerConfig)
@@ -192,6 +196,14 @@ constexpr int TypicalChunkParentCount = 2;
  *  current RF >= 3 -> priority = 2
  */
 constexpr int ReplicationPriorityCount = 3;
+
+//! Number of supported repair priorities. The smaller the more urgent.
+/*! Parts we can still lose == 0 -> priority = 0
+ *  Parts we can still lose == 1 -> priority = 1
+ *  Parts we can still lose >= 2 -> priority = 2
+ *  Decommissioned chunks -> priority = 3
+ */
+constexpr int RepairPriorityCount = 4;
 
 constexpr int DefaultConsistentReplicaPlacementReplicasPerChunk = 100;
 
@@ -233,19 +245,6 @@ DEFINE_BIT_ENUM(EChunkScanKind,
     ((GlobalStatisticsCollector)    (0x0010))
 );
 
-DEFINE_ENUM(EChunkListKind,
-    ((Static)                 (0))
-    ((SortedDynamicRoot)      (1))
-    ((SortedDynamicTablet)    (2))
-    ((OrderedDynamicRoot)     (3))
-    ((OrderedDynamicTablet)   (4))
-    ((SortedDynamicSubtablet) (5))
-    ((JournalRoot)            (6))
-    ((HunkRoot)               (7))
-    ((Hunk)                   (8))
-    ((HunkStorageRoot)        (9))
-    ((HunkTablet)            (10))
-);
 
 DEFINE_ENUM(EChunkLocationState,
     // Belongs to a node that is not online.
@@ -280,6 +279,8 @@ DEFINE_ENUM(EChunkDetachPolicy,
     ((HunkTablet)          (3))
     // For hunk chunks of ordered tablets.
     ((OrderedTabletHunk)   (4))
+    // For arbitrary chunks of scratch chunk lists.
+    ((Scratch)             (5))
 );
 
 inline static const EChunkScanKind DelegatedScanKinds = EChunkScanKind::Refresh | EChunkScanKind::RequisitionUpdate;

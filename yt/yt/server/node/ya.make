@@ -46,6 +46,7 @@ SRCS(
     data_node/location.cpp
     data_node/location_manager.cpp
     data_node/master_connector.cpp
+    data_node/medium_aware_block_cache_manager.cpp
     data_node/medium_directory_manager.cpp
     data_node/medium_updater.cpp
     data_node/network_statistics.cpp
@@ -257,6 +258,8 @@ PEERDIR(
     yt/yt/server/lib/lsm
     yt/yt/server/lib/misc
     yt/yt/server/lib/nbd
+    yt/yt/server/lib/nbd/chunk
+    yt/yt/server/lib/nbd/image
     yt/yt/server/lib/node
     yt/yt/server/lib/rpc
     yt/yt/server/lib/tablet_balancer

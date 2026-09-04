@@ -3,7 +3,7 @@
 #include <util/system/file.h>
 
 #include <contrib/ydb/library/actors/core/actor.h>
-#include <contrib/ydb/library/yql/providers/dq/config/config.pb.h>
+#include <yt/yql/providers/dq/config/config.pb.h>
 
 #include <contrib/ydb/library/yql/providers/dq/task_runner/file_cache.h>
 #include <yql/essentials/providers/common/metrics/metrics_registry.h>
@@ -84,6 +84,8 @@ namespace NYql {
         TMaybe<TString> KeepFilter;
 
         TMaybe<TString> AnnounceClusterName;
+
+        TDuration TickInterval = TDuration::Seconds(5);
     };
 
     NActors::IActor* CreateResourceManager(const TResourceManagerOptions& options, const TIntrusivePtr<ICoordinationHelper>& coordinator);

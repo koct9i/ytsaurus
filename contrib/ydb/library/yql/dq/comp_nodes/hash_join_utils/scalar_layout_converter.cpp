@@ -45,7 +45,8 @@ template <typename TLayout>
 void StoreFixedSizeLayout(TLayout& dst, const NYql::NUdf::TUnboxedValue& value) {
     if constexpr (std::is_same_v<TLayout, TGUID>) {
         const auto ref = value.AsStringRef();
-        std::memcpy(&dst, ref.Data(), sizeof(TLayout));
+        Y_ENSURE(ref.Size() == sizeof(TGUID), "Wrong Uuid size: " << ref.Size());
+        dst = ReadUnaligned<TGUID>(ref.Data());
     } else {
         dst = value.Get<TLayout>();
     }
@@ -54,7 +55,7 @@ void StoreFixedSizeLayout(TLayout& dst, const NYql::NUdf::TUnboxedValue& value) 
 template <typename TLayout>
 NYql::NUdf::TUnboxedValue CreateFixedSizeValue(const TLayout& data) {
     if constexpr (std::is_same_v<TLayout, TGUID>) {
-        return MakeString(NYql::NUdf::TStringRef(reinterpret_cast<const char*>(&data), sizeof(TLayout)));
+        return MakeString(NYql::NUdf::TStringRef(reinterpret_cast<const char*>(&data), sizeof(TGUID)));
     } else {
         return NYql::NUdf::TUnboxedValuePod(data);
     }
@@ -133,7 +134,7 @@ public:
             }
         }
 
-        const TLayout* data = reinterpret_cast<TLayout*>(columnsData[0]) + tupleIndex;
+        const TLayout* data = reinterpret_cast<const TLayout*>(columnsData[0]) + tupleIndex;
         return CreateFixedSizeValue(*data);
     }
 

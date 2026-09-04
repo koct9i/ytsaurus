@@ -252,7 +252,9 @@ private:
 
         switch (key) {
             case EInternedAttributeKey::LastPingTime:
-                RequireLeader();
+                if (auto error = RequireLeaderAsync(); !error.IsOK()) {
+                    return MakeFuture<TYsonString>(std::move(error));
+                }
                 return Bootstrap_
                     ->GetTransactionManager()
                     ->GetLastPingTime(transaction)
@@ -261,7 +263,9 @@ private:
                     }));
 
             case EInternedAttributeKey::LastPingAddress:
-                RequireLeader();
+                if (auto error = RequireLeaderAsync(); !error.IsOK()) {
+                    return MakeFuture<TYsonString>(std::move(error));
+                }
                 return Bootstrap_
                     ->GetTransactionManager()
                     ->GetLastPingAddress(transaction)
@@ -469,6 +473,9 @@ private:
             multicellManager->GetMasterChannelOrThrow(cellTag, EPeerKind::Follower));
         auto batchReq = proxy.ExecuteBatch();
 
+        const auto& securityManager = Bootstrap_->GetSecurityManager();
+        batchReq->SetUser(securityManager->GetAuthenticatedUserNameToForward());
+
         auto transactionId = GetId();
 
         if (remoteTransactionType == ERemoteTransactionType::Externalized) {
@@ -518,6 +525,9 @@ private:
         auto proxy = TObjectServiceProxy::FromDirectMasterChannel(
             multicellManager->GetMasterChannelOrThrow(cellTag, EPeerKind::Follower));
         auto batchReq = proxy.ExecuteBatch();
+
+        const auto& securityManager = Bootstrap_->GetSecurityManager();
+        batchReq->SetUser(securityManager->GetAuthenticatedUserNameToForward());
 
         auto transactionId = Object_->GetId();
         auto req = TYPathProxy::Get("&" + FromObjectId(transactionId) + "/@" + attributeKey);

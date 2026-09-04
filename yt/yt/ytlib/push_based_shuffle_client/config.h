@@ -28,8 +28,7 @@ struct TShuffleWriterConfig
     //! keep the per-partition journal flush loop busy.
     double BuildersBudgetFraction;
 
-    //! Codec used to compress each shuffle record before it leaves the
-    //! mapper.
+    //! Codec used to compress each shuffle record before it leaves the writer.
     NCompression::ECodec Codec;
 
     //! Maximum number of physical send attempts per record before the
@@ -67,6 +66,9 @@ struct TPartitionReaderConfig
     //! rejects. Not a cap on decompressed or returned-batch size.
     i64 MaxBytesPerRead;
 
+    //! Checks that decoded values do not use configured identity column ids.
+    bool ValidateIdentityColumnIds;
+
     REGISTER_YSON_STRUCT(TPartitionReaderConfig);
 
     static void Register(TRegistrar registrar);
@@ -76,10 +78,32 @@ DEFINE_REFCOUNTED_TYPE(TPartitionReaderConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct TSortReaderConfig
+    : public NYTree::TYsonStruct
+{
+    //! Rows per sort bucket.
+    int BucketRowCount;
+
+    //! Output batch limits. The data-weight limit is soft.
+    i64 MaxRowsPerRead;
+    i64 MaxDataWeightPerRead;
+
+    //! CPU time between merge yields.
+    TDuration MergeYieldPeriod;
+
+    REGISTER_YSON_STRUCT(TSortReaderConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TSortReaderConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct TPushShuffleConfig
     : public NYTree::TYsonStruct
 {
-    //! Mapper-side L2 writer config (client).
+    //! Map-side L2 writer config (client).
     TShuffleWriterConfigPtr WriterConfig;
     //! Reducer-side L2 reader config (client).
     TPartitionReaderConfigPtr ReaderConfig;

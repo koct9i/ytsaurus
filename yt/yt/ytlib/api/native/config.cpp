@@ -8,7 +8,7 @@
 
 #include <yt/yt/ytlib/offshore_data_gateway/config.h>
 
-#include <yt/yt/ytlib/discovery_client/config.h>
+#include <yt/yt/library/discovery_client/config.h>
 
 #include <yt/yt/ytlib/scheduler/config.h>
 
@@ -179,6 +179,8 @@ void TConnectionStaticConfig::Register(TRegistrar registrar)
         .Default("default");
     registrar.Parameter("region", &TThis::Region)
         .Default();
+    registrar.Parameter("datacenter", &TThis::Datacenter)
+        .Default();
     registrar.Parameter("banned_replica_tracker_cache", &TThis::BannedReplicaTrackerCache)
         .DefaultNew();
 }
@@ -328,6 +330,9 @@ void TConnectionDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("lookup_rows_in_memory_logging_suppression_timeout", &TThis::LookupRowsInMemoryLoggingSuppressionTimeout)
         .Optional();
     registrar.Parameter("lookup_rows_ext_memory_logging_suppression_timeout", &TThis::LookupRowsExtMemoryLoggingSuppressionTimeout)
+        .Optional();
+
+    registrar.Parameter("pull_queue_response_codec", &TThis::PullQueueResponseCodec)
         .Optional();
 
     registrar.Parameter("default_get_tablet_errors_limit", &TThis::DefaultGetTabletErrorsLimit)
@@ -552,7 +557,7 @@ void TConnectionDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("disable_adaptive_ordered_schemaful_reader", &TThis::DisableAdaptiveOrderedSchemafulReader)
         .Default(false);
 
-    registrar.Parameter("allow_web_assembly", &TThis::UseWebAssembly)
+    registrar.Parameter("allow_web_assembly", &TThis::AllowWebAssembly)
         .Default(false);
 
     registrar.Parameter("group_by_with_limit_is_unordered", &TThis::GroupByWithLimitIsUnordered)

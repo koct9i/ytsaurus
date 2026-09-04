@@ -44,7 +44,9 @@ RSG = RandomStringGenerator()
 #     existing queues and just keeps writing/verifying.
 #   * Verification progress (per export, per tablet: next expected row_index, and the
 #     last verified table) is persisted in a Cypress attribute on each export directory,
-#     so we never re-read already verified export tables after a restart.
+#     so we never re-read already verified export tables after a restart. If that watermark
+#     itself expires with old export tables, verification rebases to a bounded recent window;
+#     continuity is strict again from the first row in that window.
 #
 # We deliberately store tablet/row_index/seq as *real* payload columns so verification
 # never depends on system columns ($tablet_index/$row_index) in the exported tables.
@@ -140,7 +142,8 @@ def _cron_interval_seconds(cron):
 
 class Queue:
     def __init__(self, state_path, name, tablet_count, exports_cfg, erasure, hunks, commit_ordering,
-                 auto_trim, flush_period_ms, export_ttl_ms, cron_default_interval_seconds, session_id):
+                 auto_trim, auto_trim_retained_lifetime_ms, flush_period_ms, export_ttl_ms,
+                 verification_history_seconds, cron_default_interval_seconds, session_id):
         self.name = name
         self.path = f"{state_path}/{name}"
         self.shadow_path = f"{state_path}/{name}.shadow"
@@ -151,8 +154,10 @@ class Queue:
         self.hunks = hunks
         self.commit_ordering = commit_ordering
         self.auto_trim = auto_trim
+        self.auto_trim_retained_lifetime_ms = auto_trim_retained_lifetime_ms
         self.flush_period_ms = flush_period_ms
         self.export_ttl_ms = export_ttl_ms
+        self.verification_history_seconds = verification_history_seconds
         self.cron_default_interval = cron_default_interval_seconds
         self.session_id = session_id
 
@@ -235,6 +240,7 @@ class Queue:
     def setup(self):
         self._ensure_queue()
         self._ensure_unfrozen()
+        self._apply_mount_config()
         self._ensure_shadow()
         self._ensure_producer()
         self._apply_auto_trim()
@@ -332,6 +338,20 @@ class Queue:
             logger.info(f"Queue {self.path} is '{state}'; unfreezing to recover")
             yt.unfreeze_table(self.path, sync=True)
 
+    def _apply_mount_config(self):
+        # mount_config is mutable. Reconcile it on every startup so changing the default also
+        # updates persistent queues created by older runs instead of affecting only new ones.
+        attribute = f"{self.path}/@mount_config/dynamic_store_auto_flush_period"
+        actual = yt.get(attribute) if yt.exists(attribute) else None
+        if actual == self.flush_period_ms:
+            return
+        logger.info(
+            f"Updating queue {self.path} dynamic_store_auto_flush_period: "
+            f"{actual} -> {self.flush_period_ms} ms")
+        yt.set(attribute, self.flush_period_ms)
+        if yt.get(f"{self.path}/@tablet_state") == "mounted":
+            yt.remount_table(self.path)
+
     def _verify_queue_matches_config(self):
         # Compare the live queue against the config for the structural attributes that
         # cannot be reconciled by a simple set() (tablet_count needs reshard, erasure /
@@ -374,7 +394,13 @@ class Queue:
         # not the shadow or the export tables, and total_row_count (our row_index counter)
         # is unaffected. NB: real trimming also needs Controller/EnableAutomaticTrimming on
         # in the queue agent dynamic config (deploy-side).
-        yt.set(f"{self.path}/@auto_trim_config", {"enable": self.auto_trim})
+        config = {"enable": self.auto_trim}
+        if self.auto_trim and self.auto_trim_retained_lifetime_ms:
+            # Never trim rows younger than this — keep a rolling window (e.g. last 2 days) of
+            # data in the queue regardless of what has already been exported/consumed. Bounds
+            # queue growth while keeping recent data available.
+            config["retained_lifetime_duration"] = self.auto_trim_retained_lifetime_ms
+        yt.set(f"{self.path}/@auto_trim_config", config)
 
     def _ensure_shadow(self):
         if not yt.exists(self.shadow_path):
@@ -502,6 +528,32 @@ class Queue:
         entries = sorted(
             (str(item.attributes["creation_time"]), str(item))
             for item in yt.list(directory, attributes=["creation_time"]))
+        if not entries:
+            return
+
+        # Export tables have a TTL. A stopped verifier can therefore wake up with a
+        # watermark older than the oldest table that still exists. This is not evidence of
+        # an exporter gap: the evidence needed to check that part of the stream is gone.
+        # Rebase only in this unambiguous case. Missing tables after a live watermark still
+        # produce the ordinary strict row-index mismatch below.
+        if last_key != ("", "") and last_key < entries[0]:
+            cutoff = time.time() - self.verification_history_seconds
+            start_index = next(
+                (index for index, (creation_time, _) in enumerate(entries)
+                 if _parse_yt_instant(creation_time) >= cutoff),
+                len(entries) - 1)
+            last_key = entries[start_index - 1] if start_index else ("", "")
+            # None means that this tablet has not appeared in the rebased window yet. Its
+            # first observed row establishes the new baseline; all following rows are
+            # checked for exact continuity as before. Keeping the marker and the pending
+            # baselines in the same attribute makes the rebase restart-safe.
+            next_row_index = [None] * self.tablet_count
+            self._store_verify_state(directory, next_row_index, last_key)
+            logger.warning(
+                f"Verification watermark for {directory} expired with old export tables; "
+                f"rebasing to {entries[start_index][1]} and checking the newest "
+                f"{self.verification_history_seconds}s of available history")
+
         new_tables = [(ct, name) for ct, name in entries if (ct, name) > last_key]
         if not new_tables:
             return
@@ -525,6 +577,8 @@ class Queue:
 
         for tablet, tablet_rows in by_tablet.items():
             expected_first = next_row_index[tablet]
+            if expected_first is None:
+                expected_first = tablet_rows[0]["row_index"]
 
             # No gaps and no duplicates: the exported row_index stream for this tablet
             # must be exactly expected_first, expected_first + 1, ...
@@ -564,7 +618,8 @@ class Queue:
         written = sum(self.written_row_count)
         for export_name, export in self.exports.items():
             next_row_index, _ = self._load_verify_state(export["directory"])
-            exported = sum(next_row_index)
+            # A None is a tablet that has not produced its first row since a TTL rebase yet.
+            exported = sum(index or 0 for index in next_row_index)
             logger.info(
                 f"Queue {self.path} export {export_name} ({export['label']}): "
                 f"verified {exported} / written {written} rows (lag {written - exported})")
@@ -637,6 +692,10 @@ def test_queue_static_export(base_path, spec, attributes, args):
     yt.config["dynamic_table_retries"]["backoff"] = {"policy": "constant_time", "constant_time": 0.1}
     yt.config["dynamic_table_retries"]["total_timeout"] = 180000
     yt.config["tablets_ready_timeout"] = 4 * 60 * 1000
+    # Give transactions a generous lifetime (default is 30s) so the write tablet transaction
+    # (push_queue_producer + shadow insert) does not expire on a slow/flaky cluster
+    # ("No such transaction" on commit).
+    yt.config["transaction_timeout"] = 300000
 
     cfg = spec.queue_static_export
 
@@ -679,8 +738,12 @@ def test_queue_static_export(base_path, spec, attributes, args):
             hunks=queue_cfg.get("hunks", False),
             commit_ordering=queue_cfg.get("commit_ordering"),
             auto_trim=queue_cfg.get("auto_trim", False),
+            auto_trim_retained_lifetime_ms=(
+                cfg.auto_trim_retained_lifetime_seconds * 1000
+                if cfg.auto_trim_retained_lifetime_seconds else None),
             flush_period_ms=queue_cfg.get("flush_period_ms", cfg.flush_period_ms),
             export_ttl_ms=(cfg.export_ttl_seconds * 1000) if cfg.export_ttl_seconds else None,
+            verification_history_seconds=cfg.verification_history_seconds,
             cron_default_interval_seconds=cfg.cron_default_interval_seconds,
             session_id=session_id)
         queue.setup()

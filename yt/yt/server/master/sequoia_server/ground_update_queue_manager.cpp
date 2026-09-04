@@ -186,12 +186,12 @@ public:
             .Action = action,
         };
 
-        YT_LOG_DEBUG("Table update queue record enqueued (Queue: %v, SequenceNumber: %v, Table: %v, Action: %v, Row: %v)",
-            queue,
-            record.SequenceNumber,
-            record.Table,
-            record.Action,
-            record.Row);
+        YT_TLOG_DEBUG("Table update queue record enqueued")
+            .With("Queue", queue)
+            .With("SequenceNumber", record.SequenceNumber)
+            .With("Table", record.Table)
+            .With("Action", record.Action)
+            .With("Row", record.Row);
 
         queueState.Records.push_back(std::move(record));
 
@@ -223,8 +223,8 @@ public:
     {
         VerifyPersistentStateRead();
 
-        YT_LOG_DEBUG("Ground update queue sync requested (RecordSequenceNumberToSync: %v)",
-            recordSequenceNumber);
+        YT_TLOG_DEBUG("Ground update queue sync requested")
+            .With("RecordSequenceNumberToSync", recordSequenceNumber);
 
         auto& queueState = QueueStates_[queue];
         if (queueState.Records.empty()) {
@@ -245,10 +245,10 @@ public:
             : queueState.Records.end();
         it = std::prev(it);
 
-        YT_LOG_DEBUG("Actually syncing ground update queue (AskedSequenceNumber: %v, RecordSequenceNumberToSync: %v, LastSequenceNumber: %v)",
-            recordSequenceNumber,
-            it->SequenceNumber,
-            queueState.Records.back().SequenceNumber);
+        YT_TLOG_DEBUG("Actually syncing ground update queue")
+            .With("AskedSequenceNumber", recordSequenceNumber)
+            .With("RecordSequenceNumberToSync", it->SequenceNumber)
+            .With("LastSequenceNumber", queueState.Records.back().SequenceNumber);
 
         auto& syncPromise = it->SyncPromise;
         if (!syncPromise) {
@@ -280,15 +280,16 @@ private:
         }
 
         if (queueRecords.empty()) {
-            auto error = TError("There are no updates to flush");
-            YT_LOG_DEBUG(error);
-            THROW_ERROR_EXCEPTION(error);
+            static constexpr auto Message = "There are no updates to flush"_sb;
+            YT_TLOG_DEBUG(Message);
+            THROW_ERROR_EXCEPTION(TError(Message));
         }
         if (queueRecords.front().SequenceNumber != request->start_sequence_number()) {
             auto error = TError("First record sequence number %v is different from requested sequence number %v",
                 queueRecords.front().SequenceNumber,
                 request->start_sequence_number());
-            YT_LOG_DEBUG(error);
+            YT_TLOG_DEBUG("First record sequence number differs from the requested one")
+                .With(error);
             THROW_ERROR_EXCEPTION(error);
         }
         if (queueRecords.back().SequenceNumber < request->end_sequence_number()) {
@@ -296,15 +297,16 @@ private:
                 queueRecords.back().SequenceNumber,
                 request->end_sequence_number());
             // This is still alert, looks weird.
-            YT_LOG_ALERT(error);
+            YT_TLOG_ALERT("Last queue sequence number is less than the requested one")
+                .With(error);
             THROW_ERROR_EXCEPTION(error);
         }
 
         queueState.OngoingFlushTransactionId = transaction->GetId();
 
-        YT_LOG_DEBUG("Table update queue flush prepared (Queue: %v, TransactionId: %v)",
-            queue,
-            queueState.OngoingFlushTransactionId);
+        YT_TLOG_DEBUG("Table update queue flush prepared")
+            .With("Queue", queue)
+            .With("TransactionId", queueState.OngoingFlushTransactionId);
     }
 
     void HydraCommitFlushTableUpdateQueue(
@@ -332,7 +334,8 @@ private:
             lastSequenceNumber = queueRecords.front().SequenceNumber;
             ++recordCount;
             if (const auto& syncPromise = queueRecords.front().SyncPromise) {
-                YT_LOG_DEBUG("Ground update queue sync completed (SequenceNumber: %v)", lastSequenceNumber);
+                YT_TLOG_DEBUG("Ground update queue sync completed")
+                    .With("SequenceNumber", lastSequenceNumber);
                 syncPromise.Set();
             }
             queueRecords.pop_front();
@@ -343,12 +346,12 @@ private:
         YT_VERIFY(queueState.LastFlushedSequenceNumber <= endSequenceNumber);
         queueState.LastFlushedSequenceNumber = endSequenceNumber;
 
-        YT_LOG_DEBUG("Table update queue records flushed (Queue: %v, TransactionId: %v, StartSequenceNumber: %v, EndSequenceNumber: %v, RecordCount: %v)",
-            queue,
-            transaction->GetId(),
-            startSequenceNumber,
-            endSequenceNumber,
-            recordCount);
+        YT_TLOG_DEBUG("Table update queue records flushed")
+            .With("Queue", queue)
+            .With("TransactionId", transaction->GetId())
+            .With("StartSequenceNumber", startSequenceNumber)
+            .With("EndSequenceNumber", endSequenceNumber)
+            .With("RecordCount", recordCount);
 
         // I don't like it here.
         if (queue == EGroundUpdateQueue::Sequoia) {
@@ -367,14 +370,14 @@ private:
 
         if (queueState.OngoingFlushTransactionId == transaction->GetId()) {
             queueState.OngoingFlushTransactionId = {};
-            YT_LOG_DEBUG("Table update queue flush aborted (Queue: %v, TransactionId: %v)",
-                queue,
-                transaction->GetId());
+            YT_TLOG_DEBUG("Table update queue flush aborted")
+                .With("Queue", queue)
+                .With("TransactionId", transaction->GetId());
         } else {
-            YT_LOG_DEBUG("Table update queue flush abort ignored (Queue: %v, TransactionId: %v, OngoingFlushTransactionId: %v)",
-                queue,
-                transaction->GetId(),
-                queueState.OngoingFlushTransactionId);
+            YT_TLOG_DEBUG("Table update queue flush abort ignored")
+                .With("Queue", queue)
+                .With("TransactionId", transaction->GetId())
+                .With("OngoingFlushTransactionId", queueState.OngoingFlushTransactionId);
         }
     }
 
@@ -449,10 +452,10 @@ private:
                 request.set_start_sequence_number(startSequenceNumber);
                 request.set_end_sequence_number(endSequenceNumber);
 
-                YT_LOG_DEBUG("Started flushing table update queue records (Queue: %v, StartSequenceNumber: %v, EndSequenceNumber: %v)",
-                    queue,
-                    startSequenceNumber,
-                    endSequenceNumber);
+                YT_TLOG_DEBUG("Started flushing table update queue records")
+                    .With("Queue", queue)
+                    .With("StartSequenceNumber", startSequenceNumber)
+                    .With("EndSequenceNumber", endSequenceNumber);
 
                 for (const auto& record : queueState.Records) {
                     if (record.SequenceNumber > endSequenceNumber) {
@@ -460,11 +463,11 @@ private:
                     }
 
                     // TODO(aleksandra-zh): remove this logging when sequoia queues are stable.
-                    YT_LOG_DEBUG("Flushing table update queue row (Queue: %v, SequenceNumber: %v, Action: %v, Row: %v)",
-                        queue,
-                        record.SequenceNumber,
-                        record.Action,
-                        record.Row.Get());
+                    YT_TLOG_DEBUG("Flushing table update queue row")
+                        .With("Queue", queue)
+                        .With("SequenceNumber", record.SequenceNumber)
+                        .With("Action", record.Action)
+                        .With("Row", record.Row.Get());
 
                     switch (record.Action) {
                         case EGroundUpdateAction::Write:

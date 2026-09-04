@@ -1,9 +1,13 @@
 PEERDIR(
+    contrib/python/dirty-equals
+
     kikimr/public/sdk/python/ydb_v3_new_behavior
 
     library/python/ydb/federated_topic_client
 
     logbroker/tools/lib/recipe_helpers
+
+    yql/tools/yqlworker/interface/proto
 
     yt/yql/tests/common/test_framework
 
@@ -27,6 +31,7 @@ DEPENDS(
     yt/yql/tools/qtworker
     yql/essentials/tools/udf_resolver
     yql/essentials/tools/udf_dep_stub
+    yql/essentials/udfs/common/datetime2
 )
 
 DATA(

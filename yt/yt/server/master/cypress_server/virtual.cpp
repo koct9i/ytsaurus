@@ -113,7 +113,7 @@ std::optional<TVirtualCompositeNodeReadOffloadParams> TVirtualSinglecellMapBase:
     return TVirtualCompositeNodeReadOffloadParams{
         // NB: Must not release LocalRead thread.
         .OffloadInvoker = objectService->GetLocalReadOffloadInvoker(),
-        .WaitForStrategy = EWaitForStrategy::Get,
+        .WaitForStrategy = EWaitForStrategy::BlockThread,
         .BatchSize = *config->CypressManager->VirtualMapReadOffloadBatchSize,
         .CreateReadOffloadGuard = std::move(createReadOffloadGuard),
     };
@@ -171,7 +171,7 @@ void TVirtualSinglecellWithRemoteItemsMapBase::GetSelf(
 
     if (limit < 0) {
         THROW_ERROR_EXCEPTION("Limit is negative")
-            << TErrorAttribute("limit", limit);
+            .With("limit", limit);
     }
 
     auto items = GetItems(limit);
@@ -254,7 +254,7 @@ void TVirtualSinglecellWithRemoteItemsMapBase::ListSelf(
 
     if (limit < 0) {
         THROW_ERROR_EXCEPTION("Limit is negative")
-            << TErrorAttribute("limit", limit);
+            .With("limit", limit);
     }
 
     auto items = GetItems(limit);
@@ -395,7 +395,7 @@ TFuture<void> TVirtualSinglecellWithRemoteItemsMapBase::FetchRemoteItems(
             if (!batchRspOrError.IsOK()) {
                 THROW_ERROR_EXCEPTION("Error fetching content of virtual map from cell %v",
                     cellTag)
-                    << batchRspOrError;
+                    .With(batchRspOrError);
             }
 
             const auto& batchRsp = batchRspOrError.Value();
@@ -725,12 +725,15 @@ TFuture<std::pair<TCellTag, i64>> TVirtualMulticellMapBase::FetchSizeFromLocal()
 
 TFuture<std::pair<TCellTag, i64>> TVirtualMulticellMapBase::FetchSizeFromRemote(TCellTag cellTag)
 {
+    const auto& securityManager = Bootstrap_->GetSecurityManager();
+
     const auto& multicellManager = Bootstrap_->GetMulticellManager();
     auto proxy = TObjectServiceProxy::FromDirectMasterChannel(
         multicellManager->GetMasterChannelOrThrow(cellTag, NHydra::EPeerKind::Follower));
     // TODO(nadya02): Set the correct timeout here.
     proxy.SetDefaultTimeout(NRpc::HugeDoNotUseRpcRequestTimeout);
     auto batchReq = proxy.ExecuteBatch();
+    batchReq->SetUser(securityManager->GetAuthenticatedUserNameToForward());
     batchReq->SetSuppressUpstreamSync(true);
 
     auto path = GetWellKnownPath();
@@ -744,7 +747,7 @@ TFuture<std::pair<TCellTag, i64>> TVirtualMulticellMapBase::FetchSizeFromRemote(
                 THROW_ERROR_EXCEPTION("Error fetching size of virtual map %v from cell %v",
                     path,
                     cellTag)
-                    << cumulativeError;
+                    .With(cumulativeError);
             }
 
             const auto& batchRsp = batchRspOrError.Value();
@@ -862,7 +865,7 @@ TFuture<void> TVirtualMulticellMapBase::FetchItemsFromRemote(
                 THROW_ERROR_EXCEPTION("Error fetching content of virtual map %v from cell %v",
                     path,
                     cellTag)
-                    << cumulativeError;
+                    .With(cumulativeError);
             }
 
             const auto& batchRsp = batchRspOrError.Value();
@@ -915,16 +918,10 @@ DEFINE_YPATH_SERVICE_METHOD(TVirtualMulticellMapBase, Enumerate)
     context->SetRequestInfo("Limit: %v, AttributeFilter: %v", limit, attributeFilter);
 
     GetKeys(limit)
-        .Subscribe(BIND([=, this, this_ = MakeStrong(this)] (const TErrorOr<std::vector<TObjectId>>& keysOrError) {
-            if (!keysOrError.IsOK()) {
-                context->Reply(keysOrError);
-                return;
-            }
-
+        .Apply(BIND([=, this, this_ = MakeStrong(this)] (const std::vector<TObjectId>& keys) {
             const auto& objectManager = Bootstrap_->GetObjectManager();
 
             std::vector<TFuture<TYsonString>> asyncValues;
-            const auto& keys = keysOrError.Value();
             for (const auto& key : keys) {
                 auto* object = objectManager->FindObject(key);
                 if (!IsObjectAlive(object)) {
@@ -936,6 +933,7 @@ DEFINE_YPATH_SERVICE_METHOD(TVirtualMulticellMapBase, Enumerate)
 
                 auto* protoItem = response->add_items();
                 protoItem->set_key(ToString(key));
+
                 TAsyncYsonWriter writer(EYsonType::MapFragment);
                 auto proxy = objectManager->GetProxy(object, nullptr);
                 proxy->WriteAttributesFragment(&writer, attributeFilter, false);
@@ -943,29 +941,28 @@ DEFINE_YPATH_SERVICE_METHOD(TVirtualMulticellMapBase, Enumerate)
             }
 
             response->set_incomplete(response->items_size() == limit);
+            return AllSucceeded(asyncValues);
+        }).AsyncVia(GetCurrentInvoker()))
+        .Subscribe(BIND([=] (const TErrorOr<std::vector<TYsonString>>& valuesOrError) {
+            if (!valuesOrError.IsOK()) {
+                context->Reply(valuesOrError);
+                return;
+            }
 
-            AllSucceeded(asyncValues)
-                .Subscribe(BIND([=] (const TErrorOr<std::vector<TYsonString>>& valuesOrError) {
-                    if (!valuesOrError.IsOK()) {
-                        context->Reply(valuesOrError);
-                        return;
-                    }
+            const auto& values = valuesOrError.Value();
+            YT_VERIFY(response->items_size() == std::ssize(values));
+            for (int index = 0; index < response->items_size(); ++index) {
+                const auto& value = values[index];
+                if (!value.AsStringBuf().empty()) {
+                    response->mutable_items(index)->set_attributes(ToProto(value));
+                }
+            }
 
-                    const auto& values = valuesOrError.Value();
-                    YT_VERIFY(response->items_size() == std::ssize(values));
-                    for (int index = 0; index < response->items_size(); ++index) {
-                        const auto& value = values[index];
-                        if (!value.AsStringBuf().empty()) {
-                            response->mutable_items(index)->set_attributes(ToProto(value));
-                        }
-                    }
-
-                    context->SetResponseInfo("Count: %v, Incomplete: %v",
-                        response->items_size(),
-                        response->incomplete());
-                    context->Reply();
-                }));
-        }).Via(GetCurrentInvoker()));
+            context->SetResponseInfo("Count: %v, Incomplete: %v",
+                response->items_size(),
+                response->incomplete());
+            context->Reply();
+        }).Via(NRpc::TDispatcher::Get()->GetHeavyInvoker()));
 }
 
 ////////////////////////////////////////////////////////////////////////////////

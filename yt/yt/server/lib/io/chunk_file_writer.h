@@ -30,7 +30,8 @@ struct TSerializedBlocksRequest
 TSerializedBlocksRequest SerializeBlocks(
     i64 startOffset,
     const std::vector<NChunkClient::TBlock>& blocks,
-    NChunkClient::NProto::TBlocksExt& blocksExt);
+    NChunkClient::NProto::TBlocksExt& blocksExt,
+    const TSharedRef& tailBuffer = {});
 
 NChunkClient::TRefCountedChunkMetaPtr FinalizeChunkMeta(
     NChunkClient::TDeferredChunkMetaPtr chunkMeta,
@@ -81,7 +82,8 @@ public:
         const NChunkClient::IChunkWriter::TWriteBlocksOptions& options,
         const TWorkloadDescriptor& workloadDescriptor,
         const NChunkClient::TBlock& block,
-        TFairShareSlotId fairShareSlotId);
+        TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {});
 
     bool WriteBlocks(
         const NChunkClient::IChunkWriter::TWriteBlocksOptions& options,
@@ -92,7 +94,8 @@ public:
         const NChunkClient::IChunkWriter::TWriteBlocksOptions& options,
         const TWorkloadDescriptor& workloadDescriptor,
         const std::vector<NChunkClient::TBlock>& blocks,
-        TFairShareSlotId fairShareSlotId);
+        TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {});
 
     TFuture<void> GetReadyEvent() override;
 
@@ -105,7 +108,8 @@ public:
         const NChunkClient::IChunkWriter::TWriteBlocksOptions& options,
         const TWorkloadDescriptor& workloadDescriptor,
         const NChunkClient::TDeferredChunkMetaPtr& chunkMeta,
-        TFairShareSlotId fairShareSlotId);
+        TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {});
 
     const NChunkClient::NProto::TChunkInfo& GetChunkInfo() const override;
     const NChunkClient::NProto::TDataStatistics& GetDataStatistics() const override;
@@ -141,6 +145,7 @@ private:
     const std::string FileName_;
     const bool SyncOnClose_;
     const bool UseDirectIO_;
+    const i64 DirectIOBlockSize_;
 
     using EState = EFileWriterState;
     std::atomic<EState> State_ = EFileWriterState::Created;
@@ -154,6 +159,9 @@ private:
 
     TIOEngineHandlePtr DataFile_;
 
+    //! Last partial direct IO block of the data file; prepended to (and rewritten by) the next write.
+    TSharedRef TailBuffer_;
+
     const NChunkClient::TRefCountedChunkMetaPtr ChunkMeta_ = New<NChunkClient::TRefCountedChunkMeta>();
     NChunkClient::NProto::TChunkInfo ChunkInfo_;
     NChunkClient::NProto::TBlocksExt BlocksExt_;
@@ -162,6 +170,7 @@ private:
 
     void SetFailed(const TError& error);
     TError TryChangeState(EState oldState, EState newState);
+    bool ShouldUseDirectIOForWrites() const;
     TFlags<EOpenModeFlag> GetFileMode() const;
 };
 

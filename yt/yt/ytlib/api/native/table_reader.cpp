@@ -1,6 +1,7 @@
 #include "table_reader.h"
 
 #include "client.h"
+#include "helpers.h"
 
 #include <yt/yt/ytlib/table_client/table_read_spec.h>
 
@@ -181,8 +182,6 @@ private:
 
         auto readSessionId = TReadSessionId::Create();
         auto fetchTableReadSpecOptions = TFetchSingleTableReadSpecOptions{
-            .RichPath = RichPath_,
-            .Client = Client_,
             .TransactionId = Options_.TransactionId,
             .ReadSessionId = readSessionId,
             .GetUserObjectBasicAttributesOptions = TGetUserObjectBasicAttributesOptions{
@@ -198,13 +197,14 @@ private:
             .ChunkAvailabilityPolicy = tableReaderConfig->ChunkAvailabilityPolicy,
         };
 
-        TClientChunkReadOptions chunkReadOptions;
-        chunkReadOptions.MemoryUsageTracker = MemoryUsageTracker_;
-        chunkReadOptions.WorkloadDescriptor = tableReaderConfig->WorkloadDescriptor;
-        chunkReadOptions.WorkloadDescriptor.Annotations.push_back(Format("TablePath: %v", RichPath_.GetPath()));
-        chunkReadOptions.ReadSessionId = readSessionId;
+        auto chunkReadOptions = MakeChunkReadOptions(
+            readSessionId,
+            MemoryUsageTracker_,
+            tableReaderConfig,
+            RichPath_.GetPath());
 
-        auto tableReadSpec = FetchSingleTableReadSpec(fetchTableReadSpecOptions);
+        NChunkClient::TUserObject userObject(RichPath_);
+        auto tableReadSpec = FetchSingleTableReadSpec(&userObject, Client_, fetchTableReadSpecOptions);
         YT_VERIFY(tableReadSpec.DataSourceDirectory->DataSources().size() == 1);
         const auto& dataSource = tableReadSpec.DataSourceDirectory->DataSources().front();
         TableSchema_ = dataSource->Schema();

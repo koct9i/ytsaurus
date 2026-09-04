@@ -118,9 +118,10 @@ class ExasolParser(parser.Parser):
 
     FUNCTION_PARSERS = {
         **parser.Parser.FUNCTION_PARSERS,
-        # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/listagg.htm
         # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/group_concat.htm
-        **dict.fromkeys(("GROUP_CONCAT", "LISTAGG"), lambda self: self._parse_group_concat()),
+        "GROUP_CONCAT": lambda self: self._parse_group_concat(),
+        # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/listagg.htm
+        "LISTAGG": lambda self: self._parse_string_agg(),
         # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/json_value.htm
         "JSON_VALUE": lambda self: self._parse_json_value(),
         # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/json_extract.htm
@@ -152,7 +153,7 @@ class ExasolParser(parser.Parser):
 
         expression = exp.JSONExtract(expressions=args)
 
-        if self._match_texts("EMITS"):
+        if self._match_text_seq("EMITS"):
             expression.set("emits", self._parse_schema())
 
         return expression

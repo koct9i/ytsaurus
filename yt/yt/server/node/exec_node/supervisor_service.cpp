@@ -153,8 +153,8 @@ private:
         auto validateJobPhase = [] (EJobPhase jobPhase) {
             if (jobPhase != EJobPhase::SpawningJobProxy) {
                 THROW_ERROR_EXCEPTION("Cannot fetch job spec; job is in wrong phase")
-                    << TErrorAttribute("expected_phase", EJobPhase::SpawningJobProxy)
-                    << TErrorAttribute("actual_phase", jobPhase);
+                    .With("expected_phase", EJobPhase::SpawningJobProxy)
+                    .With("actual_phase", jobPhase);
             }
         };
 
@@ -365,12 +365,12 @@ private:
         auto job = jobController->GetJobOrThrow(jobId);
 
         if (job->GetPhase() >= EJobPhase::FinalizingJobProxy) {
-            YT_LOG_DEBUG("Job is already not running, skipping progress (JobPhase: %v)", job->GetPhase());
+            YT_TLOG_DEBUG("Job is already not running, skipping progress")
+                .With("JobPhase", job->GetPhase());
         } else if (!job->UpdateJobProxyHearbeatEpoch(request->epoch())) {
-            YT_LOG_DEBUG(
-                "Received message with outdated epoch, skipping progress (ReceivedEpoch: %v, StoredEpoch: %v)",
-                request->epoch(),
-                job->GetJobProxyHeartbeatEpoch());
+            YT_TLOG_DEBUG("Received message with outdated epoch, skipping progress")
+                .With("ReceivedEpoch", request->epoch())
+                .With("StoredEpoch", job->GetJobProxyHeartbeatEpoch());
         } else {
             job->SetProgress(progress);
             job->SetStatistics(statistics);

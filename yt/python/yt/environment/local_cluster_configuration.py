@@ -14,7 +14,6 @@ MASTER_CONFIG_PATCHES = [
         "object_manager": None,
         # These option is required to decrease timeout for table mounting on local mode startup.
         "hive_manager": {
-            "use_new": True,
             "ping_period": 1000,
             "idle_post_period": 1000,
         },
@@ -402,6 +401,13 @@ def modify_cluster_configuration(yt_config, cluster_configuration):
     for config in cluster_configuration["master_cache"]:
         if yt_config.delta_master_cache_config:
             update_inplace(config, yt_config.delta_master_cache_config)
+
+        if not yt_config.enable_multidaemon:
+            _update_address_resolver(config)
+
+    for config in cluster_configuration["chaos_cache"]:
+        if yt_config.delta_chaos_cache_config:
+            update_inplace(config, yt_config.delta_chaos_cache_config)
 
         if not yt_config.enable_multidaemon:
             _update_address_resolver(config)

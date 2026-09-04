@@ -45,9 +45,6 @@ const std::string FinishedQueriesByUserAndStartTimeTable = "finished_queries_by_
 const std::string SearchIndexTable = "search_inverted_index";
 const std::string SearchMetaTable = "search_meta";
 
-// Path to access control object namespace for QT.
-const TYPath QueriesAcoNamespacePath = "//sys/access_control_object_namespaces/queries";
-
 // Rows in SearchTable and SearchMetaTable are duplicated:
 // one with the actual engine value, and one with NoEngineFilterString in the 'engine' column.
 // This allows efficient searching both with and without an engine filter.
@@ -78,7 +75,7 @@ struct TQueryIndexSearchOptions
 {
     std::string User;
     std::vector<std::string> AcosForUser;
-    ui64 Timestamp;
+    TTimestamp Timestamp;
     bool IsSuperuser;
     TAttributeFilter Attributes;
 };
@@ -285,20 +282,18 @@ protected:
         auto userSubjects = GetUserSubjects(user, StateClient_);
         userSubjects.insert(user);
 
-        YT_LOG_DEBUG(
-            "Fetched user subjects (User: %v, Subjects: %v)",
-            user,
-            MakeShrunkFormattableView(userSubjects, TDefaultFormatter(), ShrunkFormattableViewLimit));
+        YT_TLOG_DEBUG("Fetched user subjects")
+            .With("User", user)
+            .With("Subjects", MakeShrunkFormattableView(userSubjects, TDefaultFormatter(), ShrunkFormattableViewLimit));
 
         bool isSuperuser = userSubjects.contains(SuperusersGroupName);
         std::vector<std::string> acosForUser;
 
         if (!isSuperuser) {
             acosForUser = GetAcosForSubjects(userSubjects, /*filterEveryoneShareAco*/ true);
-            YT_LOG_DEBUG(
-                "Fetched suitable access control objects for user (User: %v, Acos: %v)",
-                user,
-                MakeShrunkFormattableView(acosForUser, TDefaultFormatter(), ShrunkFormattableViewLimit));
+            YT_TLOG_DEBUG("Fetched suitable access control objects for user")
+                .With("User", user)
+                .With("Acos", MakeShrunkFormattableView(acosForUser, TDefaultFormatter(), ShrunkFormattableViewLimit));
         }
 
         return TQueryIndexSearchOptions{
@@ -337,7 +332,8 @@ protected:
         builder.SetSource(StateRoot_ + "/finished_queries");
         auto query = builder.Build();
         callbacks.push_back(BIND([query, selectOptions, this]() {
-            YT_LOG_DEBUG("Selecting admitted queries (Query: %v)", query);
+            YT_TLOG_DEBUG("Selecting admitted queries")
+                .With("Query", query);
             auto selectResult = WaitFor(StateClient_->SelectRows(query, selectOptions))
                 .ValueOrThrow();
             auto records = ToRecords<TFinishedQueryPartial>(selectResult.Rowset);
@@ -347,7 +343,8 @@ protected:
         builder.SetSource(StateRoot_ + "/active_queries");
         query = builder.Build();
         callbacks.push_back(BIND([query, selectOptions, this]() {
-            YT_LOG_DEBUG("Selecting admitted queries (Query: %v)", query);
+            YT_TLOG_DEBUG("Selecting admitted queries")
+                .With("Query", query);
             auto selectResult = WaitFor(StateClient_->SelectRows(query, selectOptions))
                 .ValueOrThrow();
             auto records = ToRecords<TActiveQueryPartial>(selectResult.Rowset);
@@ -393,7 +390,7 @@ private:
             THROW_ERROR_EXCEPTION(
                 "Error while fetching all access control objects in the namespace \"queries\"; "
                 "please make sure that the namespace exists")
-                << allAcosOrError;
+                .With(allAcosOrError);
         }
 
         auto allAcos = ConvertToNode(allAcosOrError.Value())->AsList()->GetChildren();
@@ -462,7 +459,8 @@ public:
 
         // TimeBasedIndex contains only finished queries.
         if (!IsFinishedState(query.State.value())) {
-            YT_LOG_DEBUG("Active query passed to the time-based index will not be stored (QueryId: %v)", query.Id);
+            YT_TLOG_DEBUG("Active query passed to the time-based index will not be stored")
+                .With("QueryId", query.Id);
             return;
         }
         auto rowBuffer = New<TRowBuffer>();
@@ -538,7 +536,8 @@ public:
 
         // TimeBasedIndex contains only finished queries.
         if (!IsFinishedState(query.State.value())) {
-            YT_LOG_DEBUG("Active query passed to the time-based index will not be deleted (QueryId: %v)", query.Id);
+            YT_TLOG_DEBUG("Active query passed to the time-based index will not be deleted")
+                .With("QueryId", query.Id);
             return;
         }
         auto rowBuffer = New<TRowBuffer>();
@@ -554,7 +553,7 @@ public:
             TFinishedQueryByStartTimeKey removeKey{
                 .IsTutorial = isTutorial,
                 .MinusStartTime = -TMinusTimestamp(query.StartTime->MicroSeconds()),
-                .QueryId = query.Id
+                .QueryId = query.Id,
             };
             auto keys = FromRecordKeys(TRange(std::array{removeKey}));
 
@@ -570,7 +569,7 @@ public:
                 .IsTutorial = isTutorial,
                 .User = query.User.value(),
                 .MinusStartTime = -TMinusTimestamp(query.StartTime->MicroSeconds()),
-                .QueryId = query.Id
+                .QueryId = query.Id,
             };
             auto keys = FromRecordKeys(TRange(std::array{removeKey}));
 
@@ -590,7 +589,7 @@ public:
                         .IsTutorial = isTutorial,
                         .AccessControlObject = aco,
                         .MinusStartTime = -TMinusTimestamp(query.StartTime->MicroSeconds()),
-                        .QueryId = query.Id
+                        .QueryId = query.Id,
                     };
                     keys.push_back(removeKey);
                 }
@@ -608,7 +607,8 @@ public:
 
         // TimeBasedIndex contains only finished queries.
         if (!IsFinishedState(query.State.value())) {
-            YT_LOG_DEBUG("Active query passed to the time-based index will not be updated (QueryId: %v)", query.Id);
+            YT_TLOG_DEBUG("Active query passed to the time-based index will not be updated")
+                .With("QueryId", query.Id);
             return;
         }
 
@@ -862,12 +862,14 @@ private:
         options.Timestamp = timestamp;
         options.PlaceholderValues = placeholderValues;
         auto query = builder.Build();
-        YT_LOG_DEBUG("Selecting finished queries by start time (Query: %v, Table: %v)", query, tableName);
+        YT_TLOG_DEBUG("Selecting finished queries by start time")
+            .With("Query", query)
+            .With("Table", tableName);
         auto selectResult = WaitFor(StateClient_->SelectRows(query, options))
             .ValueOrThrow();
 
         for (const auto& record : ToRecords<TRecord>(selectResult.Rowset)) {
-            results.push_back({-record.Key.MinusStartTime, record.Key.QueryId});
+            results.push_back({NTransactionClient::TTimestamp(-record.Key.MinusStartTime), record.Key.QueryId});
         }
     }
 
@@ -891,24 +893,24 @@ private:
             selectOptions.Timestamp = indexSearchOptions.Timestamp;
             selectOptions.PlaceholderValues = placeholderValues;
             auto query = builder.Build();
-            YT_LOG_DEBUG("Selecting active queries (Query: %v)", query);
+            YT_TLOG_DEBUG("Selecting active queries")
+                .With("Query", query);
             auto selectResult = WaitFor(StateClient_->SelectRows(query, selectOptions))
                 .ValueOrThrow();
             auto records = ToRecords<TActiveQueryPartial>(selectResult.Rowset);
             return PartialRecordsToQueries(records);
         } catch (const std::exception& ex) {
             THROW_ERROR_EXCEPTION("Error while selecting active queries")
-                << ex;
+                .With(ex);
         }
     }
 
     std::vector<TQuery> SelectFinishedQueries(const TListQueriesOptions& options, const TQueryIndexSearchOptions& indexSearchOptions, bool* incomplete)
     {
         if (options.SubstrFilter) {
-            YT_LOG_DEBUG(
-                "Starting search for the exact occurrence of a substring in finished_queries; this can work slowly (SubstringFilter: %v, UseFullTextSearch: %v)",
-                options.SubstrFilter,
-                options.UseFullTextSearch);
+            YT_TLOG_DEBUG("Starting search for the exact occurrence of a substring in finished_queries; this can work slowly")
+                .With("SubstringFilter", options.SubstrFilter)
+                .With("UseFullTextSearch", options.UseFullTextSearch);
         }
         try {
             std::vector<TQueryId> admittedQueryIds;
@@ -970,7 +972,7 @@ private:
             return FetchQueriesByIds(admittedQueryIds, options, indexSearchOptions);
         } catch (const std::exception& ex) {
             THROW_ERROR_EXCEPTION("Error while selecting finished queries")
-                << ex;
+                .With(ex);
         }
     }
 };
@@ -1065,11 +1067,9 @@ public:
         try {
             bool incomplete = false;
             auto [tokens, accessScopes] = GetTokensAndAccessScopesForSearch(options, indexSearchOptions);
-            YT_LOG_DEBUG(
-                "Search request parsed (Tokens: %v, AccessScopes: %v)",
-                MakeShrunkFormattableView(tokens, TDefaultFormatter(), ShrunkFormattableViewLimit),
-                MakeShrunkFormattableView(accessScopes, TDefaultFormatter(), ShrunkFormattableViewLimit)
-            );
+            YT_TLOG_DEBUG("Search request parsed")
+                .With("Tokens", MakeShrunkFormattableView(tokens, TDefaultFormatter(), ShrunkFormattableViewLimit))
+                .With("AccessScopes", MakeShrunkFormattableView(accessScopes, TDefaultFormatter(), ShrunkFormattableViewLimit));
 
             auto rarestKeys = GetRarestKeys(options, indexSearchOptions, tokens, accessScopes);
             auto selectedIndexRecords = SelectAndSortRecordsFromInvertedIndex(rarestKeys, options, indexSearchOptions);
@@ -1093,7 +1093,7 @@ public:
             };
         } catch (const std::exception& ex) {
             THROW_ERROR_EXCEPTION("Error while selecting queries using token-based index")
-                << ex;
+                .With(ex);
         }
     }
 
@@ -1514,7 +1514,9 @@ private:
         selectOptions.Timestamp = indexSearchOptions.Timestamp;
         selectOptions.PlaceholderValues = placeholderValuesMap.EndMap();
 
-        YT_LOG_DEBUG("Selecting top rarest tokens from meta table (Query: %v, User: %v)", query, indexSearchOptions.User);
+        YT_TLOG_DEBUG("Selecting top rarest tokens from meta table")
+            .With("Query", query)
+            .With("User", indexSearchOptions.User);
 
         auto selectResult = WaitFor(StateClient_->SelectRows(query, selectOptions))
             .ValueOrThrow();
@@ -1582,7 +1584,11 @@ private:
         builder.SetLimit(options.Limit + 1);
 
         auto query = builder.Build();
-        YT_LOG_DEBUG("Selecting queries with rare token and access_scope (Query: %v, Limit: %v, Token: %v, AccessScope: %v)", options.Limit, query, key.Token, key.AccessScope);
+        YT_TLOG_DEBUG("Selecting queries with rare token and access_scope")
+            .With("Query", query)
+            .With("Limit", options.Limit)
+            .With("Token", key.Token)
+            .With("AccessScope", key.AccessScope);
 
         TSelectRowsOptions selectOptions;
         selectOptions.Timestamp = indexSearchOptions.Timestamp;

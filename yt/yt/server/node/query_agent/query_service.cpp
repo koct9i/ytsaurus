@@ -109,9 +109,9 @@ using namespace NYTree;
 using namespace NYson;
 
 using NChunkClient::NProto::TMiscExt;
-using NYT::ToProto;
-using NYT::FromProto;
 using NQueryClient::TDistributedSessionId;
+using NYT::FromProto;
+using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -140,7 +140,8 @@ T ExecuteRequestWithRetries(
         } catch (const std::exception& ex) {
             auto error = TError(ex);
             if (IsRetriableQueryError(error)) {
-                YT_LOG_INFO(error, "Request failed, retrying");
+                YT_TLOG_INFO("Request failed, retrying")
+                    .With(error);
                 errors.push_back(error);
                 continue;
             } else {
@@ -149,7 +150,7 @@ T ExecuteRequestWithRetries(
         }
     }
     THROW_ERROR_EXCEPTION("Request failed after %v retries", maxRetries)
-        << errors;
+        .With(errors);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -415,8 +416,8 @@ private:
 
         if (request->has_feature_flags()) {
             FromProto(&requestFeatureFlags, request->feature_flags());
-            YT_LOG_DEBUG("Got request feature flags (Flags: %v)",
-                ToString(requestFeatureFlags));
+            YT_TLOG_DEBUG("Got request feature flags")
+                .With("Flags", ToString(requestFeatureFlags));
         }
 
         auto memoryChunkProvider = MemoryProvider_->GetOrCreateProvider(
@@ -428,28 +429,23 @@ private:
 
         auto attachments = std::move(request->Attachments()); // TODO: capture in MemoryTracker_;
 
-        YT_LOG_DEBUG("Query deserialized (FragmentId: %v, InputRowLimit: %v, OutputRowLimit: %v, "
-            "RangeExpansionLimit: %v, MaxSubqueries: %v, EnableCodeCache: %v, WorkloadDescriptor: %v, "
-            "ReadSessionId: %v, MemoryLimitPerNode: %v, "
-            "RowsetProcessingBatchSize: %v, WriteRowsetSize: %v, MaxJoinBatchSize: %v, "
-            "DataRangeCount: %v, RandomTabletId: %v, StatisticsAggregation: %Qv, "
-            "AttachmentCount: %v)",
-            query->Id,
-            queryOptions.InputRowLimit,
-            queryOptions.OutputRowLimit,
-            queryOptions.RangeExpansionLimit,
-            queryOptions.MaxSubqueries,
-            queryOptions.EnableCodeCache,
-            queryOptions.WorkloadDescriptor,
-            queryOptions.ReadSessionId,
-            queryOptions.MemoryLimitPerNode,
-            queryOptions.RowsetProcessingBatchSize,
-            queryOptions.WriteRowsetSize,
-            queryOptions.MaxJoinBatchSize,
-            dataSources.size(),
-            dataSources.begin()->ObjectId,
-            queryOptions.StatisticsAggregation,
-            attachments.size());
+        YT_TLOG_DEBUG("Query deserialized")
+            .With("FragmentId", query->Id)
+            .With("InputRowLimit", queryOptions.InputRowLimit)
+            .With("OutputRowLimit", queryOptions.OutputRowLimit)
+            .With("RangeExpansionLimit", queryOptions.RangeExpansionLimit)
+            .With("MaxSubqueries", queryOptions.MaxSubqueries)
+            .With("EnableCodeCache", queryOptions.EnableCodeCache)
+            .With("WorkloadDescriptor", queryOptions.WorkloadDescriptor)
+            .With("ReadSessionId", queryOptions.ReadSessionId)
+            .With("MemoryLimitPerNode", queryOptions.MemoryLimitPerNode)
+            .With("RowsetProcessingBatchSize", queryOptions.RowsetProcessingBatchSize)
+            .With("WriteRowsetSize", queryOptions.WriteRowsetSize)
+            .With("MaxJoinBatchSize", queryOptions.MaxJoinBatchSize)
+            .With("DataRangeCount", dataSources.size())
+            .With("RandomTabletId", dataSources.begin()->ObjectId)
+            .With("StatisticsAggregation", queryOptions.StatisticsAggregation)
+            .With("AttachmentCount", attachments.size());
 
         if (RejectUponThrottlerOverdraft_.load(std::memory_order::relaxed)) {
             TClientChunkReadOptions chunkReadOptions{
@@ -503,8 +499,8 @@ private:
                     memoryChunkProvider->GetMaxAllocated(),
                     queryOptions.StatisticsAggregation);
 
-                YT_LOG_DEBUG("Query evaluation finished (TotalMemoryUsage: %v)",
-                    statistics.MemoryUsage.GetTotal());
+                YT_TLOG_DEBUG("Query evaluation finished")
+                    .With("TotalMemoryUsage", statistics.MemoryUsage.GetTotal());
 
                 auto responseFeatureFlags = MostFreshFeatureFlags();
                 ToProto(response->mutable_feature_flags(), responseFeatureFlags);
@@ -618,7 +614,7 @@ private:
                 servantNotActiveErrors[0].ThrowOnError();
             } else {
                 THROW_ERROR_EXCEPTION("Some tablet servants are not active")
-                    << servantNotActiveErrors;
+                    .With(servantNotActiveErrors);
             }
         }
 
@@ -689,7 +685,7 @@ private:
         auto startReplicationRowIndex = request->has_start_replication_row_index()
             ? std::make_optional(request->start_replication_row_index())
             : std::nullopt;
-        auto upperTimestamp = request->upper_timestamp();
+        auto upperTimestamp = FromProto<NTransactionClient::TTimestamp>(request->upper_timestamp());
         auto maxDataWeight = request->has_max_data_weight()
             ? request->max_data_weight()
             : std::numeric_limits<i64>::max();
@@ -763,9 +759,9 @@ private:
                     upperTimestamp = NullTimestamp;
                 }
 
-                YT_LOG_DEBUG("Trying to get replication log batch for pull rows (ReplicationProgress: %v, UpperTimestamp: %v)",
-                    static_cast<NChaosClient::TReplicationProgress>(*replicationProgress),
-                    upperTimestamp);
+                YT_TLOG_DEBUG("Trying to get replication log batch for pull rows")
+                    .With("ReplicationProgress", static_cast<NChaosClient::TReplicationProgress>(*replicationProgress))
+                    .With("UpperTimestamp", upperTimestamp);
 
                 auto* serviceCounters = tabletSnapshot->TableProfiler->GetQueryServiceCounters(currentProfilingUser);
                 profilerGuard.Start(serviceCounters->PullRows);
@@ -792,9 +788,17 @@ private:
                 auto trimmedRowCount = tabletSnapshot->TabletRuntimeData->TrimmedRowCount.load();
                 auto totalRowCount = tabletSnapshot->TabletRuntimeData->TotalRowCount.load();
 
-                YT_LOG_DEBUG("Reading replication log (TrimmedRowCount: %v, TotalRowCount: %v)",
-                    trimmedRowCount,
-                    totalRowCount);
+                YT_TLOG_DEBUG("Reading replication log")
+                    .With("TrimmedRowCount", trimmedRowCount)
+                    .With("TotalRowCount", totalRowCount);
+
+                if (startReplicationRowIndex && *startReplicationRowIndex < trimmedRowCount) {
+                    YT_TLOG_DEBUG("Start row index is outdated, ignoring")
+                        .With("TrimmedRowCount", trimmedRowCount)
+                        .With("StartReplicationRowIndex", *startReplicationRowIndex);
+
+                    startReplicationRowIndex = std::nullopt;
+                }
 
                 auto startRowIndex = logParser->ComputeStartRowIndex(
                     tabletSnapshot,
@@ -829,11 +833,11 @@ private:
                 }
 
                 auto replicationProgressMinTimestamp = GetReplicationProgressMinTimestamp(*replicationProgress);
-                YT_LOG_DEBUG("Read replication batch (LastTimestamp: %v, ReadAllRows: %v, UpperTimestamp: %v, ProgressMinTimestamp: %v)",
-                    result.MaxTimestamp,
-                    result.ReadAllRows,
-                    upperTimestamp,
-                    replicationProgressMinTimestamp);
+                YT_TLOG_DEBUG("Read replication batch")
+                    .With("LastTimestamp", result.MaxTimestamp)
+                    .With("ReadAllRows", result.ReadAllRows)
+                    .With("UpperTimestamp", upperTimestamp)
+                    .With("ProgressMinTimestamp", replicationProgressMinTimestamp);
 
                 if (result.ReadAllRows) {
                     if (upperTimestamp) {
@@ -901,11 +905,11 @@ private:
             auto* protoTabletInfo = response->add_tablets();
             ToProto(protoTabletInfo->mutable_tablet_id(), tabletId);
             // NB: Read barrier timestamp first to ensure a certain degree of consistency with TotalRowCount.
-            protoTabletInfo->set_barrier_timestamp(tabletSnapshot->TabletCellRuntimeData->BarrierTimestamp.load());
+            protoTabletInfo->set_barrier_timestamp(ToProto(tabletSnapshot->TabletCellRuntimeData->BarrierTimestamp.load()));
             protoTabletInfo->set_total_row_count(tabletSnapshot->TabletRuntimeData->TotalRowCount.load());
             protoTabletInfo->set_trimmed_row_count(tabletSnapshot->TabletRuntimeData->TrimmedRowCount.load());
             protoTabletInfo->set_delayed_lockless_row_count(tabletSnapshot->TabletRuntimeData->DelayedLocklessRowCount.load());
-            protoTabletInfo->set_last_write_timestamp(tabletSnapshot->TabletRuntimeData->LastWriteTimestamp.load());
+            protoTabletInfo->set_last_write_timestamp(ToProto(tabletSnapshot->TabletRuntimeData->LastWriteTimestamp.load()));
 
             if (request->request_errors()) {
                 tabletSnapshot->TabletRuntimeData->Errors.ForEachError([&] (const TError& error) {
@@ -926,7 +930,7 @@ private:
 
                 auto* protoReplicaInfo = protoTabletInfo->add_replicas();
                 ToProto(protoReplicaInfo->mutable_replica_id(), replicaId);
-                protoReplicaInfo->set_last_replication_timestamp(lastReplicationTimestamp);
+                protoReplicaInfo->set_last_replication_timestamp(ToProto(lastReplicationTimestamp));
                 protoReplicaInfo->set_mode(ToProto(replicaSnapshot->RuntimeData->Mode.load()));
                 protoReplicaInfo->set_current_replication_row_index(replicaSnapshot->RuntimeData->CurrentReplicationRowIndex.load());
                 protoReplicaInfo->set_committed_replication_row_index(replicaSnapshot->RuntimeData->CommittedReplicationRowIndex.load());
@@ -951,7 +955,7 @@ private:
         auto tabletId = FromProto<TTabletId>(request->tablet_id());
         auto cellId = FromProto<TCellId>(request->cell_id());
         auto readSessionId = FromProto<TReadSessionId>(request->read_session_id());
-        auto timestamp = request->timestamp();
+        auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
 
         context->SetRequestInfo("StoreId: %v, TabletId: %v, CellId: %v, ReadSessionId: %v, Timestamp: %v",
             storeId,
@@ -970,12 +974,11 @@ private:
         }
 
         if (tabletSnapshot->IsPreallocatedDynamicStoreId(storeId)) {
-            YT_LOG_DEBUG("Dynamic store is not created yet, sending nothing (TabletId: %v, StoreId: %v, "
-                "ReadSessionId: %v, RequestId: %v)",
-                tabletId,
-                storeId,
-                readSessionId,
-                context->GetRequestId());
+            YT_TLOG_DEBUG("Dynamic store is not created yet, sending nothing")
+                .With("TabletId", tabletId)
+                .With("StoreId", storeId)
+                .With("ReadSessionId", readSessionId)
+                .With("RequestId", context->GetRequestId());
             HandleInputStreamingRequest(
                 context,
                 [] { return TSharedRef(); });
@@ -1028,17 +1031,15 @@ private:
                     : MaxRowsPerRemoteDynamicStoreRead
             };
 
-            YT_LOG_DEBUG("Started serving remote dynamic store read request "
-                "(TabletId: %v, StoreId: %v, Timestamp: %v, ReadSessionId: %v, "
-                "LowerBound: %v, UpperBound: %v, ColumnFilter: %v, RequestId: %v)",
-                tabletId,
-                storeId,
-                timestamp,
-                readSessionId,
-                lowerBound,
-                upperBound,
-                columnFilter,
-                context->GetRequestId());
+            YT_TLOG_DEBUG("Started serving remote dynamic store read request")
+                .With("TabletId", tabletId)
+                .With("StoreId", storeId)
+                .With("Timestamp", timestamp)
+                .With("ReadSessionId", readSessionId)
+                .With("LowerBound", lowerBound)
+                .With("UpperBound", upperBound)
+                .With("ColumnFilter", columnFilter)
+                .With("RequestId", context->GetRequestId());
 
             HandleInputStreamingRequest(context, [&] {
                 TFiberWallTimer timer;
@@ -1097,16 +1098,14 @@ private:
                 /*chunkReadOptions*/ {},
                 /*workloadCategory*/ {});
 
-            YT_LOG_DEBUG("Started serving remote dynamic store read request "
-                "(TabletId: %v, StoreId: %v, ReadSessionId: %v, "
-                "StartRowIndex: %v, EndRowIndex: %v, ColumnFilter: %v, RequestId: %v)",
-                tabletId,
-                storeId,
-                readSessionId,
-                startRowIndex,
-                endRowIndex,
-                columnFilter,
-                context->GetRequestId());
+            YT_TLOG_DEBUG("Started serving remote dynamic store read request")
+                .With("TabletId", tabletId)
+                .With("StoreId", storeId)
+                .With("ReadSessionId", readSessionId)
+                .With("StartRowIndex", startRowIndex)
+                .With("EndRowIndex", endRowIndex)
+                .With("ColumnFilter", columnFilter)
+                .With("RequestId", context->GetRequestId());
 
             bool sendOffset = true;
 
@@ -1229,7 +1228,7 @@ private:
         }
 
         if (auto overrideTimestamp = chunk->GetOverrideTimestamp()) {
-            chunkSpec->set_override_timestamp(overrideTimestamp);
+            chunkSpec->set_override_timestamp(ToProto(overrideTimestamp));
         }
     }
 
@@ -1498,8 +1497,8 @@ private:
             } catch (const std::exception& ex) {
                 THROW_ERROR_EXCEPTION("Error fetching tablet %v stores",
                     tabletId)
-                    << TErrorAttribute("tablet_id", tabletId)
-                    << ex;
+                    .With("tablet_id", tabletId)
+                    .With(ex);
             }
         }
 
@@ -1557,17 +1556,15 @@ private:
             request->max_data_weight());
 
         auto trimmedRowCount = tabletSnapshot->TabletRuntimeData->TrimmedRowCount.load();
-        YT_LOG_DEBUG(
-            "Loading current trimmed row count from tablet runtime data (TabletId: %v, TrimmedRowCount: %v)",
-            tabletId,
-            trimmedRowCount);
+        YT_TLOG_DEBUG("Loading current trimmed row count from tablet runtime data")
+            .With("TabletId", tabletId)
+            .With("TrimmedRowCount", trimmedRowCount);
 
         auto rowIndex = request->row_index();
         if (trimmedRowCount > rowIndex) {
-            YT_LOG_DEBUG(
-                "Some of the desired rows are trimmed; reading from first untrimmed row (RowIndex: %v, TrimmedRowCount: %v)",
-                rowIndex,
-                trimmedRowCount);
+            YT_TLOG_DEBUG("Some of the desired rows are trimmed; reading from first untrimmed row")
+                .With("RowIndex", rowIndex)
+                .With("TrimmedRowCount", trimmedRowCount);
             rowIndex = trimmedRowCount;
         }
 
@@ -1575,11 +1572,10 @@ private:
 
         IOrderedStorePtr desiredStore;
 
-        YT_LOG_DEBUG(
-            "Searching for appropriate ordered store to fetch rows from (TabletId: %v, StoreCount: %v, RowIndex: %v)",
-            tabletId,
-            orderedStores.size(),
-            rowIndex);
+        YT_TLOG_DEBUG("Searching for appropriate ordered store to fetch rows from")
+            .With("TabletId", tabletId)
+            .With("StoreCount", orderedStores.size())
+            .With("RowIndex", rowIndex);
 
         TServiceProfilerGuard profilerGuard;
 
@@ -1616,10 +1612,10 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG("Found store to read from (StoreId: %v, StartingRowIndex: %v, RowCount: %v)",
-            desiredStore->GetId(),
-            desiredStore->GetStartingRowIndex(),
-            desiredStore->GetRowCount());
+        YT_TLOG_DEBUG("Found store to read from")
+            .With("StoreId", desiredStore->GetId())
+            .With("StartingRowIndex", desiredStore->GetStartingRowIndex())
+            .With("RowCount", desiredStore->GetRowCount());
 
         TClientChunkReadOptions chunkReadOptions;
         if (request->options().has_workload_descriptor()) {
@@ -1693,7 +1689,7 @@ private:
                 FromProto<TTabletId>(subrequest.tablet_id()),
                 FromProto<TCellId>(subrequest.cell_id()),
                 YT_OPTIONAL_FROM_PROTO(subrequest, mount_revision, NHydra::TRevision),
-                subrequest.timestamp())
+                FromProto<NTransactionClient::TTimestamp>(subrequest.timestamp()))
                 .AsyncVia(GetCurrentInvoker())
                 .Run());
         }
@@ -1739,10 +1735,10 @@ private:
 
         // In practice, this should rarely happen, since there is almost always at least one active store.
         if (orderedStores.empty()) {
-            YT_LOG_DEBUG("Ordered stores are empty (TabletId: %v, Timestamp: %v, SafeToTrimRowCount: %v)",
-                tabletId,
-                timestamp,
-                tabletSnapshot->TotalRowCount);
+            YT_TLOG_DEBUG("Ordered stores are empty")
+                .With("TabletId", tabletId)
+                .With("Timestamp", timestamp)
+                .With("SafeToTrimRowCount", tabletSnapshot->TotalRowCount);
 
             return tabletSnapshot->TotalRowCount;
         }
@@ -1815,25 +1811,22 @@ private:
             const auto& lastStore = storeSnapshots.back();
             i64 rowCount = lastStore.FinishRowIndex;
 
-            YT_LOG_DEBUG(
-                "Using the last store (TabletId: %v, Timestamp: %v, RequestedTimestamp: %v, SafeToTrimRowCount: %v)",
-                tabletId,
-                timestamp,
-                requestedTimestamp,
-                rowCount);
+            YT_TLOG_DEBUG("Using the last store")
+                .With("TabletId", tabletId)
+                .With("Timestamp", timestamp)
+                .With("RequestedTimestamp", requestedTimestamp)
+                .With("SafeToTrimRowCount", rowCount);
 
             return rowCount;
         } else {
             i64 rowCount = desiredStoreIt->StartRowIndex;
 
-            YT_LOG_DEBUG(
-                "Store found "
-                "(TabletId: %v, StoreId: %v, Timestamp: %v, RequestedTimestamp: %v, SafeToTrimRowCount: %v)",
-                tabletId,
-                desiredStoreIt->Id,
-                timestamp,
-                requestedTimestamp,
-                rowCount);
+            YT_TLOG_DEBUG("Store found")
+                .With("TabletId", tabletId)
+                .With("StoreId", desiredStoreIt->Id)
+                .With("Timestamp", timestamp)
+                .With("RequestedTimestamp", requestedTimestamp)
+                .With("SafeToTrimRowCount", rowCount);
 
             return rowCount;
         }
@@ -1911,7 +1904,8 @@ private:
             sessionId);
 
         if (DistributedSessionManager_->CloseDistributedSession(sessionId)) {
-            YT_LOG_DEBUG("Distributed query session closed remotely (SessionId: %v)", sessionId);
+            YT_TLOG_DEBUG("Distributed query session closed remotely")
+                .With("SessionId", sessionId);
         }
 
         context->Reply();

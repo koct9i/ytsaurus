@@ -72,6 +72,10 @@ class MonitoringExpr(Taggable):
     def binary_op(cls, op, lhs, rhs):
         return MonitoringExpr(cls.NodeType.BinaryOp, op, lhs, rhs)
 
+    @classmethod
+    def constant_line(cls, value):
+        return cls.func("constant_line", value)
+
     def alias(self, param):
         return self.func("alias", self, f'"{param}"')
 
@@ -86,6 +90,15 @@ class MonitoringExpr(Taggable):
 
     def drop_below(self, value):
         return self.func("drop_below", self, value)
+
+    def drop_above(self, value):
+        return self.func("drop_above", self, value)
+
+    def drop_label(self, label):
+        return self.func("drop_label", self, f'"{label}"')
+
+    def drop_labels(self, *labels):
+        return self.func("drop_labels", self, [f'"{label}"' for label in labels])
 
     def group_by_labels(self, label, expr):
         return self.func("group_by_labels", self, f'"{label}"', expr)
@@ -130,6 +143,12 @@ class MonitoringExpr(Taggable):
 
     def diff(self):
         return self.func("diff", self)
+
+    def derivative(self):
+        return self.func("derivative", self)
+
+    def sign(self):
+        return self.func("sign", self)
 
     def downsampling_aggregation(self, value):
         return self.value(MonitoringSystemFields.DownsamplingAggregation, value)

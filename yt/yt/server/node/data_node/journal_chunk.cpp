@@ -7,6 +7,7 @@
 #include "session.h"
 
 #include <yt/yt/server/node/cluster_node/config.h>
+#include <yt/yt/server/node/cluster_node/dynamic_config_manager.h>
 
 #include <yt/yt/server/lib/hydra/changelog.h>
 #include <yt/yt/server/lib/hydra/file_changelog.h>
@@ -182,12 +183,16 @@ TFuture<std::vector<TBlock>> TJournalChunk::OnBlockRangeReadFromDisk(
         std::ssize(alreadyReadBlocks) + blockCount == std::ssize(blockCookies));
 
     if (!blocksOrError.IsOK()) {
-        auto error = TError("Error occured while reading block range %v:%v of journal chunk %v",
+        auto error = TError("Error occured while reading %v blocks starting from block %v of journal chunk %v",
+            blockCount,
             firstBlockIndex,
-            firstBlockIndex + blockCount,
             Id_)
-            << blocksOrError;
-        YT_LOG_DEBUG(error);
+            .With(blocksOrError);
+        YT_TLOG_DEBUG("Error reading block range of journal chunk")
+            .With("ChunkId", Id_)
+            .With("FirstBlockIndex", firstBlockIndex)
+            .With("BlockCount", blockCount)
+            .With(blocksOrError);
 
         if (!blockCookies.empty()) {
             // Just try to propagate error to each cookie, even if some had already been set.
@@ -204,15 +209,12 @@ TFuture<std::vector<TBlock>> TJournalChunk::OnBlockRangeReadFromDisk(
     YT_VERIFY(!blocks.empty());
     YT_VERIFY(blocksLeftToRead >= 0);
 
-    YT_LOG_DEBUG("Successfully read block range of journal chunk "
-        "(ChunkId: %v, FirstBlockIndex: %v, BlockCount: %v, NewlyReadBlockCount: %v, "
-        "AlreadyReadBlockCount: %v, CookieCount: %v)",
-        Id_,
-        firstBlockIndex,
-        blockCount,
-        std::ssize(blocks),
-        std::ssize(alreadyReadBlocks),
-        std::ssize(blockCookies));
+    YT_TLOG_DEBUG("Successfully read block range of journal chunk")
+        .With("ChunkId", Id_)
+        .With("Blocks", FormatBlockIndexRange(firstBlockIndex, firstBlockIndex + blockCount - 1))
+        .With("NewlyReadBlockCount", std::ssize(blocks))
+        .With("AlreadyReadBlockCount", std::ssize(alreadyReadBlocks))
+        .With("CookieCount", std::ssize(blockCookies));
 
     if (!blockCookies.empty()) {
         for (int localIndex = 0; localIndex < std::ssize(blocks); ++localIndex) {
@@ -251,11 +253,14 @@ void TJournalChunk::OnBlockReadFromDiskForPrecache(
     YT_VERIFY(precachedBlockInfo.Cookie->IsActive());
 
     if (!blocksOrError.IsOK()) {
+        YT_TLOG_DEBUG("Error reading block of chunk for precache")
+            .With("ChunkId", Id_)
+            .With("BlockIndex", precachedBlockInfo.BlockIndex)
+            .With(blocksOrError);
         auto error = TError("Error occured while reading block %v of chunk %v for precache",
             precachedBlockInfo.BlockIndex,
             Id_)
-            << blocksOrError;
-        YT_LOG_DEBUG(error);
+            .With(blocksOrError);
 
         precachedBlockInfo.Cookie->SetBlock(std::move(error));
         return;
@@ -264,11 +269,10 @@ void TJournalChunk::OnBlockReadFromDiskForPrecache(
     auto blocks = std::move(blocksOrError.Value());
     YT_VERIFY(blocks.size() <= 1);
 
-    YT_LOG_DEBUG("Successfully read block of journal chunk for precache "
-        "(ChunkId: %v, BlockIndex: %v, IsBlockPresent: %v)",
-        Id_,
-        precachedBlockInfo.BlockIndex,
-        !blocks.empty());
+    YT_TLOG_DEBUG("Successfully read block of journal chunk for precache")
+        .With("ChunkId", Id_)
+        .With("BlockIndex", precachedBlockInfo.BlockIndex)
+        .With("IsBlockPresent", !blocks.empty());
 
     if (blocks.empty()) {
         // NB: Block index is out of bounds, just cache sentinel to avoid trying to read it again.
@@ -403,16 +407,14 @@ TFuture<std::vector<TBlock>> TJournalChunk::ReadCompleteBlockSetAndCache(
             .Via(Context_->StorageHeavyInvoker));
     }
 
-    YT_LOG_DEBUG("Started reading block set of journal chunk "
-        "(ChunkId: %v, IsBlockCacheUsed: %v, CachedBlockCount: %v, RequestedBlockCount: %v, BlockRunCount: %v, "
-        "BlockCountToPrecache: %v, AlreadyPrecachedBlockCount: %v)",
-        Id_,
-        !blockCookies.empty(),
-        cachedBlockCount,
-        blockIndexes.size(),
-        futures.size(),
-        precachedBlockInfos.size(),
-        alreadyPrecachedBlockCount);
+    YT_TLOG_DEBUG("Started reading block set of journal chunk")
+        .With("ChunkId", Id_)
+        .With("IsBlockCacheUsed", !blockCookies.empty())
+        .With("CachedBlockCount", cachedBlockCount)
+        .With("RequestedBlockCount", blockIndexes.size())
+        .With("BlockRunCount", futures.size())
+        .With("BlockCountToPrecache", precachedBlockInfos.size())
+        .With("AlreadyPrecachedBlockCount", alreadyPrecachedBlockCount);
 
     return AllSucceeded(std::move(futures))
         .AsUnique()
@@ -465,7 +467,7 @@ TFuture<std::vector<TBlock>> TJournalChunk::ReadBlockRange(
             }
 
             auto wrappedError = TError(NYT::EErrorCode::Canceled, "ReadBlockRange session canceled")
-                << error;
+                .With(error);
             if (auto changelogReadFuture = session->ChangelogReadFuture.Load()) {
                 changelogReadFuture.Cancel(wrappedError);
             }
@@ -494,17 +496,18 @@ void TJournalChunk::DoReadBlockRange(const TReadBlockRangeSessionPtr& session)
         int lastBlockIndex = session->FirstBlockIndex + session->BlockCount - 1; // inclusive
         int blockCount = session->BlockCount;
 
-        YT_LOG_DEBUG("Started reading journal chunk blocks ("
-            "ChunkId: %v, Blocks: %v, LocationId: %v, LocationUuid: %v, LocationIndex: %v)",
-            Id_,
-            FormatBlocks(firstBlockIndex, lastBlockIndex),
-            Location_->GetId(),
-            Location_->GetUuid(),
-            Location_->GetIndex());
+        YT_TLOG_DEBUG("Started reading journal chunk blocks")
+            .With("ChunkId", Id_)
+            .With("Blocks", FormatBlockIndexRange(firstBlockIndex, lastBlockIndex))
+            .With("LocationId", Location_->GetId())
+            .With("LocationUuid", Location_->GetUuid())
+            .With("LocationIndex", Location_->GetIndex());
 
         TWallTimer timer;
 
-        auto maxBytesPerRead = Context_->DataNodeConfig->MaxBytesPerRead;
+        const auto dynamicConfig = Context_->DynamicConfigManager->GetConfig()->DataNode;
+        auto maxBytesPerRead = dynamicConfig->MaxBytesPerRead.value_or(Context_->DataNodeConfig->MaxBytesPerRead);
+        auto maxBlocksPerRead = dynamicConfig->MaxBlocksPerRead.value_or(Context_->DataNodeConfig->MaxBlocksPerRead);
 
         // NB: The actual read request is still bounded by the config limit; the estimate
         // is only used to size the memory reservation, avoiding gross over-reservation
@@ -522,23 +525,21 @@ void TJournalChunk::DoReadBlockRange(const TReadBlockRangeSessionPtr& session)
                 readBytesEstimate);
 
             locationMemoryGuard = Location_->AcquireLocationMemory(
-                /*useLegacyUsedMemory*/ false,
                 std::move(memoryGuard),
                 EIODirection::Read,
                 session->Options.WorkloadDescriptor,
                 readBytesEstimate);
         } else {
             auto memoryGuardOrError = Location_->TryAcquireLocationMemory(
-                /*useLegacyUsedMemory*/ false,
                 EIODirection::Read,
                 session->Options.WorkloadDescriptor,
                 readBytesEstimate);
             if (!memoryGuardOrError.IsOK()) {
                 Location_->ReportThrottledRead();
-                auto error = TError("Read session aborted due to memory pressure");
-                YT_LOG_DEBUG(error);
+                static constexpr auto Message = "Read session aborted due to memory pressure"_sb;
+                YT_TLOG_DEBUG(Message);
 
-                session->Promise.TrySet(std::move(error));
+                session->Promise.TrySet(TError(Message));
                 return;
             }
 
@@ -546,15 +547,14 @@ void TJournalChunk::DoReadBlockRange(const TReadBlockRangeSessionPtr& session)
         }
 
         if (session->Promise.IsSet()) {
-            YT_LOG_DEBUG("Will not start reading journal chunk blocks because the session is already set "
-                "(ChunkId: %v)",
-                Id_);
+            YT_TLOG_DEBUG("Will not start reading journal chunk blocks because the session is already set")
+                .With("ChunkId", Id_);
             return;
         }
 
         auto blocksFuture = changelog->Read(
             firstBlockIndex,
-            std::min(blockCount, Context_->DataNodeConfig->MaxBlocksPerRead),
+            std::min(blockCount, maxBlocksPerRead),
             maxBytesPerRead);
         session->ChangelogReadFuture.Store(blocksFuture.As<void>());
 
@@ -564,7 +564,7 @@ void TJournalChunk::DoReadBlockRange(const TReadBlockRangeSessionPtr& session)
                 NChunkClient::EErrorCode::IOError,
                 "Error reading journal chunk %v",
                 Id_)
-                << blocksOrError;
+                .With(blocksOrError);
             if (!blocksOrError.FindMatching(NHydra::EErrorCode::InvalidChangelogState) &&
                 !blocksOrError.FindMatching(NYT::EErrorCode::Canceled))
             {
@@ -593,17 +593,15 @@ void TJournalChunk::DoReadBlockRange(const TReadBlockRangeSessionPtr& session)
         // TODO(ngc224): propagate proper value in YT-23540
         session->Options.ChunkReaderStatistics->DataIORequests.fetch_add(1, std::memory_order::relaxed);
 
-        YT_LOG_DEBUG("Finished reading journal chunk blocks ("
-            "ChunkId: %v, Blocks: %v, LocationId: %v, LocationUuid: %v, LocationIndex: %v, BlocksReadActually: %v, "
-            "BytesReadActually: %v, Time: %v)",
-            Id_,
-            FormatBlocks(firstBlockIndex, lastBlockIndex),
-            Location_->GetId(),
-            Location_->GetUuid(),
-            Location_->GetIndex(),
-            blocksRead,
-            bytesRead,
-            readTime);
+        YT_TLOG_DEBUG("Finished reading journal chunk blocks")
+            .With("ChunkId", Id_)
+            .With("Blocks", FormatBlockIndexRange(firstBlockIndex, lastBlockIndex))
+            .With("LocationId", Location_->GetId())
+            .With("LocationUuid", Location_->GetUuid())
+            .With("LocationIndex", Location_->GetIndex())
+            .With("BlocksReadActually", blocksRead)
+            .With("BytesReadActually", bytesRead)
+            .With("Time", readTime);
 
         auto& performanceCounters = Location_->GetPerformanceCounters();
         performanceCounters.JournalBlockReadSize.Record(bytesRead);
@@ -659,11 +657,11 @@ TFuture<void> TJournalChunk::PrepareToReadChunkFragments(
 
                 writerGuard.Release();
 
-                YT_LOG_DEBUG("Changelog prepared to read fragments (ChunkId: %v, LocationId: %v, LocationUuid: %v, LocationIndex: %v)",
-                    Id_,
-                    Location_->GetId(),
-                    Location_->GetUuid(),
-                    Location_->GetIndex());
+                YT_TLOG_DEBUG("Changelog prepared to read fragments")
+                    .With("ChunkId", Id_)
+                    .With("LocationId", Location_->GetId())
+                    .With("LocationUuid", Location_->GetUuid())
+                    .With("LocationIndex", Location_->GetIndex());
             }).AsyncVia(Context_->StorageLightInvoker)));
 
     return promise.ToFuture();
@@ -766,8 +764,8 @@ void TJournalChunk::SetSealed()
 {
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
-    YT_LOG_DEBUG("Chunk is marked as sealed (ChunkId: %v)",
-        Id_);
+    YT_TLOG_DEBUG("Chunk is marked as sealed")
+        .With("ChunkId", Id_);
     Sealed_.store(true);
 }
 
@@ -814,11 +812,11 @@ void TJournalChunk::ReleaseReader(TWriterGuard<TReaderWriterSpinLock>& writerGua
 
     writerGuard.Release();
 
-    YT_LOG_DEBUG("Changelog released (ChunkId: %v, LocationId: %v, LocationUuid: %v, LocationIndex: %v)",
-        Id_,
-        Location_->GetId(),
-        Location_->GetUuid(),
-        Location_->GetIndex());
+    YT_TLOG_DEBUG("Changelog released")
+        .With("ChunkId", Id_)
+        .With("LocationId", Location_->GetId())
+        .With("LocationUuid", Location_->GetUuid())
+        .With("LocationIndex", Location_->GetIndex());
 }
 
 ////////////////////////////////////////////////////////////////////////////////

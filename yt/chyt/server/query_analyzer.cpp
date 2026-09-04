@@ -10,11 +10,12 @@
 #include "subquery.h"
 #include "subquery_spec.h"
 #include "storage_distributor.h"
+#include "storage_yt_materialized_view.h"
 #include "table.h"
 #include "read_range_inference.h"
 
+#include <yt/yt/ytlib/chunk_client/data_slice.h>
 #include <yt/yt/ytlib/chunk_client/data_source.h>
-#include <yt/yt/ytlib/chunk_client/legacy_data_slice.h>
 #include <yt/yt/ytlib/chunk_client/input_chunk.h>
 
 #include <yt/yt_proto/yt/client/chunk_client/proto/chunk_meta.pb.h>
@@ -32,7 +33,6 @@
 #include <Analyzer/TableNode.h>
 #include <Analyzer/TableFunctionNode.h>
 #include <Analyzer/ConstantNode.h>
-#include <Analyzer/ColumnNode.h>
 #include <Analyzer/FunctionNode.h>
 #include <Analyzer/Utils.h>
 #include <Analyzer/WindowFunctionsUtils.h>
@@ -391,7 +391,7 @@ JoinKeyLists ParseJoinKeyColumns(const DB::QueryTreeNodePtr& queryNode, const DB
 
 ////////////////////////////////////////////////////////////////////////////////
 
-IStorageDistributorPtr GetStorage(const DB::QueryTreeNodePtr& tableExpression)
+IStorageDistributorPtr GetStorage(const DB::QueryTreeNodePtr& tableExpression, DB::ContextPtr context)
 {
     if (!tableExpression) {
         return nullptr;
@@ -405,6 +405,11 @@ IStorageDistributorPtr GetStorage(const DB::QueryTreeNodePtr& tableExpression)
         storage = tableExpression->as<DB::TableFunctionNode&>().getStorage();
     } else {
         return nullptr;
+    }
+
+    // Reading through a materialized view reads its target table.
+    if (auto materializedView = std::dynamic_pointer_cast<IStorageYtMaterializedView>(storage)) {
+        return materializedView->ResolveTargetDistributor(context);
     }
 
     return std::dynamic_pointer_cast<IStorageDistributor>(storage);
@@ -433,7 +438,7 @@ public:
         if (functionNode->getArguments().getNodes().size() != 2) {
             THROW_ERROR_EXCEPTION("Wrong number of arguments passed to function %v",
                 functionNode->getFunctionName())
-                << TErrorAttribute("number_of_arguments", functionNode->getArguments().getNodes().size());
+                .With("number_of_arguments", functionNode->getArguments().getNodes().size());
         }
 
         auto rhs = functionNode->getArguments().getNodes()[1];
@@ -590,17 +595,17 @@ TSecondaryQuery TSecondaryQueryBuilder::CreateSecondaryQuery(
     bool isCompleteSubquery,
     bool isLastSubquery)
 {
-    auto Logger = this->Logger.WithTag("SubqueryIndex: %v", subqueryIndex);
+    auto Logger = this->Logger.WithTag("SubqueryIndex", subqueryIndex);
 
     i64 totalRowCount = 0;
     i64 totalDataWeight = 0;
     i64 totalChunkCount = 0;
     for (const auto& subquery : threadSubqueries) {
-        YT_LOG_DEBUG("Thread subquery (Cookie: %v, LowerBound: %v, UpperBound: %v, StripeListStatistics: %v)",
-            subquery.Cookie,
-            subquery.Bounds.first,
-            subquery.Bounds.second,
-            subquery.StripeList->GetAggregateStatistics());
+        YT_TLOG_DEBUG("Thread subquery")
+            .With("Cookie", subquery.Cookie)
+            .With("LowerBound", subquery.Bounds.first)
+            .With("UpperBound", subquery.Bounds.second)
+            .With("StripeListStatistics", subquery.StripeList->GetAggregateStatistics());
 
         const auto& stripeListStatistics = subquery.StripeList->GetAggregateStatistics();
         totalRowCount += stripeListStatistics.RowCount;
@@ -608,12 +613,11 @@ TSecondaryQuery TSecondaryQueryBuilder::CreateSecondaryQuery(
         totalChunkCount += stripeListStatistics.ChunkCount;
     }
 
-    YT_LOG_DEBUG(
-        "Creating secondary query (ThreadSubqueryCount: %v, TotalDataWeight: %v, TotalRowCount: %v, TotalChunkCount: %v)",
-        threadSubqueries.size(),
-        totalDataWeight,
-        totalRowCount,
-        totalChunkCount);
+    YT_TLOG_DEBUG("Creating secondary query")
+        .With("ThreadSubqueryCount", threadSubqueries.size())
+        .With("TotalDataWeight", totalDataWeight)
+        .With("TotalRowCount", totalRowCount)
+        .With("TotalChunkCount", totalChunkCount);
 
     DB::Scalars scalars;
     for (int index = 0; index < std::ssize(OperandSpecs_); ++index) {
@@ -634,10 +638,9 @@ TSecondaryQuery TSecondaryQueryBuilder::CreateSecondaryQuery(
         auto protoSpec = NYT::ToProto<NProto::TSubquerySpec>(spec);
         auto encodedSpec = protoSpec.SerializeAsString();
 
-        YT_LOG_DEBUG(
-            "Serializing subquery spec (TableIndex: %v, SpecLength: %v)",
-            index,
-            encodedSpec.size());
+        YT_TLOG_DEBUG("Serializing subquery spec")
+            .With("TableIndex", index)
+            .With("SpecLength", encodedSpec.size());
 
         std::string scalarName = Format("yt_table_%v", index);
         scalars[scalarName] = DB::Block{{
@@ -679,7 +682,8 @@ TSecondaryQuery TSecondaryQueryBuilder::CreateSecondaryQuery(
 
     auto secondaryQueryAst = DB::queryNodeToDistributedSelectQuery(secondaryQuery);
 
-    YT_LOG_DEBUG("Query was created (NewQuery: %v)", *secondaryQueryAst);
+    YT_TLOG_DEBUG("Query was created")
+        .With("NewQuery", *secondaryQueryAst);
 
     return {
         .Query = std::move(secondaryQueryAst),
@@ -693,9 +697,9 @@ DB::QueryTreeNodePtr TSecondaryQueryBuilder::AddBoundConditionToJoinedSubquery(
     TOwningKeyBound lowerBound,
     TOwningKeyBound upperBound)
 {
-    YT_LOG_DEBUG("Adding bound condition to joined subquery (LowerLimit: %v, UpperLimit: %v)",
-        lowerBound,
-        upperBound);
+    YT_TLOG_DEBUG("Adding bound condition to joined subquery")
+        .With("LowerLimit", lowerBound)
+        .With("UpperLimit", upperBound);
 
     auto createBoundCondition = [&] (const auto& bound) -> DB::ASTPtr {
         if (bound.IsUniversal()) {
@@ -753,10 +757,10 @@ DB::QueryTreeNodePtr TSecondaryQueryBuilder::AddBoundConditionToJoinedSubquery(
 
     DB::ASTPtr boundConditions = DB::makeASTForLogicalAnd(std::move(conjunctionArgs));
 
-    YT_LOG_TRACE("Bound conditions generated (LowerBound: %v, UpperBound: %v, Conditions: %v)",
-        lowerBound,
-        upperBound,
-        *boundConditions);
+    YT_TLOG_TRACE("Bound conditions generated")
+        .With("LowerBound", lowerBound)
+        .With("UpperBound", upperBound)
+        .With("Conditions", *boundConditions);
 
     // Adding where condition into existing table expression is difficult or impossible because of:
     // 1. Table expression is a table function (e.g. numberes(10)) or not-yt table identifier (e.g. system.clique).
@@ -873,10 +877,10 @@ void TQueryAnalyzer::InferSortedJoinKeyColumns(bool needSortedPool)
                 "you can suppress this error at cost of possible performance degradation "
                 "by wrapping the table into subquery",
                 errorPrefix)
-                << TErrorAttribute("table_expression", tableExpression->formatASTForErrorMessage())
-                << TErrorAttribute("table_index", tableIndex)
-                << TErrorAttribute("underlying_table_count", underlyingTables.size())
-                << TErrorAttribute("docs", "https://ytsaurus.tech/docs/en/user-guide/data-processing/chyt/queries/joins");
+                .With("table_expression", tableExpression->formatASTForErrorMessage())
+                .With("table_index", tableIndex)
+                .With("underlying_table_count", underlyingTables.size())
+                .With("docs", "https://ytsaurus.tech/docs/en/user-guide/data-processing/chyt/queries/joins");
         }
 
         const auto& path = underlyingTables.front()->Path;
@@ -889,8 +893,8 @@ void TQueryAnalyzer::InferSortedJoinKeyColumns(bool needSortedPool)
                 "by wrapping the table into subquery",
                 errorPrefix,
                 path)
-                << TErrorAttribute("table_index", tableIndex)
-                << TErrorAttribute("docs", "https://ytsaurus.tech/docs/en/user-guide/data-processing/chyt/queries/joins");
+                .With("table_index", tableIndex)
+                .With("docs", "https://ytsaurus.tech/docs/en/user-guide/data-processing/chyt/queries/joins");
         }
     };
 
@@ -974,15 +978,12 @@ void TQueryAnalyzer::InferSortedJoinKeyColumns(bool needSortedPool)
     }
 
     if (matchedKeyPrefixSize == 0) {
-        YT_LOG_DEBUG(
-            "As a result of the inferring sorted join key columns, the key turned out to be empty "
-            "(MatchedLeftKeyNames: %v, LeftKeyPositionMap: %v, RightKeyPositionMap: %v, "
-            "UnmatchedKeyPairs: %v, JoinKeySize: %v)",
-            matchedLeftKeyNames,
-            leftKeyPositionMap,
-            rightKeyPositionMap,
-            unmatchedKeyPairs,
-            joinKeySize);
+        YT_TLOG_DEBUG("As a result of the inferring sorted join key columns, the key turned out to be empty")
+            .With("MatchedLeftKeyNames", matchedLeftKeyNames)
+            .With("LeftKeyPositionMap", leftKeyPositionMap)
+            .With("RightKeyPositionMap", rightKeyPositionMap)
+            .With("UnmatchedKeyPairs", unmatchedKeyPairs)
+            .With("JoinKeySize", joinKeySize);
 
         return;
     }
@@ -999,7 +1000,8 @@ void TQueryAnalyzer::InferSortedJoinKeyColumns(bool needSortedPool)
 
 void TQueryAnalyzer::ParseQuery()
 {
-    YT_LOG_DEBUG("Analyzing query (Query: %v)", QueryInfo_.query_tree->toAST());
+    YT_TLOG_DEBUG("Analyzing query")
+        .With("Query", QueryInfo_.query_tree->toAST());
 
     // We need to collect the table expression data before calling buildQueryTreeForShard,
     // because the pointers to the table expression nodes will change and we won't be able to find them.
@@ -1050,7 +1052,7 @@ void TQueryAnalyzer::ParseQuery()
         }
 
         if (tableExpressionNodeType == DB::QueryTreeNodeType::CROSS_JOIN) {
-            YT_LOG_DEBUG("Query is a cross join");
+            YT_TLOG_DEBUG("Query is a cross join");
             Join_ = true;
             CrossJoin_ = true;
         }
@@ -1058,12 +1060,13 @@ void TQueryAnalyzer::ParseQuery()
             Join_ = true;
             const auto& joinNode = tableExpression->as<DB::JoinNode&>();
             if (joinNode.getLocality() == DB::JoinLocality::Global) {
-                YT_LOG_DEBUG("Table expression is a global join (Index: %v)", index);
+                YT_TLOG_DEBUG("Table expression is a global join")
+                    .With("Index", index);
                 GlobalJoin_ = true;
             }
             auto joinKind = joinNode.getKind();
             if (joinKind == DB::JoinKind::Right || joinKind == DB::JoinKind::Full) {
-                YT_LOG_DEBUG("Query is a right or full join");
+                YT_TLOG_DEBUG("Query is a right or full join");
                 RightOrFullJoin_ = true;
             }
         }
@@ -1077,18 +1080,25 @@ void TQueryAnalyzer::ParseQuery()
         TableExpressions_.emplace_back(tableExpression);
     }
 
+    // An n-ary CROSS_JOIN emits all operands before its single join marker.
+    // Keep only the first pair since this analyzer handles the first join.
+    if (CrossJoin_ && TableExpressions_.size() > 2) {
+        TableExpressions_.resize(2);
+    }
+
     YT_VERIFY(TableExpressions_.size() >= 1 && TableExpressions_.size() <= 2);
+    auto context = getContext();
     for (size_t tableExpressionIndex = 0; tableExpressionIndex < TableExpressions_.size(); ++tableExpressionIndex) {
         const auto& tableExpression = TableExpressions_[tableExpressionIndex];
 
-        auto storage = GetStorage(tableExpression);
+        auto storage = GetStorage(tableExpression, context);
         if (storage) {
-            YT_LOG_DEBUG("Table expression corresponds to TStorageDistributor (TableExpression: %v)",
-                tableExpression->toAST());
+            YT_TLOG_DEBUG("Table expression corresponds to TStorageDistributor")
+                .With("TableExpression", tableExpression->toAST());
             Storages_.emplace_back(storage);
         } else {
-            YT_LOG_DEBUG("Table expression does not correspond to TStorageDistributor (TableExpression: %v)",
-                tableExpression->toAST());
+            YT_TLOG_DEBUG("Table expression does not correspond to TStorageDistributor")
+                .With("TableExpression", tableExpression->toAST());
         }
     }
 
@@ -1102,10 +1112,10 @@ void TQueryAnalyzer::ParseQuery()
 
     if (Storages_.size() == 2) {
         if (!CrossJoin_) {
-            YT_LOG_DEBUG("Query is a two-YT-table join");
+            YT_TLOG_DEBUG("Query is a two-YT-table join");
             TwoYTTableJoin_ = true;
         } else {
-            YT_LOG_DEBUG("Query is a two-YT-table cross join; considering this as a single YT table join");
+            YT_TLOG_DEBUG("Query is a two-YT-table cross join; considering this as a single YT table join");
             TwoYTTableJoin_ = false;
             TableExpressions_.pop_back();
             Storages_.pop_back();
@@ -1114,16 +1124,14 @@ void TQueryAnalyzer::ParseQuery()
     SecondaryQueryOperandCount_ = Storages_.size();
     TableExpressionDataPtrs_.resize(TableExpressions_.size());
 
-    YT_LOG_DEBUG(
-        "Extracted table expressions from query (Query: %v, TableExpressionCount: %v, YtTableCount: %v, "
-        "IsJoin: %v, IsGlobalJoin: %v, IsRightOrFullJoin: %v, IsCrossJoin: %v)",
-        *QueryInfo_.query,
-        TableExpressions_.size(),
-        Storages_.size(),
-        Join_,
-        GlobalJoin_,
-        RightOrFullJoin_,
-        CrossJoin_);
+    YT_TLOG_DEBUG("Extracted table expressions from query")
+        .With("Query", *QueryInfo_.query)
+        .With("TableExpressionCount", TableExpressions_.size())
+        .With("YtTableCount", Storages_.size())
+        .With("IsJoin", Join_)
+        .With("IsGlobalJoin", GlobalJoin_)
+        .With("IsRightOrFullJoin", RightOrFullJoin_)
+        .With("IsCrossJoin", CrossJoin_);
 }
 
 DB::QueryProcessingStage::Enum TQueryAnalyzer::GetOptimizedQueryProcessingStage() const
@@ -1437,7 +1445,9 @@ TQueryAnalysisResult TQueryAnalyzer::Analyze() const
 
             if (suitableForReadRangeInferring) {
                 result.KeyReadRanges = InferReadRange(selectQuery->getWhere(), storage->GetSchema(), getContext()->getSettingsRef());
-                YT_LOG_DEBUG("Inferred read range for table (Table: %v, KeyReadRange: %v)", storage->GetTables(), result.KeyReadRanges);
+                YT_TLOG_DEBUG("Inferred read range for table")
+                    .With("Table", storage->GetTables())
+                    .With("KeyReadRange", result.KeyReadRanges);
             }
         }
         result.KeyConditions.emplace_back(std::move(keyCondition));
@@ -1505,7 +1515,8 @@ std::shared_ptr<TSecondaryQueryBuilder> TQueryAnalyzer::GetSecondaryQueryBuilder
     }
 
     auto queryTreeToDistribute = QueryInfo_.query_tree->cloneAndReplace(replacementMap);
-    YT_LOG_DEBUG("Query tree for distribution: %v", queryTreeToDistribute->formatConvertedASTForErrorMessage());
+    YT_TLOG_DEBUG("Built query tree for distribution")
+        .With("QueryTree", queryTreeToDistribute->formatConvertedASTForErrorMessage());
 
     TBoundJoinOptions boundJoinOptions{};
     const auto& executionSettings = StorageContext_->Settings->Execution;

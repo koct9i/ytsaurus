@@ -137,8 +137,8 @@ private:
         if (auto waitTime = throttler->GetEstimatedOverdraftDuration(); waitTime > maxThrottleTime) {
             THROW_ERROR_EXCEPTION(NTabletClient::EErrorCode::RequestThrottled,
                 "Journal media write is throttled")
-                << TErrorAttribute("request_max_throttle_time", maxThrottleTime)
-                << TErrorAttribute("estimated_throttler_wait_time", waitTime);
+                .With("request_max_throttle_time", maxThrottleTime)
+                .With("estimated_throttler_wait_time", waitTime);
         }
 
         auto throttlerFuture = throttler->Throttle(count);
@@ -160,7 +160,7 @@ private:
             : std::nullopt;
         TTabletCellWriteParams params{
             .TransactionId = FromProto<TTransactionId>(request->transaction_id()),
-            .TransactionStartTimestamp = request->transaction_start_timestamp(),
+            .TransactionStartTimestamp = FromProto<NTransactionClient::TTimestamp>(request->transaction_start_timestamp()),
             .TransactionTimeout = FromProto<TDuration>(request->transaction_timeout()),
             .PrepareSignature = request->prepare_signature(),
             // COMPAT(gritukan)
@@ -276,7 +276,7 @@ private:
             {
                 THROW_ERROR_EXCEPTION(NTabletClient::EErrorCode::SyncReplicaNotInSync,
                     "Direct write is not allowed: replica is probably catching up")
-                    << TErrorAttribute("upstream_replica_id", tabletSnapshot->UpstreamReplicaId);
+                    .With("upstream_replica_id", tabletSnapshot->UpstreamReplicaId);
             }
 
             const auto& resourceLimitsManager = Bootstrap_->GetResourceLimitsManager();
@@ -316,8 +316,8 @@ private:
                 THROW_ERROR_EXCEPTION(NTabletClient::EErrorCode::RequestThrottled,
                     "Write to tablet %v is throttled",
                     tabletId)
-                    << TErrorAttribute("throttler_kind", tableWriteThrottler)
-                    << TErrorAttribute("queue_total_count", writeThrottler->GetQueueTotalAmount());
+                    .With("throttler_kind", tableWriteThrottler)
+                    .With("queue_total_count", writeThrottler->GetQueueTotalAmount());
             }
 
             // Throttling changelog medium write
@@ -328,9 +328,9 @@ private:
                 Slot_->EstimateChangelogMediumBytes(changelogPayloadBytes),
                 context->GetTimeout());
         } catch (const std::exception& ex) {
-            THROW_ERROR ex
-                << TErrorAttribute("tablet_id", tabletId)
-                << TErrorAttribute("table_path", tabletSnapshot->TablePath);
+            THROW_ERROR_EXCEPTION(ex)
+                .With("tablet_id", tabletId)
+                .With("table_path", tabletSnapshot->TablePath);
         }
 
         auto* counters = tabletSnapshot->TableProfiler->GetTabletServiceCounters(GetCurrentProfilingUser());
@@ -367,10 +367,9 @@ private:
         }));
 
         if (auto delay = tabletSnapshot->Settings.MountConfig->Testing.WriteResponseDelay) {
-            YT_LOG_DEBUG("Response for TabletService.Write will be delayed for testing purposes "
-                "(%v, Delay: %v)",
-                tabletSnapshot->LoggingTag,
-                delay);
+            YT_TLOG_DEBUG("Response for TabletService.Write will be delayed for testing purposes")
+                .With(tabletSnapshot->LoggingTags)
+                .With("Delay", delay);
             TDelayedExecutor::WaitForDuration(delay);
         }
 
@@ -386,7 +385,7 @@ private:
         ValidatePeer(EPeerKind::Leader);
 
         auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-        auto transactionStartTimestamp = request->transaction_start_timestamp();
+        auto transactionStartTimestamp = FromProto<NTransactionClient::TTimestamp>(request->transaction_start_timestamp());
         auto transactionTimeout = FromProto<TDuration>(request->transaction_timeout());
         auto prepareSignature = request->prepare_signature();
         auto commitSignature = request->has_commit_signature()

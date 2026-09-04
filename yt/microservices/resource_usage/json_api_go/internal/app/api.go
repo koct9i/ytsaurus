@@ -158,7 +158,7 @@ func (a *API) whoamiHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(WhoamiResponse{User: user.Login, IsService: user.IsService})
+	_ = json.NewEncoder(w).Encode(WhoamiResponse{User: user.UserLogin, Service: user.ServiceLogin})
 }
 
 // @Produce json
@@ -316,7 +316,7 @@ func (a *API) resourceUsageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.accessChecker.CheckAccess(ctx, req.Cluster, user.Login, resourceUsage.Items)
+	err = a.accessChecker.CheckAccess(ctx, req.Cluster, user.ActingLogin(), resourceUsage.Items)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Header().Set("Content-Type", "application/json")
@@ -329,6 +329,7 @@ func (a *API) resourceUsageHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(GetResourceUsageResponse{
 		SnapshotTimestamp: resourceUsage.SnapshotTimestamp,
 		Fields:            resourceUsage.Fields,
+		VersionedFields:   resourceUsage.VersionedFields,
 		RowCount:          resourceUsage.RowCount,
 		Items:             resourceUsage.Items,
 		Mediums:           resourceUsage.Mediums,
@@ -404,7 +405,7 @@ func (a *API) resourceUsageDiffHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.accessChecker.CheckAccess(ctx, req.Cluster, user.Login, resourceUsageDiff.Items)
+	err = a.accessChecker.CheckAccess(ctx, req.Cluster, user.ActingLogin(), resourceUsageDiff.Items)
 	if err != nil {
 		w.WriteHeader(http.StatusForbidden)
 		w.Header().Set("Content-Type", "application/json")
@@ -420,6 +421,7 @@ func (a *API) resourceUsageDiffHandler(w http.ResponseWriter, r *http.Request) {
 			Newer: resourceUsageDiff.NewSelectedSnapshot,
 		},
 		Fields:            resourceUsageDiff.Fields,
+		VersionedFields:   resourceUsageDiff.VersionedFields,
 		RowCount:          resourceUsageDiff.RowCount,
 		Items:             resourceUsageDiff.Items,
 		Mediums:           resourceUsageDiff.Mediums,

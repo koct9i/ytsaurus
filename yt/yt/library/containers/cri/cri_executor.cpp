@@ -57,9 +57,9 @@ static TError DecodeExitCode(int exitCode, const std::string& reason)
             EProcessErrorCode::Signal,
             "Process terminated by signal %v",
             signalNumber)
-            << TErrorAttribute("signal", signalNumber)
-            << TErrorAttribute("reason", reason)
-            << TErrorAttribute("oom_killed", reason == "OOMKilled");
+            .With("signal", signalNumber)
+            .With("reason", reason)
+            .With("oom_killed", reason == "OOMKilled");
     }
 
     // TODO(khkebnikov) check these
@@ -73,8 +73,8 @@ static TError DecodeExitCode(int exitCode, const std::string& reason)
         EProcessErrorCode::NonZeroExitCode,
         "Process exited with code %v",
         exitCode)
-        << TErrorAttribute("exit_code", exitCode)
-        << TErrorAttribute("reason", reason);
+        .With("exit_code", exitCode)
+        .With("reason", reason);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -112,7 +112,7 @@ public:
             THROW_ERROR_EXCEPTION("Process is not started yet");
         }
 
-        YT_LOG_DEBUG("Killing process");
+        YT_TLOG_DEBUG("Killing process");
         WaitFor(Executor_->StopContainer(ContainerDescriptor_))
             .ThrowOnError();
     }
@@ -161,19 +161,19 @@ private:
             }
         }
 
-        Logger.AddTag("Pod: %v", *PodDescriptor_);
+        Logger.AddTag("Pod", *PodDescriptor_);
 
-        YT_LOG_DEBUG("Creating container (Container: %v)",
-            ContainerSpec_->Name);
+        YT_TLOG_DEBUG("Creating container")
+            .With("Container", ContainerSpec_->Name);
 
         ContainerDescriptor_ = WaitFor(Executor_->CreateContainer(ContainerSpec_, PodDescriptor_, PodSpec_))
             .ValueOrThrow();
 
-        Logger.AddTag("Container: %v", ContainerDescriptor_);
+        Logger.AddTag("Container", ContainerDescriptor_);
 
-        YT_LOG_DEBUG("Spawning process (Command: %v, Environment: %v)",
-            ContainerSpec_->Command[0],
-            ContainerSpec_->Environment);
+        YT_TLOG_DEBUG("Spawning process")
+            .With("Command", ContainerSpec_->Command[0])
+            .With("Environment", ContainerSpec_->Environment);
 
         YT_VERIFY(!Started_);
         Started_ = true;
@@ -206,12 +206,13 @@ private:
             // TODO(khlebnikov): Handle NotFound as abort, but gRPC code is not mapped yet.
             // TODO(khlebnikov): Maybe add common EProcessErrorCode::Lost.
             auto error = TError("Cannot get container status")
-                << TErrorAttribute("container_name", ContainerDescriptor_.Name)
-                << TErrorAttribute("container_id", ContainerDescriptor_.Id)
-                << TErrorAttribute("pod_name", PodDescriptor_->Name)
-                << TErrorAttribute("pod_id", PodDescriptor_->Id)
-                << responseOrError;
-            YT_LOG_ERROR(error, "Process is lost");
+                .With("container_name", ContainerDescriptor_.Name)
+                .With("container_id", ContainerDescriptor_.Id)
+                .With("pod_name", PodDescriptor_->Name)
+                .With("pod_id", PodDescriptor_->Id)
+                .With(responseOrError);
+            YT_TLOG_ERROR("Process is lost")
+                .With(error);
             YT_UNUSED_FUTURE(AsyncWaitExecutor_->Stop());
             FinishedPromise_.TrySet(std::move(error));
             return;
@@ -223,7 +224,8 @@ private:
         auto status = response->status();
         if (status.state() == NProto::CONTAINER_EXITED) {
             auto error = DecodeExitCode(status.exit_code(), status.reason());
-            YT_LOG_DEBUG(error, "Process finished");
+            YT_TLOG_DEBUG("Process finished")
+                .With(error);
             YT_UNUSED_FUTURE(AsyncWaitExecutor_->Stop());
             FinishedPromise_.TrySet(error);
         }
@@ -750,7 +752,7 @@ private:
                     }
                 }
                 if (config->RetryErrorPattern) {
-                    return NRe2::RE2::PartialMatch(message, *config->RetryErrorPattern);
+                    return re2::RE2::PartialMatch(message, *config->RetryErrorPattern);
                 }
             }
             return false;

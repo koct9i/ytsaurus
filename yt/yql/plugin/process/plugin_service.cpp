@@ -5,7 +5,7 @@
 
 namespace NYT::NYqlPlugin::NProcess {
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, YqlPluginServiceLogger, "YqlPluginService");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, YqlPluginServiceLogger, "YqlPluginService");
 
 
 using namespace NConcurrency;
@@ -55,7 +55,8 @@ public:
           request->query_text(),
           TYsonString(request->settings()),
           std::move(files),
-          request->mode());
+          request->mode(),
+          FromProto<NYqlClient::EQueryType>(request->query_type()));
 
         auto yqlResponse = ToYqlResponse(queryResult);
 

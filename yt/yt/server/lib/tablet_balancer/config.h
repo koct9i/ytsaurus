@@ -18,6 +18,7 @@ struct TFeatureFlagConfig
     : public virtual NYTree::TYsonStruct
 {
     std::optional<bool> EnableSmoothMovement;
+    std::optional<bool> EnableSmoothMovementForOrdered;
     std::optional<bool> EnableInplaceSplit;
     std::optional<bool> EnableInplaceMerge;
 
@@ -64,6 +65,7 @@ struct TParameterizedBalancingConfig
     std::optional<double> NodeDeviationThreshold;
     std::optional<double> CellDeviationThreshold;
     std::optional<double> MinRelativeMetricImprovement;
+    std::optional<int> MinTabletsPerMoveRecomputationWorker;
     std::vector<TClusterName> ReplicaClusters;
     TComponentFactorConfigPtr Factors;
 

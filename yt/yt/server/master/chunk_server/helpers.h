@@ -62,6 +62,9 @@ void AttachToChunkList(
     TChunkList* chunkList,
     TRange<TChunkTreeRawPtr> children,
     bool updateChunkListStatistics = true);
+
+EChunkDetachPolicy DeriveChunkTreeDetachPolicy(const TChunkList* chunkList);
+
 void DetachFromChunkList(
     TChunkList* chunkList,
     TRange<TChunkTreeRawPtr> children,
@@ -98,12 +101,13 @@ bool IsHunkChunkUniquelyPresentInChunkList(
     TChunkList* chunkList,
     TChunkTree* chunkTree);
 
-//! Iterates over all ancestors of |hunkChunk|, calling |functor(parent, firstOccurrence)| for all of them.
-//! All parents are expected to be of hunk-related chunk list kind. Maximum two generations are expected.
+//! Iterates over the hunk tree ancestors of |hunkChunk|, calling |functor(parent, firstOccurrence)| for each.
+//! Scratch parents are skipped; any other one is expected to be of hunk-related chunk list kind.
+//! Maximum two generations are expected.
 //! First-generation parents are assumed to be encountered only once during iteration.
 //! Second-generation parents can be encountered multiple times during iteration, thus #firstOccurrence argument.
 template <class F>
-void VisitAllAncestorsInHunkTree(TChunk* hunkChunk, F&& functor);
+void VisitHunkTreeAncestors(TChunk* hunkChunk, F&& functor);
 
 void ResetChunkListStatistics(TChunkList* chunkList);
 void RecomputeChunkListStatistics(TChunkList* chunkList);
@@ -200,11 +204,20 @@ NSequoiaClient::TSelectRowsQuery BuildSelectLocationSequoiaReplicasQuery(
     TNodeId nodeId,
     NNodeTrackerClient::TChunkLocationIndex locationIndex);
 
-void ValidateChunkMetaOnConfirmation(const NChunkClient::NProto::TChunkMeta& chunkMeta);
+TError CheckChunkMetaOnConfirmation(const NChunkClient::NProto::TChunkMeta& chunkMeta);
 
 EChunkReplicaState GetAddedChunkReplicaState(
         TChunkId chunkId,
         const NChunkClient::NProto::TChunkAddInfo& chunkAddInfo);
+
+bool IsSealNeeded(const TChunk* chunk);
+
+NLogging::ELogLevel GetChunkLogLevel(
+    const TChunk* chunk,
+    const IChunkManagerPtr& chunkManager);
+
+int EncodeRepairQueueKey(int mediumIndex, int priority);
+std::pair<int, int> DecodeRepairQueueKey(int key);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -223,14 +236,29 @@ struct TChunkSequoiaConfig
 
 TChunkSequoiaConfig GetChunkSequoiaConfig(TChunkId chunkId, const TDynamicSequoiaChunkReplicasConfigPtr& config);
 
-bool IsHunkRelatedChunkList(const TChunkList* chunkList);
-bool IsHunkRootChunkList(const TChunkList* chunkList);
-
 bool IsHunkChunkFormat(NChunkClient::EChunkFormat chunkFormat);
 
 i64 ComputeDiskSpaceFromDataSize(i64 dataSize, NErasure::ECodec erasureCodec);
 
 void AccumulateNewlyReferencedHunkStatistics(TChunk* hunkChunk, i64 dataWeightDelta, i64 dataSizeDelta);
+
+////////////////////////////////////////////////////////////////////////////////
+
+bool IsReplicaDecommissioned(TChunkLocation* replica);
+
+//! Returns the number of replicas requested by requisition and extra-rack-failure-tolerance policies.
+int ComputeReplicaDeficit(
+    int targetReplicaCount,
+    int availableReplicaCount,
+    int temporarilyUnavailableReplicaCount,
+    int additionalRackFailureTolerance,
+    int maxReplicasPerRack);
+
+////////////////////////////////////////////////////////////////////////////////
+
+#define YT_VERBOSE_LOG_CHUNK_EVENT(chunk, ...)                      YT_LOG_EVENT(Logger(), GetChunkLogLevel(chunk, Bootstrap_->GetChunkManager()), __VA_ARGS__)
+#define YT_VERBOSE_LOG_CHUNK_EVENT_IF(condition, chunk, ...)        if (condition)    YT_VERBOSE_LOG_CHUNK_EVENT(chunk, __VA_ARGS__)
+#define YT_VERBOSE_LOG_CHUNK_EVENT_UNLESS(condition, chunk, ...)    if (!(condition)) YT_VERBOSE_LOG_CHUNK_EVENT(chunk, __VA_ARGS__)
 
 ////////////////////////////////////////////////////////////////////////////////
 

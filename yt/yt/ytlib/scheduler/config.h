@@ -306,6 +306,9 @@ struct TPoolConfig
 
     bool EnableStepFunctionForGangOperations;
 
+    //! Inherited by the whole subtree unless a descendant pool overrides it.
+    std::optional<bool> EnableFifoChildrenReorderingForGuaranteeUtilization;
+
     THashMap<std::string, std::string> MeteringTags;
 
     TOffloadingSettings OffloadingSettings;
@@ -372,6 +375,10 @@ struct TSamplingConfig
 {
     //! The probability for each particular row to remain in the output.
     std::optional<double> SamplingRate;
+
+    //! A seed for the random generator used for sampling.
+    //! Makes the set of sampled chunks deterministic for a fixed input.
+    std::optional<ui64> SamplingSeed;
 
     //! An option regulating the total data slice count during the sampling job creation procedure.
     //! It should not be used normally and left only for manual setup in marginal cases.
@@ -1273,9 +1280,7 @@ struct TOperationSpecBase
     //! Allow access to all immutable files via NBD.
     bool EnableVirtualSandbox;
 
-    //! Enable root volume disk quota.
-    //! Apply the quota to the entire RootFs instead of the sandbox and tmp folders individually.
-    bool EnableRootVolumeDiskQuota;
+    bool DisableRbindRootVolume;
 
     NChunkClient::EChunkAvailabilityPolicy ChunkAvailabilityPolicy;
 
@@ -1300,6 +1305,10 @@ struct TOperationSpecBase
 
     //! If explicitly true, allow remote copy of tables with hunk columns.
     std::optional<bool> BypassHunkRemoteCopyProhibition;
+
+    //! If true, allow best-effort remote copy of dynamic input tables whose
+    //! tablets are neither frozen nor unmounted.
+    bool AllowUnfrozenInputTables;
 
     //! Options for cuda profiler.
     std::optional<NYPath::TYPath> CudaProfilerLayerPath;
@@ -1838,10 +1847,9 @@ DEFINE_REFCOUNTED_TYPE(TInputQueryOptions)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TInputlyQueryableSpec
+struct TInputlyQueryableSpec
     : public virtual NYTree::TYsonStruct
 {
-public:
     std::optional<std::string> InputQuery;
     std::optional<NTableClient::TTableSchema> InputSchema;
     TInputQueryFilterOptionsPtr InputQueryFilterOptions;
@@ -1856,10 +1864,9 @@ DEFINE_REFCOUNTED_TYPE(TInputlyQueryableSpec)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TOperationWithUserJobSpec
+struct TOperationWithUserJobSpec
     : public virtual NYTree::TYsonStruct
 {
-public:
     std::optional<NYPath::TRichYPath> StderrTablePath;
     NTableClient::TBlobTableWriterConfigPtr StderrTableWriter;
 
@@ -2150,6 +2157,11 @@ struct TSortOperationSpecBase
     std::optional<i64> CompressedDataSizePerPartitionJob;
 
     std::optional<int> PartitionJobCount;
+
+    //! Hard limit on the number of partition jobs (map jobs in map-reduce).
+    //! Unlike |PartitionJobCount|, which pins the exact job count,
+    //! this option only caps the job count inferred from data size heuristics.
+    std::optional<int> MaxPartitionJobCount;
 
     //! Data size per shuffle job.
     i64 DataWeightPerShuffleJob;

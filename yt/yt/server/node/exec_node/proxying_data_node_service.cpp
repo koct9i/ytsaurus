@@ -211,7 +211,7 @@ private:
         context->SetRequestInfo(
             "ChunkId: %v, Blocks: %v, Workload: %v",
             chunkId,
-            FormatBlocks(firstBlockIndex, firstBlockIndex + blockCount - 1),
+            FormatBlockIndexRange(firstBlockIndex, firstBlockIndex + blockCount - 1),
             workloadDescriptor);
 
         if (JobInputCache_->IsBlockCacheMemoryLimitExceeded()) {
@@ -292,7 +292,7 @@ private:
                         NChunkClient::EErrorCode::UnsupportedChunkFeature,
                         "Chunk %v has unknown features",
                         chunkId)
-                        << TErrorAttribute("chunk_features", meta->features());
+                        .With("chunk_features", meta->features());
                 }
 
                 // Although it it highly unlikely that job proxy doesn't support some

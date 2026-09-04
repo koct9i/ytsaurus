@@ -44,7 +44,7 @@ public:
             logger))
         , Options_(std::move(options))
         , Config_(std::move(config))
-        , Logger(logger.WithTag("ChunkId: %v", sessionId.ChunkId))
+        , Logger(logger.WithTag("ChunkId", sessionId.ChunkId))
         , ChunkId_(sessionId.ChunkId)
     {
         auto guard = Guard(Lock_);
@@ -205,16 +205,15 @@ private:
 
         if (CurrentRecordPayloads_.empty()) {
             guard.reset();
-            YT_LOG_DEBUG("No journal hunk chunk records to flush");
+            YT_TLOG_DEBUG("No journal hunk chunk records to flush");
             return;
         }
 
-        YT_LOG_DEBUG("Flushing journal hunk chunk record "
-            "(RecordIndex: %v, RecordSize: %v, RecordHunkCount: %v, FutureCount: %v)",
-            CurrentRecordIndex_,
-            CurrentRecordSize_,
-            std::ssize(CurrentRecordPayloads_),
-            CurrentRecordPromises_.size());
+        YT_TLOG_DEBUG("Flushing journal hunk chunk record")
+            .With("RecordIndex", CurrentRecordIndex_)
+            .With("RecordSize", CurrentRecordSize_)
+            .With("RecordHunkCount", std::ssize(CurrentRecordPayloads_))
+            .With("FutureCount", CurrentRecordPromises_.size());
 
         auto recordFlushFuture = Options_->ErasureCodec == NErasure::ECodec::None
             ? FlushRegularRecord()
@@ -298,7 +297,7 @@ private:
         }
         YT_VERIFY(ptr == record.End());
 
-        return UnderlyingWriter_->WriteRecord(std::move(record));
+        return UnderlyingWriter_->WriteRecord(std::move(record)).AsVoid();
     }
 
     TFuture<void> FlushErasureRecord()

@@ -90,6 +90,10 @@ class ArraySort(Expression, Func):
     arg_types = {"this": True, "expression": False}
 
 
+class Shuffle(Expression, Func):
+    pass
+
+
 class SortArray(Expression, Func):
     arg_types = {"this": True, "asc": False, "nulls_first": False}
 
@@ -112,6 +116,10 @@ class ArrayContains(Expression, Binary, Func):
 
 class ArrayContainsAll(Expression, Binary, Func):
     _sql_names = ["ARRAY_CONTAINS_ALL", "ARRAY_HAS_ALL"]
+
+
+class ArrayContainedBy(Expression, Binary, Func):
+    pass
 
 
 class ArrayExcept(Expression, Func):

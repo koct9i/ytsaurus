@@ -17,8 +17,9 @@
 
 #include <yt/yt/core/actions/signal.h>
 
-#include <yt/yt/core/misc/chunked_vector.h>
-#include <yt/yt/core/misc/property.h>
+#include <library/cpp/yt/containers/skip_list.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 #include <library/cpp/yt/threading/rw_spin_lock.h>
 
@@ -220,6 +221,8 @@ private:
 
     TSortedDynamicStoreRevision FlushRevision_ = InvalidRevision;
 
+    TMemoryUsageTrackerGuard LookupHashTableActiveStoreTabletStaticGuard_;
+
     // Generic information:
     // Column's values are sorted by timestamp and each value annotated with revision.
     // Each revision corresponds to timestamp.
@@ -356,7 +359,7 @@ private:
     TSortedDynamicStoreRevision GetSnapshotRevision() const;
     TSortedDynamicStoreRevision RegisterRevision(TTimestamp timestamp);
 
-    void OnDynamicMemoryUsageUpdated();
+    void OnDynamicMemoryUsageUpdated() override;
 
     void InsertIntoLookupHashTable(const TUnversionedValue* keyBegin, TSortedDynamicRow dynamicRow);
 };

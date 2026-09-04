@@ -1,6 +1,6 @@
 #include "config.h"
 
-#include <yt/yt/ytlib/exec_node/public.h>
+#include <library/cpp/yt/string/format.h>
 
 namespace NYT::NNbd {
 
@@ -8,55 +8,6 @@ namespace NYT::NNbd {
 
 void TBlockDeviceConfigBase::Register(TRegistrar /*registrar*/)
 { }
-
-////////////////////////////////////////////////////////////////////////////////
-
-void TChunkBlockDeviceConfig::Register(TRegistrar registrar)
-{
-    registrar.Parameter("size", &TThis::Size)
-        .GreaterThanOrEqual(0);
-    registrar.Parameter("medium_index", &TThis::MediumIndex)
-        .Default(0);
-    registrar.Parameter("fs_type", &TThis::FsType)
-        .Default(EFilesystemType::Ext4);
-    registrar.Parameter("keep_session_alive_period", &TThis::KeepSessionAlivePeriod)
-        .Default(TDuration::Seconds(1));
-    registrar.Parameter("data_node_nbd_service_rpc_timeout", &TThis::DataNodeNbdServiceRpcTimeout)
-        .Default(TDuration::Seconds(5));
-    registrar.Parameter("data_node_nbd_service_make_timeout", &TThis::DataNodeNbdServiceMakeTimeout)
-        .Default(TDuration::Seconds(5));
-    registrar.Parameter("multiplexing_parallelism", &TThis::MultiplexingParallelism)
-        .GreaterThanOrEqual(1)
-        .Default(NExecNode::DefaultNbdMultiplexingParallelism);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void TFileSystemBlockDeviceConfig::Register(TRegistrar)
-{ }
-
-////////////////////////////////////////////////////////////////////////////////
-
-void TMemoryBlockDeviceConfig::Register(TRegistrar registrar)
-{
-    registrar.Parameter("size", &TThis::Size)
-        .GreaterThanOrEqual(0);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void TDynamicTableBlockDeviceConfig::Register(TRegistrar registrar)
-{
-    registrar.Parameter("size", &TThis::Size)
-        .GreaterThanOrEqual(0);
-    registrar.Parameter("block_size", &TThis::BlockSize)
-        .GreaterThanOrEqual(0);
-    registrar.Parameter("read_batch_size", &TThis::ReadBatchSize)
-        .Default(16).GreaterThan(0);
-    registrar.Parameter("write_batch_size", &TThis::WriteBatchSize)
-        .Default(16).GreaterThan(0);
-    registrar.Parameter("table_path", &TThis::TablePath);
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -108,6 +59,8 @@ void TNbdServerConfig::Register(TRegistrar registrar)
         .Default(1);
     registrar.Parameter("test_options", &TThis::TestOptions)
         .DefaultNew();
+    registrar.Parameter("http_port", &TThis::HttpPort)
+        .Default();
 
     registrar.Postprocessor([] (TThis* config) {
         if (config->InternetDomainSocket && config->UnixDomainSocket) {
@@ -118,6 +71,14 @@ void TNbdServerConfig::Register(TRegistrar registrar)
             THROW_ERROR_EXCEPTION("\"internet_domain_socket\" and \"unix_domain_socket\" cannot be both missing");
         }
     });
+}
+
+std::string TNbdServerConfig::GetAddress() const
+{
+    // Exactly one of the sockets is set (see the postprocessor above).
+    return UnixDomainSocket
+        ? UnixDomainSocket->Path
+        : Format(":%v", InternetDomainSocket->Port);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

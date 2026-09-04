@@ -6,11 +6,17 @@ when password-less ssh to localhost is unavailable.
 """
 
 import contextlib
+import hashlib
 import importlib.util
+import io
+import json
 import os
 import shlex
 import subprocess
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 
 ARCADIA_PATH = "yt/yt/tools/logslice/logslice.py"
@@ -44,6 +50,51 @@ def _load_logslice():
 
 
 logslice = _load_logslice()
+
+
+def _find_fixture_dir():
+    relative_path = "yt/yt/tools/logslice/unittests/py/fixtures/ytadmin_13061"
+    try:
+        import yatest.common
+        return yatest.common.source_path(relative_path)
+    except ImportError:
+        return os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            "fixtures",
+            "ytadmin_13061")
+
+
+FIXTURE_DIR = _find_fixture_dir()
+
+
+def _find_auth_preflight_fixture():
+    relative_path = (
+        "yt/yt/tools/logslice/unittests/py/fixtures/ytadmin_58495/"
+        "authentication_unavailable.json")
+    try:
+        import yatest.common
+        return yatest.common.source_path(relative_path)
+    except ImportError:
+        return os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            "fixtures",
+            "ytadmin_58495",
+            "authentication_unavailable.json")
+
+
+def _find_preexecution_fixture():
+    relative_path = (
+        "yt/yt/tools/logslice/unittests/py/fixtures/ytadminreq_58972/"
+        "preexecution_failure.json")
+    try:
+        import yatest.common
+        return yatest.common.source_path(relative_path)
+    except ImportError:
+        return os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            "fixtures",
+            "ytadminreq_58972",
+            "preexecution_failure.json")
 
 
 def _ssh_localhost_works():
@@ -265,6 +316,368 @@ class SemicolonQuotingTest(unittest.TestCase):
                 self.assertEqual(shlex.split(remote), expected)
 
 
+class PipelineStatusTest(unittest.TestCase):
+    def setUp(self):
+        self.ssh = logslice.Ssh("unused")
+
+    def _result(self, returncode, stderr, stdout=None):
+        result = mock.Mock()
+        result.returncode = returncode
+        result.stderr = stderr
+        result.stdout = stdout
+        return result
+
+    def test_grep_no_match_does_not_fail_logslice(self):
+        result = self._result(0, "__LOGSLICE_PIPESTATUS__:0 1\n")
+        with mock.patch.object(logslice.subprocess, "run", return_value=result):
+            self.assertEqual(
+                self.ssh.run_pipeline(["logslice", "file"], [["grep", "x"]]),
+                0,
+            )
+
+    def test_head_failure_is_reported_with_stderr(self):
+        result = self._result(
+            1,
+            "cannot decode block\n__LOGSLICE_PIPESTATUS__:1 1\n",
+        )
+        stderr = io.StringIO()
+        with mock.patch.object(logslice.subprocess, "run", return_value=result), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                self.ssh.run_pipeline(["logslice", "file"], [["grep", "x"]]),
+                1,
+            )
+        self.assertIn("cannot decode block", stderr.getvalue())
+        self.assertNotIn("PIPESTATUS", stderr.getvalue())
+
+    def test_non_grep_filter_failure_is_preserved(self):
+        result = self._result(0, "__LOGSLICE_PIPESTATUS__:0 1\n")
+        with mock.patch.object(logslice.subprocess, "run", return_value=result):
+            self.assertEqual(
+                self.ssh.run_pipeline(["logslice", "file"], [["wc", "-x"]]),
+                1,
+            )
+
+    def test_result_retains_grep_no_match_after_presentation_stage(self):
+        result = self._result(
+            0, "__LOGSLICE_PIPESTATUS__:0 1 0\n", stdout="0\n")
+        with mock.patch.object(logslice.subprocess, "run", return_value=result):
+            completed = self.ssh.run_pipeline_result(
+                ["logslice", "file"], [["grep", "x"], ["wc", "-l"]])
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.operational_returncode, 0)
+        self.assertEqual(completed.stdout, "0\n")
+
+
+class MultiTypeAndOutcomeTest(unittest.TestCase):
+    def test_parse_log_types_accepts_all_and_comma_list(self):
+        self.assertEqual(
+            logslice.parse_log_types("debug,error,info"),
+            ["debug", "error", "info"])
+        self.assertEqual(
+            logslice.parse_log_types("all"),
+            ["debug", "info", "error"])
+        with self.assertRaisesRegex(ValueError, "unknown log type"):
+            logslice.parse_log_types("debug,warning")
+
+    def test_fixture_merges_severities_by_timestamp(self):
+        outputs = []
+        for name in ("debug.log", "info.log", "error.log"):
+            with open(os.path.join(FIXTURE_DIR, name)) as stream:
+                outputs.append(stream.read())
+        merged = logslice.merge_timestamped_outputs(outputs)
+        stamps = [
+            line.split()[1].replace(",", ".")
+            for line in merged.splitlines()
+        ]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertEqual(merged.count(
+            "1a6f70ac-1cbee4dc-5d4cc759-2ee628e1"), 5)
+
+    def test_merge_keeps_multiline_record_with_its_timestamp(self):
+        merged = logslice.merge_timestamped_outputs([
+            "2026-08-11 06:16:54,000001 first\n  first continuation\n",
+            "2026-08-11 06:16:53,000001 second\n  second continuation\n",
+        ])
+        self.assertEqual(merged, (
+            "2026-08-11 06:16:53,000001 second\n"
+            "  second continuation\n"
+            "2026-08-11 06:16:54,000001 first\n"
+            "  first continuation\n"))
+
+    def test_fixture_distinguishes_match_no_match_and_failure(self):
+        with open(os.path.join(FIXTURE_DIR, "rotation_outcomes.json")) as stream:
+            fixture = json.load(stream)
+        results = []
+        for item in fixture:
+            status = logslice.classify_slice_result(
+                item["returncode"], item["stdout"], item["stderr"])
+            self.assertEqual(status, item["expected"], item["file"])
+            results.append({
+                "status": status,
+                "failure_class": logslice.slice_failure_class(
+                    item["returncode"], item["stderr"]),
+            })
+        self.assertEqual(logslice.slice_exit_code(results[:2]), 0)
+        self.assertEqual(
+            logslice.slice_exit_code([results[1]]),
+            logslice.GLOBAL_NO_MATCH_EXIT)
+        self.assertEqual(
+            logslice.slice_exit_code(results),
+            logslice.OPERATIONAL_FAILURE_EXIT)
+        self.assertEqual(results[2]["failure_class"], "decompression")
+
+    def test_grep_no_match_stays_no_match_after_wc_output(self):
+        self.assertEqual(
+            logslice.classify_slice_result(1, "0\n", ""),
+            "no_match")
+
+    def test_broad_debug_window_requires_explicit_override(self):
+        start = datetime(2026, 8, 11, 5, 0, 0)
+        end = datetime(2026, 8, 11, 6, 30, 0)
+        with self.assertRaisesRegex(ValueError, "narrow it"):
+            logslice.validate_debug_window(["debug"], start, end)
+        logslice.validate_debug_window(
+            ["debug"], start, end, allow_broad=True)
+        logslice.validate_debug_window(
+            ["error"], None, None, allow_broad=False)
+
+
+class AuthenticationPreflightTest(unittest.TestCase):
+    def setUp(self):
+        with open(_find_auth_preflight_fixture()) as stream:
+            self.fixture = json.load(stream)
+
+    def test_preflight_record_preserves_scope_and_inspects_no_rotations(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            logslice.report_authentication_preflight(
+                self.fixture["host"],
+                self.fixture["component"],
+                self.fixture["window_start"],
+                self.fixture["window_end"])
+        output = stderr.getvalue()
+        self.assertIn("status=authentication_unavailable", output)
+        self.assertIn("subsystem=" + self.fixture["subsystem"], output)
+        self.assertIn("host=" + self.fixture["host"], output)
+        self.assertIn("component=" + self.fixture["component"], output)
+        self.assertIn("rotations_inspected=0", output)
+        self.assertIn("files=0", output)
+        self.assertIn("exit_code=2", output)
+        self.assertNotIn(self.fixture["error"], output)
+
+    def test_main_reports_authentication_before_build_or_discovery(self):
+        fixture = self.fixture
+        argv = [
+            "logslice.py", fixture["host"], "--type", "error",
+            "-t", fixture["window_start"], "-e", fixture["window_end"],
+        ]
+        stderr = io.StringIO()
+        with mock.patch.object(logslice.sys, "argv", argv), \
+                mock.patch.object(logslice, "ssh_access_preflight",
+                                  return_value="authentication_unavailable"), \
+                mock.patch.object(logslice, "resolve_logslice") as resolve, \
+                mock.patch.object(
+                    logslice, "discover_component_candidates") as discover, \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                logslice.main(), logslice.OPERATIONAL_FAILURE_EXIT)
+        resolve.assert_not_called()
+        discover.assert_not_called()
+        result = json.loads(stderr.getvalue().splitlines()[-1])
+        self.assertEqual(result["result"], "access_unavailable")
+        self.assertEqual(
+            result["failure_class"],
+            "authentication_unavailable")
+        self.assertFalse(result["log_read"])
+
+
+class PreexecutionContractTest(unittest.TestCase):
+    def test_ticket_fixture_reports_access_unavailable_before_selection(self):
+        with open(_find_preexecution_fixture()) as stream:
+            fixture = json.load(stream)
+        argv = ["logslice.py"] + fixture["invocation"]["script_arguments"]
+        stderr = io.StringIO()
+        with mock.patch.object(logslice.sys, "argv", argv), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(logslice, "ssh_access_preflight",
+                                  return_value="ssh_noninteractive_check_failed"), \
+                mock.patch.object(logslice, "resolve_logslice") as resolve, \
+                contextlib.redirect_stderr(stderr):
+            exit_code = logslice.main()
+
+        self.assertEqual(exit_code, logslice.OPERATIONAL_FAILURE_EXIT)
+        resolve.assert_not_called()
+        result = json.loads(stderr.getvalue().splitlines()[-1])
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["result"], "access_unavailable")
+        self.assertNotIn("schema", result)
+        self.assertNotIn("request", result)
+        self.assertNotIn("stages", result)
+        self.assertEqual(result["requested_component"], "node")
+        self.assertIsNone(result["selected_component"])
+        self.assertIsNone(result["selected_base"])
+        self.assertFalse(result["log_read"])
+        self.assertIsNone(result["gaps"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("SSH_AUTH_SOCK", rendered)
+        self.assertNotIn("not_retained", rendered)
+
+    def test_non_agent_auth_satisfies_real_preflight(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0))
+        with mock.patch.dict(os.environ, {}, clear=True):
+            ssh = logslice.Ssh(
+                "host", control_socket="/tmp/caller-owned-control-socket")
+        self.assertIsNone(logslice.ssh_access_preflight(ssh, run=run))
+        command = run.call_args.args[0]
+        self.assertIn("ControlPath=/tmp/caller-owned-control-socket", command)
+        self.assertIn("BatchMode=yes", command)
+        self.assertEqual(command[-2:], ["host", "true"])
+
+    def test_failed_noninteractive_check_fails_preflight(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=255))
+        ssh = logslice.Ssh(
+            "host", control_socket="/tmp/stale-control-socket")
+        self.assertEqual(
+            logslice.ssh_access_preflight(ssh, run=run),
+            "ssh_noninteractive_check_failed",
+        )
+
+    def test_persisted_default_control_path_is_used_by_preflight(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0))
+        default_path = logslice.resolve_control_path(environ={})
+        with mock.patch.dict(os.environ, {}, clear=True):
+            ssh = logslice.Ssh("host")
+        self.assertIsNone(logslice.ssh_access_preflight(ssh, run=run))
+        self.assertEqual(ssh._control_path, default_path)
+        self.assertIn("ControlPath=" + default_path, run.call_args.args[0])
+
+    def _run_no_match(self, coverage, slice_result=None):
+        argv = [
+            "logslice.py", "vla4-5603-sessions-003-tab-markov.vla.yp-c.yandex.net",
+            "--type", "info", "-t", "2026-07-22 13:00:00",
+            "-e", "2026-07-22 15:00:00",
+        ]
+        log_file = logslice.parse_log_name("node.log")
+        if slice_result is None:
+            slice_result = logslice.PipelineResult(
+                returncode=1, operational_returncode=0,
+                stdout="", stderr="")
+        stderr = io.StringIO()
+        with mock.patch.object(logslice.sys, "argv", argv), \
+                mock.patch.object(logslice, "ssh_access_preflight",
+                                  return_value=None), \
+                mock.patch.object(logslice, "resolve_logslice",
+                                  return_value="/bin/true"), \
+                mock.patch.object(logslice.Ssh, "connect"), \
+                mock.patch.object(logslice.Ssh, "copy_binary"), \
+                mock.patch.object(logslice.Ssh, "run", return_value="+0300\n"), \
+                mock.patch.object(logslice.Ssh, "run_pipeline_result",
+                                  return_value=slice_result), \
+                mock.patch.object(logslice, "discover_component_candidates",
+                                  return_value=(["node"], ["logs"])), \
+                mock.patch.object(logslice, "discover_series", return_value=[
+                    ("live", "node", [log_file])]), \
+                mock.patch.object(logslice, "select_log_files", return_value=(
+                    [log_file], [("live", "node", 1, [log_file])], coverage)), \
+                contextlib.redirect_stderr(stderr):
+            exit_code = logslice.main()
+        return exit_code, json.loads(stderr.getvalue().splitlines()[-1])
+
+    def test_partial_coverage_no_match_is_not_definitive(self):
+        coverage = [(
+            logslice.parse_user_time("2026-07-22 13:05:00"),
+            logslice.parse_user_time("2026-07-22 15:00:00"),
+        )]
+        exit_code, result = self._run_no_match(coverage)
+        self.assertEqual(exit_code, logslice.COVERAGE_INCOMPLETE_EXIT)
+        self.assertEqual(result["gaps"], [{
+            "log_type": "info",
+            "start": "2026-07-22 13:00:00",
+            "end": "2026-07-22 13:05:00",
+        }])
+        self.assertEqual(result["outcome"], "partial")
+        self.assertEqual(result["result"], "coverage_incomplete")
+
+    def test_full_coverage_no_match_is_definitive(self):
+        coverage = [(
+            logslice.parse_user_time("2026-07-22 13:00:00"),
+            logslice.parse_user_time("2026-07-22 15:00:00"),
+        )]
+        exit_code, result = self._run_no_match(coverage)
+        self.assertEqual(exit_code, logslice.GLOBAL_NO_MATCH_EXIT)
+        self.assertEqual(result["outcome"], "success")
+        self.assertEqual(result["result"], "no_matches")
+        self.assertEqual(result["gaps"], [])
+
+    def test_pipeline_operational_failure_does_not_claim_log_read(self):
+        coverage = [(
+            logslice.parse_user_time("2026-07-22 13:00:00"),
+            logslice.parse_user_time("2026-07-22 15:00:00"),
+        )]
+        failure = logslice.PipelineResult(
+            returncode=255, operational_returncode=255,
+            stdout="", stderr="ssh transport failed")
+        exit_code, result = self._run_no_match(coverage, failure)
+        self.assertEqual(exit_code, logslice.OPERATIONAL_FAILURE_EXIT)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["result"], "operational_failure")
+        self.assertFalse(result["log_read"])
+
+    def test_post_preflight_route_failure_ends_with_json_result(self):
+        argv = [
+            "logslice.py", "vla4-5603-sessions-003-tab-markov.vla.yp-c.yandex.net",
+            "--type", "info", "-t", "2026-07-22 13:00:00",
+            "-e", "2026-07-22 15:00:00",
+        ]
+        stderr = io.StringIO()
+        with mock.patch.object(logslice.sys, "argv", argv), \
+                mock.patch.object(logslice, "ssh_access_preflight",
+                                  return_value=None), \
+                mock.patch.object(logslice, "resolve_logslice",
+                                  return_value="/bin/true"), \
+                mock.patch.object(logslice.Ssh, "connect"), \
+                mock.patch.object(logslice.Ssh, "copy_binary"), \
+                mock.patch.object(logslice.Ssh, "run", return_value="+0300\n"), \
+                mock.patch.object(logslice, "discover_component_candidates",
+                                  return_value=(["push-client"], ["logs"])), \
+                contextlib.redirect_stderr(stderr):
+            exit_code = logslice.main()
+
+        self.assertEqual(exit_code, logslice.OPERATIONAL_FAILURE_EXIT)
+        result = json.loads(stderr.getvalue().splitlines()[-1])
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["result"], "operational_failure")
+        self.assertIsNone(result["selected_component"])
+        self.assertFalse(result["log_read"])
+
+    def test_subprocess_failure_ends_with_json_result(self):
+        argv = [
+            "logslice.py", "vla4-5603-sessions-003-tab-markov.vla.yp-c.yandex.net",
+            "--type", "info", "-t", "2026-07-22 13:00:00",
+            "-e", "2026-07-22 15:00:00",
+        ]
+        stderr = io.StringIO()
+        failure = subprocess.CalledProcessError(1, ["ya", "make"])
+        with mock.patch.object(logslice.sys, "argv", argv), \
+                mock.patch.object(logslice, "ssh_access_preflight",
+                                  return_value=None), \
+                mock.patch.object(logslice, "resolve_logslice",
+                                  side_effect=failure), \
+                contextlib.redirect_stderr(stderr):
+            exit_code = logslice.main()
+
+        self.assertEqual(exit_code, logslice.OPERATIONAL_FAILURE_EXIT)
+        result = json.loads(stderr.getvalue().splitlines()[-1])
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["result"], "operational_failure")
+        self.assertFalse(result["log_read"])
+
+    def test_gaps_are_unknown_without_authoritative_source(self):
+        result = logslice.make_execution_result()
+        self.assertIsNone(result["gaps"])
+
+
 class ParseUserTimeTest(unittest.TestCase):
     """Covers every format parse_user_time accepts. These mirror the formats of
     logslice/lib/time_parser.h, since logslice.py forwards the raw -t/-e string
@@ -272,11 +685,9 @@ class ParseUserTimeTest(unittest.TestCase):
     through that C++ parser too."""
 
     def setUp(self):
-        from datetime import datetime
         self.datetime = datetime
 
     def test_now_is_recent(self):
-        from datetime import datetime, timedelta
         now = logslice.parse_user_time("now")
         self.assertIsNotNone(now)
         self.assertLess(abs(datetime.now() - now), timedelta(seconds=5))
@@ -330,11 +741,21 @@ class ParseUserTimeTest(unittest.TestCase):
     def test_iso_utc_is_converted_to_local(self):
         # 2019-09-19T11:46:04.848360Z as a UTC-aware instant, then made naive
         # local; comparing the epoch is timezone-independent.
-        from datetime import datetime, timezone
         got = logslice.parse_user_time("2019-09-19T11:46:04.848360Z")
         expected_utc = datetime(2019, 9, 19, 11, 46, 4, 848360, tzinfo=timezone.utc)
         self.assertEqual(got.replace(tzinfo=None),
                          expected_utc.astimezone().replace(tzinfo=None))
+
+    def test_iso_utc_is_normalized_to_remote_timezone(self):
+        self.assertEqual(
+            logslice.parse_server_time(
+                "2019-09-19T11:46:04.848360Z", "+0300"),
+            self.datetime(2019, 9, 19, 14, 46, 4, 848360),
+        )
+
+    def test_iso_utc_is_unresolved_without_remote_timezone(self):
+        self.assertIsNone(logslice.parse_server_time(
+            "2019-09-19T11:46:04.848360Z", "unknown"))
 
     def test_partial_fields_are_rejected(self):
         # Half-written time fields and a fraction without seconds are not parsed
@@ -396,6 +817,343 @@ class SplitTimeRangeTest(unittest.TestCase):
             ("11:27", "11:28 - 11:29"))
 
 
+class FileMd5Test(unittest.TestCase):
+    """_file_md5 is the local-side of the binary-reuse check."""
+
+    def test_stable_hex(self):
+        content = b"logslice binary contents\n"
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(content)
+            path = f.name
+        try:
+            md5 = logslice._file_md5(path)
+            self.assertRegex(md5, r"^[0-9a-f]{32}$")
+            self.assertEqual(md5, hashlib.md5(content).hexdigest())  # matches stdlib
+            self.assertEqual(md5, logslice._file_md5(path))  # idempotent
+        finally:
+            os.unlink(path)
+
+    def test_changes_with_content(self):
+        with tempfile.NamedTemporaryFile(delete=False) as fa:
+            fa.write(b"a")
+            pa = fa.name
+        with tempfile.NamedTemporaryFile(delete=False) as fb:
+            fb.write(b"b")
+            pb = fb.name
+        try:
+            self.assertNotEqual(logslice._file_md5(pa), logslice._file_md5(pb))
+        finally:
+            os.unlink(pa)
+            os.unlink(pb)
+
+
+class _RecordingSsh(logslice.Ssh):
+    """An Ssh that records remote calls and answers md5sum/run from a script,
+    without touching the network. Used to test copy_binary's md5-skip + the
+    cat-based copy path."""
+    def __init__(self, remote_md5_value):
+        super().__init__("unused")
+        self._remote_md5_value = remote_md5_value
+        self.calls = []
+        self.copies = []  # list of (local_path, remote_path) passed to _copy_via_ssh
+
+    def run(
+            self,
+            argv,
+            capture=True,
+            check=True,
+            warn_on_error=False,
+            retries=0,
+            retry_delay=1.0,
+            retry_on_empty=False):
+        self.calls.append(argv)
+        if argv[:2] == ["sh", "-c"] and "md5sum" in argv[2]:
+            remote_path = argv[-1]
+            return (self._remote_md5_value + "  " + remote_path + "\n"
+                    if self._remote_md5_value else "")
+        return ""
+
+    def _copy_via_ssh(self, local_path, remote_path):
+        # stub the actual network copy — just record that it was attempted.
+        self.copies.append((local_path, remote_path))
+
+
+class CopyBinaryTest(unittest.TestCase):
+    """copy_binary reuses the ssh socket (cat, not scp) and skips the copy when
+    the remote md5 already matches the local binary (the YTADMIN-13042 fix)."""
+
+    def _local_bin(self, content=b"binary v1"):
+        import tempfile
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.write(content)
+        f.close()
+        return f.name
+
+    def test_skips_copy_when_remote_md5_matches(self):
+        local = self._local_bin()
+        try:
+            local_md5 = logslice._file_md5(local)
+            ssh = _RecordingSsh(remote_md5_value=local_md5)
+            ssh.copy_binary(local, "/tmp/logslice")
+            self.assertEqual(ssh.calls[0][-1], "/tmp/logslice")
+            self.assertEqual(ssh.copies, [])
+        finally:
+            os.unlink(local)
+
+    def test_attempts_copy_when_remote_differs(self):
+        local = self._local_bin(b"binary v1")
+        try:
+            ssh = _RecordingSsh(remote_md5_value="0" * 32)  # different md5
+            ssh.copy_binary(local, "/tmp/logslice")
+            self.assertEqual(ssh.calls[0][-1], "/tmp/logslice")
+            self.assertEqual(ssh.copies, [(local, "/tmp/logslice")])
+        finally:
+            os.unlink(local)
+
+    def test_copy_when_remote_file_absent(self):
+        local = self._local_bin(b"binary v1")
+        try:
+            ssh = _RecordingSsh(remote_md5_value=None)  # md5sum returns ""
+            ssh.copy_binary(local, "/tmp/logslice")
+            # remote_md5 returns None -> must copy.
+            self.assertEqual(ssh.copies, [(local, "/tmp/logslice")])
+        finally:
+            os.unlink(local)
+
+
+class AtomicCopyTest(unittest.TestCase):
+    def test_upload_uses_temporary_file_and_atomic_replace(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"", stderr=b"")
+        ssh = logslice.Ssh("unused")
+        with tempfile.NamedTemporaryFile() as local:
+            with mock.patch.object(
+                    logslice.subprocess, "run", return_value=completed) as run:
+                ssh._copy_via_ssh(local.name, "/tmp/logslice")
+
+        command = run.call_args.args[0][-1]
+        self.assertIn('cat > "$tmp"', command)
+        self.assertIn('chmod +x "$tmp"', command)
+        self.assertIn('mv -f -- "$tmp" /tmp/logslice', command)
+        self.assertNotIn("cat > /tmp/logslice", command)
+
+
+class RemoteMd5Test(unittest.TestCase):
+    def test_only_reuses_executable_file(self):
+        ssh = _RecordingSsh(remote_md5_value="abcdef0123456789abcdef0123456789")
+        ssh.remote_md5("/tmp/logslice")
+        self.assertIn('[ -x "$1" ]', ssh.calls[0][2])
+
+    def test_parses_md5_token(self):
+        ssh = _RecordingSsh(remote_md5_value="abcdef0123456789abcdef0123456789")
+        self.assertEqual(ssh.remote_md5("/tmp/logslice"),
+                         "abcdef0123456789abcdef0123456789")
+
+    def test_returns_none_when_absent(self):
+        # md5sum on a missing file prints nothing to stdout (check=False) -> None.
+        ssh = _RecordingSsh(remote_md5_value=None)
+        self.assertIsNone(ssh.remote_md5("/tmp/missing"))
+
+    def test_rejects_non_hex(self):
+        ssh = _RecordingSsh(remote_md5_value="not-an-md5")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(ssh.remote_md5("/tmp/logslice"))
+
+    def test_warns_on_unparseable_md5_output(self):
+        # md5sum exits 0 but prints a non-hex token (corrupted binary / wrong
+        # tool): remote_md5 returns None but must WARN, not stay silent.
+        ssh = _RecordingSsh(remote_md5_value="garbage-not-hex-at-all")
+        # _RecordingSsh.run returns the stored string with exit 0; remote_md5
+        # must surface a warning about the unparseable output.
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertIsNone(ssh.remote_md5("/tmp/logslice"))
+        self.assertIn("unparseable output", buf.getvalue())
+
+
+class SshRunTest(unittest.TestCase):
+    """Guard against silent error swallowing: every non-zero exit / probe
+    failure must surface its stderr, never return empty as if nothing happened."""
+
+    @staticmethod
+    def _result(returncode, stdout="", stderr=""):
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_run_check_false_surfaces_stderr_warning(self):
+        ssh = logslice.Ssh("unused")
+        result = self._result(1, stderr="md5sum: /tmp/x: Permission denied")
+        buf = io.StringIO()
+        with mock.patch.object(logslice.subprocess, "run", return_value=result):
+            with contextlib.redirect_stderr(buf):
+                out = ssh.run(
+                    ["md5sum", "/tmp/x"],
+                    check=False,
+                    capture=True,
+                    warn_on_error=True)
+        self.assertEqual(out, "")                      # non-fatal: empty stdout
+        self.assertIn("Permission denied", buf.getvalue())  # but stderr surfaced
+        self.assertIn("non-fatal", buf.getvalue())
+
+    def test_run_check_false_silent_by_default(self):
+        # The common case (ls of a missing archive dir) must stay silent: a
+        # non-zero exit with stderr is NOT warned unless warn_on_error=True, so
+        # a clean run isn't polluted with "No such file or directory" noise.
+        ssh = logslice.Ssh("unused")
+        result = self._result(
+            2, stderr="ls: cannot access '/x': No such file or directory")
+        buf = io.StringIO()
+        with mock.patch.object(logslice.subprocess, "run", return_value=result):
+            with contextlib.redirect_stderr(buf):
+                out = ssh.run(["ls", "-1", "/x"], check=False, capture=True)
+        self.assertEqual(out, "")
+        self.assertEqual(buf.getvalue(), "")            # silent by default
+
+    def test_run_check_false_reports_failure_without_stderr(self):
+        # A non-zero exit is still visible when the remote command supplied no
+        # diagnostic text of its own.
+        ssh = logslice.Ssh("unused")
+        result = self._result(2)
+        buf = io.StringIO()
+        with mock.patch.object(logslice.subprocess, "run", return_value=result):
+            with contextlib.redirect_stderr(buf):
+                out = ssh.run(
+                    ["ls", "-1", "/no/such/dir"],
+                    check=False,
+                    capture=True,
+                    warn_on_error=True)
+        self.assertEqual(out, "")
+        self.assertIn("no stderr", buf.getvalue())
+
+    def test_retry_always_warns_on_total_failure(self):
+        # Even without --verbose, a probe that fails every retry must print why
+        # (not swallow the stderr). Regression for the verbose-gated message.
+        ssh = logslice.Ssh("unused")
+        results = [self._result(1, stderr="Broken pipe") for _ in range(3)]
+        buf = io.StringIO()
+        with mock.patch.object(
+                logslice.subprocess, "run", side_effect=results) as run:
+            with contextlib.redirect_stderr(buf):
+                out = ssh.run(
+                    ["logslice", "--info", "/p"],
+                    check=False,
+                    warn_on_error=True,
+                    retries=2,
+                    retry_delay=0,
+                    retry_on_empty=True)
+        self.assertEqual(out, "")
+        self.assertEqual(run.call_count, 3)
+        msg = buf.getvalue()
+        self.assertIn("after 3 attempt(s)", msg)
+        self.assertIn("Broken pipe", msg)
+
+    def test_retry_quiet_after_transient_failures(self):
+        ssh = logslice.Ssh("unused")
+        results = [
+            self._result(1, stderr="Broken pipe"),
+            self._result(0, stdout=""),
+            self._result(0, stdout="first: x\nlast: y\n"),
+        ]
+        buf = io.StringIO()
+        with mock.patch.object(
+                logslice.subprocess, "run", side_effect=results) as run:
+            with contextlib.redirect_stderr(buf):
+                out = ssh.run(
+                    ["logslice", "--info", "/p"],
+                    check=False,
+                    warn_on_error=True,
+                    retries=2,
+                    retry_delay=0,
+                    retry_on_empty=True)
+        self.assertEqual(out, "first: x\nlast: y\n")
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_streaming_command_rejects_retries(self):
+        ssh = logslice.Ssh("unused")
+        with self.assertRaisesRegex(ValueError, "capture=True"):
+            ssh.run(["true"], capture=False, retries=1)
+
+
+class SshOptionsTest(unittest.TestCase):
+    """SSH socket and timeout settings are configurable with stable defaults."""
+
+    def test_skill_mcp_environment_supplies_shared_long_lived_socket(self):
+        with mock.patch.dict(os.environ, {
+                logslice.CONTROL_PATH_ENV: "/tmp/shared/%C",
+                logslice.CONTROL_PERSIST_ENV: "86400"}):
+            ssh = logslice.Ssh("h")
+        self.assertEqual(ssh._control_path, "/tmp/shared/%C")
+        self.assertIn("ControlPersist=86400", ssh._base_opts)
+
+    def test_uses_supplied_control_socket(self):
+        ssh = logslice.Ssh("h", control_socket="/tmp/socket")
+        self.assertIn("ControlPath=/tmp/socket", ssh._base_opts)
+
+    def test_connect_probes_even_when_socket_path_exists(self):
+        ssh = logslice.Ssh("h", control_socket="/tmp/socket")
+        with mock.patch.object(ssh, "run") as run:
+            with contextlib.redirect_stderr(io.StringIO()):
+                ssh.connect()
+        run.assert_called_once_with(["true"])
+
+    def test_default_socket_and_timeouts(self):
+        ssh = logslice.Ssh("h")
+        self.assertIn("%r@%h:%p", ssh._control_path)
+        self.assertIn(
+            "ControlPersist={}".format(logslice.CONTROL_PERSIST_DEFAULT),
+            ssh._base_opts)
+        self.assertIn(
+            "ConnectTimeout={}".format(logslice.CONNECT_TIMEOUT_DEFAULT),
+            ssh._base_opts)
+
+    def test_custom_timeouts(self):
+        ssh = logslice.Ssh("h", control_persist=90, connect_timeout=7)
+        self.assertIn("ControlPersist=90", ssh._base_opts)
+        self.assertIn("ConnectTimeout=7", ssh._base_opts)
+
+
+class _InfoSsh:
+    def __init__(self, output):
+        self.output = output
+        self.calls = []
+
+    def run(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        return self.output
+
+
+class InfoFallbackTest(unittest.TestCase):
+    def test_info_returns_none_none_on_probe_failure_without_abort(self):
+        # A FileSelector whose --info probe always fails: info() must return
+        # (None, None) and not sys.exit, so the selector falls back to hints.
+        files = [logslice.LogFile(
+            name="m.debug.log.2026-06-19_11-00.zst", base="m", channel="debug",
+            rotation=".2026-06-19_11-00.zst", directory="/d")]
+        ssh = _InfoSsh("")
+        sel = logslice.FileSelector(ssh, "/tmp/logslice", files)
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            first, last = sel.info(0)
+        self.assertIsNone(first)
+        self.assertIsNone(last)
+        self.assertIn("falling back", warning.getvalue())
+        self.assertEqual(ssh.calls[0][1]["retries"], 2)
+        self.assertTrue(ssh.calls[0][1]["retry_on_empty"])
+
+    def test_info_parses_when_probe_succeeds(self):
+        files = [logslice.LogFile(
+            name="m.debug.log.2026-06-19_11-00.zst", base="m", channel="debug",
+            rotation=".2026-06-19_11-00.zst", directory="/d")]
+        ssh = _InfoSsh(
+            "first: 2026-06-19 10:30:00,000000\n"
+            "last: 2026-06-19 11:00:00,000000\n")
+        sel = logslice.FileSelector(ssh, "/tmp/logslice", files)
+        first, last = sel.info(0)
+        self.assertEqual(first, datetime(2026, 6, 19, 10, 30))
+        self.assertEqual(last, datetime(2026, 6, 19, 11, 0))
+
+
 def _info_time(hour, minute):
     """A logslice --info timestamp on the incident day, matching INFO_RE."""
     return "2026-06-19 {:02d}:{:02d}:00,000000".format(hour, minute)
@@ -414,7 +1172,15 @@ class FakeSsh:
         self._info = info
         self.info_calls = []
 
-    def run(self, argv, capture=True, check=True):
+    def run(
+            self,
+            argv,
+            capture=True,
+            check=True,
+            warn_on_error=False,
+            retries=0,
+            retry_delay=1.0,
+            retry_on_empty=False):
         if argv[:2] == ["ls", "-1"]:
             directory = argv[2]
             if directory not in self._listings:
@@ -468,7 +1234,7 @@ def _select(ssh, start, end, archive_dir=ARCHIVE_DIR):
     end_time = logslice.parse_user_time(end) if end else None
     series = logslice.discover_series(
         ssh, "debug", start_time, end_time, archive_dir)
-    selected, _ = logslice.select_log_files(
+    selected, _, _ = logslice.select_log_files(
         ssh, "/tmp/logslice", series, start_time, end_time)
     return selected
 
@@ -497,6 +1263,165 @@ class ArchiveParsingTest(unittest.TestCase):
     def test_index_sidecar_rejected(self):
         self.assertIsNone(
             logslice.parse_log_name("master.debug.log.1.zst.trindex", LIVE_DIR))
+
+
+class ComponentRoutingTest(unittest.TestCase):
+    def test_legacy_tablet_node_hostname_maps_to_node_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "vla4-5603-sessions-003-tab-markov.vla.yp-c.yandex.net"
+            ),
+            ("tablet-node", "node"),
+        )
+
+    def test_tablet_node_hostname_maps_to_node_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "sas5-5383-tab-node-ada.sas.yp-c.yandex.net"
+            ),
+            ("tablet-node", "node"),
+        )
+
+    def test_tablet_sen_hostname_maps_to_node_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "vla5-6094-bundlename-001-tab-sen-v.vla.yp-c.yandex.net"
+            ),
+            ("tablet-node", "node"),
+        )
+
+    def test_node_hostname_resolves_location_suffixed_base(self):
+        route = logslice.resolve_component_route(
+            "vla5-6094-bundlename-001-tab-sen-v.vla.yp-c.yandex.net",
+            None,
+            ["node-vla5-6094"],
+        )
+        self.assertEqual(route["role"], "tablet-node")
+        self.assertEqual(route["component"], "node")
+        self.assertEqual(route["base"], "node-vla5-6094")
+
+    def test_master_hostname_maps_to_master_base(self):
+        self.assertEqual(
+            logslice.infer_host_component("m001-zeno.vla.yp-c.yandex.net"),
+            ("master", "master"),
+        )
+
+    def test_bare_master_hostname_maps_to_master_base(self):
+        self.assertEqual(
+            logslice.infer_host_component("mc014-seneca-vla"),
+            ("master", "master"),
+        )
+
+    def test_master_cache_hostname_maps_to_master_cache_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "master-cache-0a42-zeno-9d1f.vla.yp-c.yandex.net"
+            ),
+            ("master-cache", "master-cache"),
+        )
+
+    def test_rpc_proxy_hostname_maps_to_rpc_proxy_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "vla0-0261-flow-dev-003-rpc-zeno.vla.yp-c.yandex.net"
+            ),
+            ("rpc-proxy", "proxy-vla0-0261"),
+        )
+
+    def test_http_proxy_hostname_maps_to_http_proxy_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "vla0-6979-proxy-zeno.vla.yp-c.yandex.net"
+            ),
+            ("http-proxy", "proxy-vla0-6979"),
+        )
+
+    def test_clock_hostname_maps_to_clock_base(self):
+        self.assertEqual(
+            logslice.infer_host_component(
+                "clock01-pythia.sas.yp-c.yandex.net"
+            ),
+            ("clock", "clock"),
+        )
+
+    def test_master_candidate_selection_beats_more_numerous_sidecar(self):
+        parsed = [
+            logslice.parse_log_name("master-vla2-1217.debug.log"),
+            logslice.parse_log_name("push-client.debug.log"),
+            logslice.parse_log_name("push-client.debug.log.1.zst"),
+            logslice.parse_log_name("push-client.debug.log.2.zst"),
+        ]
+        route = logslice.resolve_component_route(
+            "m001-zeno.vla.yp-c.yandex.net",
+            None,
+            ["master-vla2-1217", "push-client"],
+        )
+        base, files = logslice.order_series(
+            parsed, "debug", route["base"]
+        )
+        self.assertEqual(route["component"], "master")
+        self.assertEqual(route["base"], "master-vla2-1217")
+        self.assertEqual(base, "master-vla2-1217")
+        self.assertEqual(
+            [item.name for item in files], ["master-vla2-1217.debug.log"]
+        )
+
+    def test_push_client_has_lower_fallback_priority(self):
+        parsed = [
+            logslice.parse_log_name("node.debug.log"),
+            logslice.parse_log_name("push-client.debug.log"),
+            logslice.parse_log_name("push-client.debug.log.1.zst"),
+        ]
+        base, _ = logslice.order_series(parsed, "debug")
+        self.assertEqual(base, "node")
+
+    def test_rpc_proxy_route_uses_deployed_log_base(self):
+        route = logslice.resolve_component_route(
+            "vla0-0261-flow-dev-003-rpc-zeno.vla.yp-c.yandex.net",
+            None,
+            ["proxy-vla0-0261", "push-client"],
+        )
+        self.assertEqual(route["component"], "proxy-vla0-0261")
+        self.assertEqual(route["base"], "proxy-vla0-0261")
+
+    def test_explicit_component_takes_precedence(self):
+        route = logslice.resolve_component_route(
+            "m001-zeno.vla.yp-c.yandex.net",
+            "push-client",
+            ["master-vla2-1217", "push-client"],
+        )
+        self.assertEqual(route["component"], "push-client")
+        self.assertEqual(route["base"], "push-client")
+        self.assertEqual(route["source"], "--component")
+
+    def test_unknown_hostname_fails_with_candidates(self):
+        with self.assertRaisesRegex(ValueError, "master, push-client"):
+            logslice.resolve_component_route(
+                "mystery-pod.sas.yp-c.yandex.net",
+                None,
+                ["push-client", "master"],
+            )
+
+    def test_metadata_names_route_and_roots(self):
+        route = logslice.resolve_component_route(
+            "m001-zeno.vla.yp-c.yandex.net", None, ["master-vla2-1217"]
+        )
+        self.assertEqual(
+            logslice.routing_metadata(route, ["logs", "/archive/2026-08-05"]),
+            [
+                "Log routing: role=master component=master "
+                "base=master-vla2-1217 source=hostname confidence=high",
+                "Resolved log roots: logs, /archive/2026-08-05",
+            ],
+        )
+
+    def test_master_archive_is_only_used_for_master_routes(self):
+        self.assertTrue(logslice.should_use_master_archive(
+            "m001-zeno.vla.yp-c.yandex.net", None))
+        self.assertFalse(logslice.should_use_master_archive(
+            "sas5-5383-tab-node-ada.sas.yp-c.yandex.net", None))
+        self.assertFalse(logslice.should_use_master_archive(
+            "master-cache-0a42-zeno-9d1f.vla.yp-c.yandex.net", None))
 
 
 class ArchiveDayDirsTest(unittest.TestCase):
@@ -546,6 +1471,128 @@ class ArchiveDiscoveryTest(unittest.TestCase):
 
 
 class ArchiveSelectionTest(unittest.TestCase):
+    def _coverage(self, start, end):
+        ssh = _make_ssh()
+        start_time = logslice.parse_user_time(start)
+        end_time = logslice.parse_user_time(end)
+        series = logslice.discover_series(
+            ssh, "debug", start_time, end_time, ARCHIVE_DIR)
+        selected, _, coverage = logslice.select_log_files(
+            ssh, "/tmp/logslice", series, start_time, end_time)
+        gaps = logslice.find_coverage_gaps(
+            start_time, end_time, {"debug": coverage})
+        return selected, gaps
+
+    def test_full_window_bounds_have_no_gaps(self):
+        selected, gaps = self._coverage(
+            "2026-06-19 10:15", "2026-06-19 11:45")
+        self.assertTrue(selected)
+        self.assertEqual(gaps, [])
+
+    def test_archive_live_gap_is_reported(self):
+        start_time = logslice.parse_user_time("2026-06-19 10:45")
+        end_time = logslice.parse_user_time("2026-06-19 11:15")
+        intervals = [
+            (logslice.parse_user_time("2026-06-19 10:30"),
+             logslice.parse_user_time("2026-06-19 11:00")),
+            (logslice.parse_user_time("2026-06-19 11:05"),
+             logslice.parse_user_time("2026-06-19 11:30")),
+        ]
+        self.assertEqual(
+            logslice.find_coverage_gaps(
+                start_time, end_time, {"debug": intervals}),
+            [{
+                "log_type": "debug",
+                "start": "2026-06-19 11:00:00",
+                "end": "2026-06-19 11:05:00",
+            }],
+        )
+
+    def test_missing_middle_rotation_is_reported(self):
+        successor = "master.debug.log.2026-06-19_11-30.zst"
+        ssh = FakeSsh(
+            {ARCHIVE_DAY: [ARCH_EARLY, successor]},
+            {
+                ARCHIVE_DAY + "/" + ARCH_EARLY: ((10, 0), (10, 30)),
+                ARCHIVE_DAY + "/" + successor: ((11, 0), (11, 30)),
+            },
+        )
+        start_time = logslice.parse_user_time("2026-06-19 10:15")
+        end_time = logslice.parse_user_time("2026-06-19 11:15")
+        files = [
+            logslice.parse_log_name(name, ARCHIVE_DAY)
+            for name in [ARCH_EARLY, successor]
+        ]
+
+        selected, _, coverage = logslice.select_log_files(
+            ssh, "/tmp/logslice", [("archive", "master", files)],
+            start_time, end_time)
+
+        self.assertEqual(selected, files)
+        self.assertEqual(
+            logslice.find_coverage_gaps(
+                start_time, end_time, {"debug": coverage}),
+            [{
+                "log_type": "debug",
+                "start": "2026-06-19 10:30:00",
+                "end": "2026-06-19 11:00:00",
+            }],
+        )
+
+    def test_selected_file_does_not_hide_missing_window_prefix(self):
+        selected, gaps = self._coverage(
+            "2026-06-19 09:45", "2026-06-19 10:15")
+        self.assertTrue(selected)
+        self.assertEqual(gaps, [{
+            "log_type": "debug",
+            "start": "2026-06-19 09:45:00",
+            "end": "2026-06-19 10:00:00",
+        }])
+
+    def test_selected_file_does_not_hide_missing_window_suffix(self):
+        selected, gaps = self._coverage(
+            "2026-06-19 11:45", "2026-06-19 12:15")
+        self.assertTrue(selected)
+        self.assertEqual(gaps, [{
+            "log_type": "debug",
+            "start": "2026-06-19 12:00:00",
+            "end": "2026-06-19 12:15:00",
+        }])
+
+    def test_short_gap_between_rotations_is_ignored(self):
+        start_time = logslice.parse_user_time("2026-06-19 10:45")
+        end_time = logslice.parse_user_time("2026-06-19 11:15")
+        intervals = [
+            (logslice.parse_user_time("2026-06-19 10:30:00"),
+             logslice.parse_user_time("2026-06-19 11:00:00")),
+            (logslice.parse_user_time("2026-06-19 11:00:59"),
+             logslice.parse_user_time("2026-06-19 11:30:00")),
+        ]
+        self.assertEqual(
+            logslice.find_coverage_gaps(
+                start_time, end_time, {"debug": intervals}),
+            [],
+        )
+
+    def test_one_minute_gap_between_rotations_is_reported(self):
+        start_time = logslice.parse_user_time("2026-06-19 10:45")
+        end_time = logslice.parse_user_time("2026-06-19 11:15")
+        intervals = [
+            (logslice.parse_user_time("2026-06-19 10:30:00"),
+             logslice.parse_user_time("2026-06-19 11:00:00")),
+            (logslice.parse_user_time("2026-06-19 11:01:00"),
+             logslice.parse_user_time("2026-06-19 11:30:00")),
+        ]
+        self.assertEqual(
+            logslice.find_coverage_gaps(
+                start_time, end_time, {"debug": intervals}),
+            [{
+                "log_type": "debug",
+                "start": "2026-06-19 11:00:00",
+                "end": "2026-06-19 11:01:00",
+            }],
+        )
+
     def test_pure_archive_window_selects_only_archive(self):
         selected = _select(_make_ssh(), "2026-06-19 10:05", "2026-06-19 10:25")
         self.assertEqual(_names_with_dirs(selected),

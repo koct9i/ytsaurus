@@ -323,6 +323,7 @@ class TSQLParser(parser.Parser):
     LOG_DEFAULTS_TO_LN = True
     STRING_ALIASES = True
     NO_PAREN_IF_COMMANDS = False
+    UNPIVOT_VALUE_COLUMNS_FIRST = True
 
     NO_PAREN_FUNCTIONS = {
         **parser.Parser.NO_PAREN_FUNCTIONS,
@@ -363,6 +364,11 @@ class TSQLParser(parser.Parser):
         ),
         "DATENAME": _build_formatted_time(exp.TimeToStr, full_format_mapping=True),
         "DATETIMEFROMPARTS": _build_datetimefromparts,
+        "DAY": lambda args: exp.Day(
+            this=exp.TsOrDsToDate(
+                this=seq_get(args, 0), default_date=exp.Literal.string("1900-01-01")
+            )
+        ),
         "EOMONTH": _build_eomonth,
         "FORMAT": _build_format,
         "GETDATE": exp.CurrentTimestamp.from_arg_list,
@@ -372,6 +378,11 @@ class TSQLParser(parser.Parser):
         "JSON_VALUE": parser.build_extract_json_with_path(exp.JSONExtractScalar),
         "LEN": _build_with_arg_as_text(exp.Length),
         "LEFT": _build_with_arg_as_text(exp.Left),
+        "MONTH": lambda args: exp.Month(
+            this=exp.TsOrDsToDate(
+                this=seq_get(args, 0), default_date=exp.Literal.string("1900-01-01")
+            )
+        ),
         "NEWID": exp.Uuid.from_arg_list,
         "RIGHT": _build_with_arg_as_text(exp.Right),
         "PARSENAME": _build_parsename,
@@ -385,6 +396,11 @@ class TSQLParser(parser.Parser):
         "SYSTEM_USER": exp.CurrentUser.from_arg_list,
         "TIMEFROMPARTS": _build_timefromparts,
         "DATETRUNC": _build_datetrunc,
+        "YEAR": lambda args: exp.Year(
+            this=exp.TsOrDsToDate(
+                this=seq_get(args, 0), default_date=exp.Literal.string("1900-01-01")
+            )
+        ),
     }
 
     JOIN_HINTS = {"LOOP", "HASH", "MERGE", "REMOTE"}
@@ -402,7 +418,6 @@ class TSQLParser(parser.Parser):
 
     STATEMENT_PARSERS = {
         **parser.Parser.STATEMENT_PARSERS,
-        TokenType.DECLARE: lambda self: self._parse_declare(),
         TokenType.EXECUTE: lambda self: self._parse_execute(),
     }
 
@@ -451,10 +466,20 @@ class TSQLParser(parser.Parser):
     }
 
     def _parse_execute(self) -> exp.Execute:
+        return_status = None
+        index = self._index
+        if self._match(TokenType.PARAMETER):
+            param = self._parse_parameter()
+            if self._match(TokenType.EQ):
+                return_status = param
+            else:
+                self._retreat(index)
+
         execute = self.expression(
             exp.Execute(
                 this=self._parse_table(schema=True),
                 expressions=self._parse_csv(self._parse_expression),
+                return_status=return_status,
             )
         )
 

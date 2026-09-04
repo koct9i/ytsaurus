@@ -55,7 +55,7 @@ public:
         : Tablet_(tablet)
         , Context_(tabletContext)
         , Host_(Context_->GetTabletWriteManagerHost().Get())
-        , Logger(TabletNodeLogger().WithTag("TabletId: %v", Tablet_->GetId()))
+        , Logger(TabletNodeLogger().WithTag("TabletId", Tablet_->GetId()))
     {
         // May be null in unittests.
         if (const auto& memoryUsageTracker = Context_->GetNodeMemoryUsageTracker()) {
@@ -117,8 +117,8 @@ public:
         // anything here.
         auto writeContext = CreateWriteContext(transaction);
         if (transaction->GetTransientGeneration() == generation && !lockless) {
-            auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
-            auto& prelockedRows = transientWriteState->PrelockedRows;
+            auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
+            auto& prelockedRows = lockState->PrelockedRows;
 
             // Geometric reserve: LockedRows accumulates across write records, so an exact reserve would degrade to O(n^2).
             auto& lockedRows = *writeContext.LockedRows;
@@ -138,10 +138,9 @@ public:
                 transaction->SetHasSharedWriteLocks(true);
             }
 
-            YT_LOG_DEBUG(
-                "Prelocked rows confirmed (TransactionId: %v, RowCount: %v)",
-                transaction->GetId(),
-                writeRecord.RowCount);
+            YT_TLOG_DEBUG("Prelocked rows confirmed")
+                .With("TransactionId", transaction->GetId())
+                .With("RowCount", writeRecord.RowCount);
         }
 
         EnqueueTransactionWriteRecord(transaction, writeRecord, lockless);
@@ -189,13 +188,11 @@ public:
 
         FinishCommit(/*transaction*/ nullptr, transactionId, context.CommitTimestamp);
 
-        YT_LOG_DEBUG(
-            "Non-atomic rows committed (TransactionId: %v, "
-            "RowCount: %v, WriteRecordSize: %v, ActualTimestamp: %v)",
-            transactionId,
-            writeRecord.RowCount,
-            writeRecord.GetByteSize(),
-            context.CommitTimestamp);
+        YT_TLOG_DEBUG("Non-atomic rows committed")
+            .With("TransactionId", transactionId)
+            .With("RowCount", writeRecord.RowCount)
+            .With("WriteRecordSize", writeRecord.GetByteSize())
+            .With("ActualTimestamp", context.CommitTimestamp);
     }
 
     void WriteDelayedRows(
@@ -228,24 +225,22 @@ public:
         PrepareLockedRows(transaction);
         PrepareLocklessRows(transaction, persistent);
 
+        InsertPreparedTransactionToBarrier(transaction);
+
         if (!persistent) {
-            auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
-            InsertPreparedTransactionToBarrier(transaction, transientWriteState.Get());
             return;
         }
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        YT_VERIFY(!std::exchange(persistentWriteState->RowsPrepared, true));
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        YT_VERIFY(!std::exchange(writeLogState->RowsPrepared, true));
 
         if (Tablet_->GetSerializationType() == ETabletTransactionSerializationType::PerRow) {
-            persistentWriteState->LockedWriteLog.Freeze();
+            FreezeWriteLog(&writeLogState->LockedWriteLog);
         }
-
-        InsertPreparedTransactionToBarrier(transaction, persistentWriteState.Get());
 
         if (IsReplicatorWrite(transaction) &&
             Tablet_->GetBackupCheckpointTimestamp() &&
-            !persistentWriteState->LocklessWriteLog.Empty())
+            !writeLogState->LocklessWriteLog.Empty())
         {
             auto checkpointTimestamp = Tablet_->GetBackupCheckpointTimestamp();
             auto backupStage = Tablet_->GetBackupStage();
@@ -264,8 +259,8 @@ public:
                 THROW_ERROR_EXCEPTION("Cannot replicate rows into tablet %v since it has already passed "
                     "backup checkpoint and transaction start timestamp is less than checkpoint timestamp",
                     Tablet_->GetId())
-                    << TErrorAttribute("start_timestamp", transaction->GetStartTimestamp())
-                    << TErrorAttribute("checkpoint_timestamp", Tablet_->GetBackupCheckpointTimestamp());
+                    .With("start_timestamp", transaction->GetStartTimestamp())
+                    .With("checkpoint_timestamp", Tablet_->GetBackupCheckpointTimestamp());
             }
         }
     }
@@ -279,17 +274,15 @@ public:
 
         const auto& mountConfig = Tablet_->GetSettings().MountConfig;
         if (auto delay = mountConfig->Testing.SyncDelayInWriteTransactionCommit) {
-            YT_LOG_DEBUG("Started sleeping in transaction commit "
-                "(%v, TransactionId: %v)",
-                Tablet_->GetLoggingTag(),
-                transaction->GetId());
+            YT_TLOG_DEBUG("Started sleeping in transaction commit")
+                .With(Tablet_->GetLoggingTags())
+                .With("TransactionId", transaction->GetId());
 
             Sleep(delay);
 
-            YT_LOG_DEBUG("Finished sleeping in transaction commit "
-                "(%v, TransactionId: %v)",
-                Tablet_->GetLoggingTag(),
-                transaction->GetId());
+            YT_TLOG_DEBUG("Finished sleeping in transaction commit")
+                .With(Tablet_->GetLoggingTags())
+                .With("TransactionId", transaction->GetId());
         }
 
         // Fast path.
@@ -299,22 +292,12 @@ public:
 
         auto commitTimestamp = transaction->GetCommitTimestamp();
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        YT_VERIFY(!std::exchange(persistentWriteState->SomeRowsCommitted, true));
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        YT_VERIFY(!std::exchange(writeLogState->SomeRowsCommitted, true));
 
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
 
-        YT_VERIFY(transientWriteState->PrelockedRows.empty());
-
-        // Persist transient cookie.
-        // In 1PC prepare is transient and so is the cookie from the barrier insertion.
-        // Commit is the first persistent action after that prepare where we can persist this cookie.
-        //
-        // In replay persistent prepared barrier cookie will stay invalid.
-        // However in StartEpoch all relevant cookies will be recreated.
-        if (persistentWriteState->PreparedBarrierCookie == InvalidAsyncBarrierCookie) {
-            persistentWriteState->PreparedBarrierCookie = transientWriteState->PreparedBarrierCookie;
-        }
+        YT_VERIFY(lockState->PrelockedRows.empty());
 
         auto updateProfileCounters = [&] (const TTransactionWriteLog& log) {
             for (const auto& record : log) {
@@ -323,8 +306,8 @@ public:
                 counters->DataWeight.Increment(record.DataWeight);
             }
         };
-        updateProfileCounters(persistentWriteState->LocklessWriteLog);
-        updateProfileCounters(persistentWriteState->LockedWriteLog);
+        updateProfileCounters(writeLogState->LocklessWriteLog);
+        updateProfileCounters(writeLogState->LockedWriteLog);
 
         if (!NeedsSortedSharedWriteSerialization(transaction)) {
             CommitLockedRows(transaction);
@@ -332,7 +315,7 @@ public:
 
         if (NeedsLocklessSerialization(transaction)) {
             TCompactVector<TTableReplicaInfo*, 16> syncReplicas;
-            for (const auto& writeRecord : persistentWriteState->LocklessWriteLog) {
+            for (const auto& writeRecord : writeLogState->LocklessWriteLog) {
                 Tablet_->UpdateLastWriteTimestamp(commitTimestamp);
 
                 for (auto replicaId : writeRecord.SyncReplicaIds) {
@@ -348,14 +331,11 @@ public:
                 auto oldCurrentReplicationTimestamp = replicaInfo->GetCurrentReplicationTimestamp();
                 auto newCurrentReplicationTimestamp = std::max(oldCurrentReplicationTimestamp, commitTimestamp);
                 replicaInfo->SetCurrentReplicationTimestamp(newCurrentReplicationTimestamp);
-                YT_LOG_DEBUG(
-                    "Sync replicated rows committed (TransactionId: %v, ReplicaId: %v, CurrentReplicationTimestamp: %v -> %v, "
-                    "TotalRowCount: %v)",
-                    transaction->GetId(),
-                    replicaInfo->GetId(),
-                    oldCurrentReplicationTimestamp,
-                    newCurrentReplicationTimestamp,
-                    tablet->GetTotalRowCount());
+                YT_TLOG_DEBUG("Sync replicated rows committed")
+                    .With("TransactionId", transaction->GetId())
+                    .With("ReplicaId", replicaInfo->GetId())
+                    .WithFormat("CurrentReplicationTimestamp", "%v -> %v", oldCurrentReplicationTimestamp, newCurrentReplicationTimestamp)
+                    .With("TotalRowCount", tablet->GetTotalRowCount());
             }
 
             if (!syncReplicas.empty()) {
@@ -366,9 +346,8 @@ public:
         }
 
         if (NeedsSerialization(transaction)) {
-            YT_LOG_DEBUG(
-                "Transaction requires serialization in tablet (TransactionId: %v)",
-                transaction->GetId());
+            YT_TLOG_DEBUG("Transaction requires serialization in tablet")
+                .With("TransactionId", transaction->GetId());
 
             if (Tablet_->GetSerializationType() == ETabletTransactionSerializationType::PerRow) {
                 YT_VERIFY(Tablet_->IsPhysicallySorted());
@@ -422,10 +401,10 @@ public:
 
         auto codicilGuard = MakeCodicilGuard();
 
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
-        YT_VERIFY(transientWriteState->PrelockedRows.empty());
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
+        YT_VERIFY(lockState->PrelockedRows.empty());
 
-        if (transientWriteState->LockedRows.empty()) {
+        if (lockState->LockedRows.empty()) {
             CommitLocklessRows(transaction, /*delayed*/ true);
         } else {
             CommitLockedRows(transaction);
@@ -442,12 +421,12 @@ public:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
 
-        YT_VERIFY(transientWriteState->PrelockedRows.empty());
-        auto& lockedRows = transientWriteState->LockedRows;
-        auto& writeLog = persistentWriteState->LockedWriteLog;
+        YT_VERIFY(lockState->PrelockedRows.empty());
+        auto& lockedRows = lockState->LockedRows;
+        auto& writeLog = writeLogState->LockedWriteLog;
 
         DropTransactionWriteLog(transaction, &writeLog);
         lockedRows.clear();
@@ -466,8 +445,8 @@ public:
         TOpaqueWriteLogIndex writeLogIndex,
         bool onAfterSnapshotLoaded) override
     {
-        const auto persistentWriteState = FindTransactionPersistentWriteState(transaction->GetId());
-        const auto& writeLog = persistentWriteState->LockedWriteLog;
+        auto writeLogState = FindTransactionWriteLogState(transaction->GetId());
+        const auto& writeLog = writeLogState->LockedWriteLog;
         const auto& batchIt = writeLog[writeLogIndex.CommandBatchIndex];
         const auto& command = batchIt.WriteCommands.Commands()[writeLogIndex.CommandIndexInBatch];
 
@@ -493,41 +472,41 @@ public:
             // In this case, tablet does not have store manager initialized and
             // relock cannot be performed, however no rows are actually locked, so
             // we can just do nothing.
-            if (auto transientWriteState = FindTransactionTransientWriteState(transaction->GetId())) {
-                YT_VERIFY(transientWriteState->PrelockedRows.empty());
-                YT_VERIFY(transientWriteState->LockedRows.empty());
+            if (auto lockState = FindTransactionLockState(transaction->GetId())) {
+                YT_VERIFY(lockState->PrelockedRows.empty());
+                YT_VERIFY(lockState->LockedRows.empty());
                 YT_VERIFY(!transaction->GetTransient());
             }
 
             return;
         }
 
-        if (transientPrepareTimestamp != NullTimestamp && FindTransactionTransientWriteState(transaction->GetId())) {
+        if (transientPrepareTimestamp != NullTimestamp && FindTransactionLockState(transaction->GetId())) {
             UnprepareLockedRows(transaction, transientPrepareTimestamp);
         }
 
         // TODO: Some keys may be both prelocked and referenced in write log
         // in different generations, so this code is incorrect if tablet write
         // retries are enabled.
-        // NB: AbortPrelockedRows may create transient write state even if it not exists.
-        // This is undesired for transactions that are finished in this tablet but await
-        // serialization in other tables. Calling OnTransactionTransientReset for such
-        // transaction would othrewise resurrect transient write state for this tablet.
-        if (FindTransactionTransientWriteState(transaction->GetId())) {
+        // NB: AbortPrelockedRows may create a transient lock state even if it does not exist.
+        // This is not desired for transactions that have finished in this tablet but await
+        // serialization in other tables. Calling OnTransactionTransientReset for such a
+        // transaction would resurrect the transient lock state for this tablet otherwise.
+        if (FindTransactionLockState(transaction->GetId())) {
             AbortPrelockedRows(transaction);
         }
 
         // COMPAT(ifsmirnov)
-        // If transaction is transient, it is going to be removed, so we drop its write state.
-        // However, transaction may be persistent itself but have not yet had affected the tablet.
-        // In this case we still treat it as transient and drop its write state.
+        // If transaction is transient, it is going to be removed, so we drop its lock state.
+        // However, transaction may be persistent itself but have not yet affected the tablet.
+        // In this case we still treat it as transient and drop its lock state.
         if (Host_->GetDynamicConfig()->TabletCellWriteManager->DetectTransientTransactionsPerTablet) {
-            if (!TransactionIdToPersistentWriteState_.contains(transaction->GetId())) {
-                EraseOrCrash(TransactionIdToTransientWriteState_, transaction->GetId());
+            if (!TransactionIdToWriteLogState_.contains(transaction->GetId())) {
+                EraseOrCrash(TransactionIdToLockState_, transaction->GetId());
             }
         } else {
             if (transaction->GetTransient()) {
-                EraseOrCrash(TransactionIdToTransientWriteState_, transaction->GetId());
+                EraseOrCrash(TransactionIdToLockState_, transaction->GetId());
             }
         }
     }
@@ -564,35 +543,34 @@ public:
         auto progress = Tablet_->RuntimeData()->ReplicationProgress.Acquire();
         auto maxTimestamp = GetReplicationProgressMaxTimestamp(*progress);
         if (maxTimestamp >= commitTimestamp) {
-            YT_LOG_ALERT("Tablet replication progress is beyond current serialized transaction commit timestamp "
-                "(TabletId: %v, TransactionId: %v, CommitTimestamp: %v, MaxReplicationProgressTimestamp: %v, ReplicationProgress: %v)",
-                Tablet_->GetId(),
-                transaction->GetId(),
-                commitTimestamp,
-                maxTimestamp,
-                static_cast<TReplicationProgress>(*progress));
+            YT_TLOG_ALERT("Tablet replication progress is beyond current serialized transaction commit timestamp")
+                .With("TabletId", Tablet_->GetId())
+                .With("TransactionId", transaction->GetId())
+                .With("CommitTimestamp", commitTimestamp)
+                .With("MaxReplicationProgressTimestamp", maxTimestamp)
+                .With("ReplicationProgress", static_cast<TReplicationProgress>(*progress));
         } else {
             auto newProgress = AdvanceReplicationProgress(*progress, commitTimestamp);
             progress = New<TRefCountedReplicationProgress>(std::move(newProgress));
             Tablet_->RuntimeData()->ReplicationProgress.Store(progress);
 
-            YT_LOG_DEBUG("Replication progress updated (TabletId: %v, TransactionId: %v, ReplicationProgress: %v)",
-                Tablet_->GetId(),
-                transaction->GetId(),
-                static_cast<TReplicationProgress>(*progress));
+            YT_TLOG_DEBUG("Replication progress updated")
+                .With("TabletId", Tablet_->GetId())
+                .With("TransactionId", transaction->GetId())
+                .With("ReplicationProgress", static_cast<TReplicationProgress>(*progress));
         }
     }
 
     void BuildOrchidYson(TTransaction* transaction, IYsonConsumer* consumer) override
     {
-        const auto& transientWriteState = FindTransactionTransientWriteState(transaction->GetId());
-        const auto& persistentWriteState = FindTransactionPersistentWriteState(transaction->GetId());
+        auto lockState = FindTransactionLockState(transaction->GetId());
+        auto writeLogState = FindTransactionWriteLogState(transaction->GetId());
         BuildYsonFluently(consumer)
             .BeginMap()
-                .Item("locked_row_count").Value(transientWriteState ? transientWriteState->LockedRows.size() : 0)
-                .Item("prelocked_row_count").Value(transientWriteState ? transientWriteState->PrelockedRows.size() : 0)
-                .Item("locked_write_log_size").Value(persistentWriteState ? persistentWriteState->LockedWriteLog.Size() : 0)
-                .Item("lockless_write_log_size").Value(persistentWriteState ? persistentWriteState->LocklessWriteLog.Size() : 0)
+                .Item("locked_row_count").Value(lockState ? lockState->LockedRows.size() : 0)
+                .Item("prelocked_row_count").Value(lockState ? lockState->PrelockedRows.size() : 0)
+                .Item("locked_write_log_size").Value(writeLogState ? writeLogState->LockedWriteLog.Size() : 0)
+                .Item("lockless_write_log_size").Value(writeLogState ? writeLogState->LocklessWriteLog.Size() : 0)
             .EndMap();
     }
 
@@ -614,31 +592,30 @@ public:
 
         RemovePreparedTransactionFromBarrier(transaction);
         DropTransactionWriteLogs(transaction);
-        TransactionIdToPersistentWriteState_.erase(transaction->GetId());
-        TransactionIdToTransientWriteState_.erase(transaction->GetId());
+        TransactionIdToWriteLogState_.erase(transaction->GetId());
+        TransactionIdToLockState_.erase(transaction->GetId());
 
-        YT_LOG_DEBUG(
-            "Transaction finished in tablet (TransactionId: %v)",
-            transaction->GetId());
+        YT_TLOG_DEBUG("Transaction finished in tablet")
+            .With("TransactionId", transaction->GetId());
     }
 
     bool HasUnfinishedTransientTransactions() const override
     {
-        return !TransactionIdToTransientWriteState_.empty();
+        return !TransactionIdToLockState_.empty();
     }
 
     bool HasUnfinishedPersistentTransactions() const override
     {
-        return !TransactionIdToPersistentWriteState_.empty();
+        return !TransactionIdToWriteLogState_.empty();
     }
 
     THashSet<TTransactionId> GetAffectingTransactionIds() const override
     {
         THashSet<TTransactionId> result;
-        for (const auto& [transactionId, _] : TransactionIdToTransientWriteState_) {
+        for (const auto& [transactionId, _] : TransactionIdToLockState_) {
             result.insert(transactionId);
         }
-        for (const auto& [transactionId, _] : TransactionIdToPersistentWriteState_) {
+        for (const auto& [transactionId, _] : TransactionIdToWriteLogState_) {
             result.insert(transactionId);
         }
         return result;
@@ -646,8 +623,8 @@ public:
 
     bool HasWriteState(TTransaction* transaction) const override
     {
-        return TransactionIdToPersistentWriteState_.contains(transaction->GetId()) ||
-            TransactionIdToTransientWriteState_.contains(transaction->GetId());
+        return TransactionIdToWriteLogState_.contains(transaction->GetId()) ||
+            TransactionIdToLockState_.contains(transaction->GetId());
     }
 
     void StartEpoch() override
@@ -659,16 +636,13 @@ public:
             return;
         }
 
-        auto externalizationToken = Tablet_->SmoothMovementData().GetRole() == ESmoothMovementRole::Target
-            ? TTransactionExternalizationToken(
-                GetSiblingAvenueEndpointId(Tablet_->SmoothMovementData().GetSiblingAvenueEndpointId()))
-            : TTransactionExternalizationToken{};
+        auto externalizationToken = GetTransactionExternalizationToken();
 
         const auto& transactionManager = Host_->GetTransactionManager();
-        for (const auto& [transactionId, writeState] : TransactionIdToPersistentWriteState_) {
+        for (const auto& [transactionId, _] : TransactionIdToWriteLogState_) {
             auto* transaction = transactionManager->GetPersistentTransaction(transactionId, externalizationToken);
             if (transaction->WasDefinitelyPrepared()) {
-                InsertPreparedTransactionToBarrier(transaction, writeState.Get());
+                InsertPreparedTransactionToBarrier(transaction);
             }
         }
     }
@@ -677,12 +651,8 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        for (const auto& [_, writeState] : TransactionIdToTransientWriteState_) {
-            writeState->PreparedBarrierCookie = InvalidAsyncBarrierCookie;
-        }
-
-        for (const auto& [_, writeState] : TransactionIdToPersistentWriteState_) {
-            writeState->PreparedBarrierCookie = InvalidAsyncBarrierCookie;
+        for (const auto& [_, lockState] : TransactionIdToLockState_) {
+            lockState->PreparedBarrierCookie = InvalidAsyncBarrierCookie;
         }
 
         const auto& runtimeData = Tablet_->RuntimeData();
@@ -693,32 +663,33 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        TransactionIdToTransientWriteState_.clear();
-        TransactionIdToPersistentWriteState_.clear();
+        TransactionIdToLockState_.clear();
+        TransactionIdToWriteLogState_.clear();
 
-        WriteLogsMemoryTrackerGuard_.SetSize(0);
+        // TODO(tea-mur): Proper validation of write log memory accounting. See YT-29082
+        IncreaseAccountedWriteLogMemory(-WriteLogsMemoryTrackerGuard_.GetSize());
     }
 
     void Save(TSaveContext& context) const override
     {
         using NYT::Save;
 
-        TMapSerializer<TDefaultSerializer, TNonNullableIntrusivePtrSerializer<TDefaultSerializer>>::Save(context, TransactionIdToPersistentWriteState_);
+        TMapSerializer<TDefaultSerializer, TNonNullableIntrusivePtrSerializer<TDefaultSerializer>>::Save(context, TransactionIdToWriteLogState_);
     }
 
     void Load(TLoadContext& context) override
     {
         using NYT::Load;
 
-        TMapSerializer<TDefaultSerializer, TNonNullableIntrusivePtrSerializer<TDefaultSerializer>>::Load(context, TransactionIdToPersistentWriteState_);
+        TMapSerializer<TDefaultSerializer, TNonNullableIntrusivePtrSerializer<TDefaultSerializer>>::Load(context, TransactionIdToWriteLogState_);
     }
 
     TCallback<void(TSaveContext&)> AsyncSave() override
     {
         std::vector<std::pair<TTransactionId, TCallback<void(TSaveContext&)>>> transactions;
-        transactions.reserve(TransactionIdToPersistentWriteState_.size());
-        for (const auto& [transactionId, writeState] : TransactionIdToPersistentWriteState_) {
-            transactions.emplace_back(transactionId, writeState->AsyncSave());
+        transactions.reserve(TransactionIdToWriteLogState_.size());
+        for (const auto& [transactionId, writeLogState] : TransactionIdToWriteLogState_) {
+            transactions.emplace_back(transactionId, writeLogState->AsyncSave());
         }
 
         return BIND([transactions = std::move(transactions)] (TSaveContext& context) mutable {
@@ -744,10 +715,13 @@ public:
             context.CurrentTabletVersionedWriteIsUnversioned = false;
         });
 
-        for (int index = 0; index < std::ssize(TransactionIdToPersistentWriteState_); ++index) {
+        for (int index = 0; index < std::ssize(TransactionIdToWriteLogState_); ++index) {
             auto transactionId = Load<TTransactionId>(context);
-            const auto& writeState = GetOrCrash(TransactionIdToPersistentWriteState_, transactionId);
-            writeState->AsyncLoad(context);
+            const auto& writeLogState = GetOrCrash(TransactionIdToWriteLogState_, transactionId);
+            writeLogState->AsyncLoad(context);
+
+            IncreaseAccountedWriteLogMemory(writeLogState->LockedWriteLog.GetByteSize());
+            IncreaseAccountedWriteLogMemory(writeLogState->LocklessWriteLog.GetByteSize());
         }
     }
 
@@ -755,44 +729,41 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        auto externalizationToken = Tablet_->SmoothMovementData().GetRole() == ESmoothMovementRole::Target
-            ? TTransactionExternalizationToken(
-                GetSiblingAvenueEndpointId(Tablet_->SmoothMovementData().GetSiblingAvenueEndpointId()))
-            : TTransactionExternalizationToken{};
+        auto externalizationToken = GetTransactionExternalizationToken();
 
         const auto& transactionManager = Host_->GetTransactionManager();
-        for (const auto& [transactionId, writeState] : TransactionIdToPersistentWriteState_) {
+        for (const auto& [transactionId, writeLogState] : TransactionIdToWriteLogState_) {
             auto* transaction = transactionManager->GetPersistentTransaction(transactionId, externalizationToken);
 
-            if (writeState->RowsPrepared && Tablet_->GetSerializationType() == ETabletTransactionSerializationType::PerRow) {
-                writeState->LockedWriteLog.Freeze();
+            if (writeLogState->RowsPrepared && Tablet_->GetSerializationType() == ETabletTransactionSerializationType::PerRow) {
+                FreezeWriteLog(&writeLogState->LockedWriteLog);
             }
 
-            for (const auto& writeRecord : writeState->LockedWriteLog) {
+            for (const auto& writeRecord : writeLogState->LockedWriteLog) {
                 LockRows(transaction, writeRecord);
                 UpdateWriteRecordCounters(transaction, writeRecord);
             }
 
-            for (const auto& writeRecord : writeState->LocklessWriteLog) {
+            for (const auto& writeRecord : writeLogState->LocklessWriteLog) {
                 UpdateWriteRecordCounters(transaction, writeRecord);
             }
 
-            if (writeState->RowsPrepared) {
+            if (writeLogState->RowsPrepared) {
                 PrepareLockedRows(transaction);
                 PrepareLocklessRows(transaction, /*persistent*/ true, /*snapshotLoading*/ true);
             }
 
             // COMPAT(ponasenko-rs): Remove after ETabletReign::PerRowSequencer
-            if (!writeState->SomeRowsCommitted) {
+            if (!writeLogState->SomeRowsCommitted) {
                 auto transactionState = transaction->GetPersistentState();
-                writeState->SomeRowsCommitted = transactionState == ETransactionState::Committed || transactionState == ETransactionState::Serialized;
+                writeLogState->SomeRowsCommitted = transactionState == ETransactionState::Committed || transactionState == ETransactionState::Serialized;
             }
         }
 
         // NB: Serialization should start only after all transactions are prepared as each prepare action could change per-row barrier.
-        for (const auto& [transactionId, writeState] : TransactionIdToPersistentWriteState_) {
+        for (const auto& [transactionId, writeLogState] : TransactionIdToWriteLogState_) {
             auto* transaction = transactionManager->GetPersistentTransaction(transactionId, externalizationToken);
-            if (writeState->SomeRowsCommitted && Tablet_->GetSerializationType() == ETabletTransactionSerializationType::PerRow) {
+            if (writeLogState->SomeRowsCommitted && Tablet_->GetSerializationType() == ETabletTransactionSerializationType::PerRow) {
                 transaction->IncrementPartsLeftToPerRowSerialize();
 
                 // Lock groups that were already serialized before the snapshot saving were persisted to the snapshot as part of TSortedDynamicStore.
@@ -801,16 +772,16 @@ public:
                 StartSerializingLockedRows(transaction, /*onAfterSnapshotLoaded*/ true);
                 transaction->DecrementPartsLeftToPerRowSerialize();
 
-                // NB: Otherwise this transaction should be committed and removed TransactionIdToPersistentWriteState_ before saving to snapshot.
+                // NB: Otherwise this transaction should be committed and removed from TransactionIdToWriteLogState_ before saving to snapshot.
                 YT_VERIFY(transaction->GetPartsLeftToPerRowSerialize() != 0);
 
                 // COMPAT(ponasenko-rs): Remove after PersistPerRowSerializingTabletIds.
                 if (!transaction->PerRowSerializingTabletIds().contains(Tablet_->GetId())) {
                     Y_UNUSED(ETabletReign::PersistPerRowSerializingTabletIds);
 
-                    YT_LOG_ALERT("Per-row serializing transaction is not found in PerRowSerializingTabletIds (TransactionId: %v, TabletId: %v)",
-                        transaction->GetId(),
-                        Tablet_->GetId());
+                    YT_TLOG_ALERT("Per-row serializing transaction is not found in PerRowSerializingTabletIds")
+                        .With("TransactionId", transaction->GetId())
+                        .With("TabletId", Tablet_->GetId());
                     transaction->PerRowSerializingTabletIds().insert(Tablet_->GetId());
                 }
             }
@@ -833,14 +804,17 @@ private:
 
     DECLARE_THREAD_AFFINITY_SLOT(AutomatonThread);
 
-    struct TTransactionWriteStateBase
-    {
-        // NB: Not persisted. Only valid during an epoch.
-        TAsyncBarrierCookie PreparedBarrierCookie = InvalidAsyncBarrierCookie;
-    };
-
-    struct TTransactionPersistentWriteState final
-        : public TTransactionWriteStateBase
+    // Every transaction affecting this tablet has up to two pieces of state, tracked via two separate maps:
+    //  - TTransactionWriteLogState: the durable persistent record of what has been written.
+    //  - TTransactionLockState: transient per-epoch handles to the actual locked rows in the in-memory
+    //    dynamic stores and a similarly transient write barrier cookie.
+    //
+    // TTransactionLockState::LockedRows[i] always corresponds by index to the i-th record appended to
+    // TTransactionWriteLogState::LockedWriteLog.
+    //
+    // A transaction may have only lock state, only write log state or both,
+    // in which case the states can be updated independently.
+    struct TTransactionWriteLogState final
     {
         TTransactionWriteLog LocklessWriteLog;
         TTransactionIndexedWriteLog LockedWriteLog;
@@ -887,83 +861,102 @@ private:
             Load(context, LockedWriteLog);
         }
     };
-    using TTransactionPersistentWriteStatePtr = TIntrusivePtr<TTransactionPersistentWriteState>;
+    using TTransactionWriteLogStatePtr = TIntrusivePtr<TTransactionWriteLogState>;
 
-    struct TTransactionTransientWriteState final
-        : public TTransactionWriteStateBase
+    struct TTransactionLockState final
     {
+        TAsyncBarrierCookie PreparedBarrierCookie = InvalidAsyncBarrierCookie;
         TRingQueue<TSortedDynamicRowRef> PrelockedRows;
         std::vector<TSortedDynamicRowRef> LockedRows;
     };
-    using TTransactionTransientWriteStatePtr = TIntrusivePtr<TTransactionTransientWriteState>;
+    using TTransactionLockStatePtr = TIntrusivePtr<TTransactionLockState>;
 
-    THashMap<TTransactionId, TTransactionPersistentWriteStatePtr> TransactionIdToPersistentWriteState_;
-    THashMap<TTransactionId, TTransactionTransientWriteStatePtr> TransactionIdToTransientWriteState_;
+    class TWriteLogMemoryAccountingGuard
+    {
+    public:
+        TWriteLogMemoryAccountingGuard(
+            TTabletWriteManager* owner,
+            const TTransactionWriteLog& writeLog)
+            : Owner_(owner)
+            , WriteLog_(writeLog)
+            , BytesUsedAtCreation_(WriteLog_.GetByteSize())
+        { }
 
-    TTransactionPersistentWriteStatePtr FindTransactionPersistentWriteState(TTransactionId transactionId)
+        ~TWriteLogMemoryAccountingGuard()
+        {
+            i64 delta = WriteLog_.GetByteSize() - BytesUsedAtCreation_;
+            Owner_->IncreaseAccountedWriteLogMemory(delta);
+        }
+
+    private:
+        TTabletWriteManager* Owner_;
+        const TTransactionWriteLog& WriteLog_;
+        i64 BytesUsedAtCreation_;
+    };
+
+    THashMap<TTransactionId, TTransactionWriteLogStatePtr> TransactionIdToWriteLogState_;
+    THashMap<TTransactionId, TTransactionLockStatePtr> TransactionIdToLockState_;
+
+    TTransactionWriteLogStatePtr FindTransactionWriteLogState(TTransactionId transactionId)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(TypeFromId(transactionId) != EObjectType::NonAtomicTabletTransaction);
 
-        return GetOrDefault(TransactionIdToPersistentWriteState_, transactionId);
+        return GetOrDefault(TransactionIdToWriteLogState_, transactionId);
     }
 
-    TTransactionPersistentWriteStatePtr GetOrCreateTransactionPersistentWriteState(TTransactionId transactionId)
+    TTransactionWriteLogStatePtr GetOrCreateTransactionWriteLogState(TTransactionId transactionId)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
         YT_VERIFY(TypeFromId(transactionId) != EObjectType::NonAtomicTabletTransaction);
 
-        auto it = TransactionIdToPersistentWriteState_.find(transactionId);
-        if (it == TransactionIdToPersistentWriteState_.end()) {
-            auto writeState = New<TTransactionPersistentWriteState>();
-            EmplaceOrCrash(TransactionIdToPersistentWriteState_, transactionId, writeState);
-            return writeState;
-        } else {
-            return it->second;
+        auto it = TransactionIdToWriteLogState_.find(transactionId);
+        if (it == TransactionIdToWriteLogState_.end()) {
+            it = EmplaceOrCrash(TransactionIdToWriteLogState_, transactionId, New<TTransactionWriteLogState>());
         }
+        return it->second;
     }
 
-    TTransactionTransientWriteStatePtr FindTransactionTransientWriteState(TTransactionId transactionId)
+    TTransactionLockStatePtr FindTransactionLockState(TTransactionId transactionId)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(TypeFromId(transactionId) != EObjectType::NonAtomicTabletTransaction);
 
-        return GetOrDefault(TransactionIdToTransientWriteState_, transactionId);
+        return GetOrDefault(TransactionIdToLockState_, transactionId);
     }
 
-    TTransactionTransientWriteStatePtr GetOrCreateTransactionTransientWriteState(TTransactionId transactionId)
+    TTransactionLockStatePtr GetOrCreateTransactionLockState(TTransactionId transactionId)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(TypeFromId(transactionId) != EObjectType::NonAtomicTabletTransaction);
 
-        auto it = TransactionIdToTransientWriteState_.find(transactionId);
-        if (it == TransactionIdToTransientWriteState_.end()) {
-            auto writeState = New<TTransactionTransientWriteState>();
-            EmplaceOrCrash(TransactionIdToTransientWriteState_, transactionId, writeState);
-            return writeState;
-        } else {
-            return it->second;
+        auto it = TransactionIdToLockState_.find(transactionId);
+        if (it == TransactionIdToLockState_.end()) {
+            it = EmplaceOrCrash(TransactionIdToLockState_, transactionId, New<TTransactionLockState>());
         }
+        return it->second;
     }
 
-    //! Returns true if transaction has either transient or persistent
-    //! write state and false otherwise.
+    //! Returns true if transaction has either a transient lock state or
+    //! a persistent write log and false otherwise.
     bool HasWriteState(TTransactionId transactionId)
     {
         return
-            FindTransactionTransientWriteState(transactionId) ||
-            FindTransactionPersistentWriteState(transactionId);
+            FindTransactionLockState(transactionId) ||
+            FindTransactionWriteLogState(transactionId);
     }
 
-    void InsertPreparedTransactionToBarrier(TTransaction* transaction, TTransactionWriteStateBase* writeState)
+    void InsertPreparedTransactionToBarrier(TTransaction* transaction)
     {
         if (!Tablet_->IsPhysicallyOrdered()) {
             return;
         }
 
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
+
         // Transaction is already inserted into the barrier.
-        if (writeState->PreparedBarrierCookie != InvalidAsyncBarrierCookie) {
+        if (lockState->PreparedBarrierCookie != InvalidAsyncBarrierCookie) {
             return;
         }
 
@@ -971,12 +964,11 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG("Transaction inserted into per-tablet barrier (TransactionId: %v)",
-            transaction->GetId());
+        YT_TLOG_DEBUG("Transaction inserted into per-tablet barrier")
+            .With("TransactionId", transaction->GetId());
 
         const auto& runtimeData = Tablet_->RuntimeData();
-        auto cookie = runtimeData->PreparedTransactionBarrier.Insert();
-        writeState->PreparedBarrierCookie = cookie;
+        lockState->PreparedBarrierCookie = runtimeData->PreparedTransactionBarrier.Insert();
     }
 
     void RemovePreparedTransactionFromBarrier(TTransaction* transaction)
@@ -985,21 +977,34 @@ private:
             return;
         }
 
-        auto writeState = FindTransactionPersistentWriteState(transaction->GetId());
-        if (!writeState) {
+        auto lockState = FindTransactionLockState(transaction->GetId());
+
+        if (!lockState || lockState->PreparedBarrierCookie == InvalidAsyncBarrierCookie) {
             return;
         }
 
-        auto cookie = std::exchange(writeState->PreparedBarrierCookie, InvalidAsyncBarrierCookie);
-        if (cookie == InvalidAsyncBarrierCookie) {
-            return;
-        }
-
-        YT_LOG_DEBUG("Transaction removed from per-tablet barrier (TransactionId: %v)",
-            transaction->GetId());
+        YT_TLOG_DEBUG("Transaction removed from per-tablet barrier")
+            .With("TransactionId", transaction->GetId());
 
         const auto& runtimeData = Tablet_->RuntimeData();
-        runtimeData->PreparedTransactionBarrier.Remove(cookie);
+        runtimeData->PreparedTransactionBarrier.Remove(std::exchange(lockState->PreparedBarrierCookie, InvalidAsyncBarrierCookie));
+    }
+
+    void IncreaseAccountedWriteLogMemory(i64 delta)
+    {
+        WriteLogsMemoryTrackerGuard_.IncreaseSize(delta);
+        Tablet_->RuntimeData()->DynamicMemoryUsagePerType[ETabletDynamicMemoryType::WriteLogs].fetch_add(
+            delta,
+            std::memory_order::relaxed);
+    }
+
+    void FreezeWriteLog(TTransactionIndexedWriteLog* writeLog)
+    {
+        auto guard = TWriteLogMemoryAccountingGuard(
+            this,
+            *writeLog);
+
+        writeLog->Freeze();
     }
 
     void UpdateWriteRecordCounters(
@@ -1009,7 +1014,7 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        WriteLogsMemoryTrackerGuard_.IncreaseSize(writeRecord.GetByteSize() * multiplier);
+        IncreaseAccountedWriteLogMemory(writeRecord.GetByteSize() * multiplier);
         bool replicatorWrite = IsReplicatorWrite(transaction);
         IncrementTabletPendingWriteRecordCount(replicatorWrite, multiplier);
     }
@@ -1022,18 +1027,24 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        auto* writeLog = lockless ? &persistentWriteState->LocklessWriteLog : &persistentWriteState->LockedWriteLog;
-        writeLog->Enqueue(writeRecord);
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        auto* writeLog = lockless ? &writeLogState->LocklessWriteLog : &writeLogState->LockedWriteLog;
+
+        {
+            auto guard = TWriteLogMemoryAccountingGuard(
+                this,
+                *writeLog);
+
+            writeLog->Enqueue(writeRecord);
+        }
 
         UpdateWriteRecordCounters(transaction, writeRecord);
 
-        YT_LOG_DEBUG(
-            "Write record enqueued (TransactionId: %v, Size: %v, RowCount: %v, Lockless: %v)",
-            transaction->GetId(),
-            writeRecord.DataWeight,
-            writeRecord.RowCount,
-            lockless);
+        YT_TLOG_DEBUG("Write record enqueued")
+            .With("TransactionId", transaction->GetId())
+            .With("Size", writeRecord.DataWeight)
+            .With("RowCount", writeRecord.RowCount)
+            .With("Lockless", lockless);
     }
 
     void DropTransactionWriteLog(
@@ -1046,6 +1057,11 @@ private:
         for (const auto& writeRecord : *writeLog) {
             UpdateWriteRecordCounters(transaction, writeRecord, /*multiplier*/ -1);
         }
+
+        auto guard = TWriteLogMemoryAccountingGuard(
+            this,
+            *writeLog);
+
         writeLog->Clear();
     }
 
@@ -1054,20 +1070,17 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        const auto& persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        auto lockedRowCount = GetWriteLogRowCount(persistentWriteState->LockedWriteLog);
-        auto locklessRowCount = GetWriteLogRowCount(persistentWriteState->LocklessWriteLog);
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        auto lockedRowCount = GetWriteLogRowCount(writeLogState->LockedWriteLog);
+        auto locklessRowCount = GetWriteLogRowCount(writeLogState->LocklessWriteLog);
 
-        YT_LOG_DEBUG_IF(
-            lockedRowCount > 0 || locklessRowCount > 0,
-            "Dropping transaction write logs "
-            "(TransactionId: %v, LockedRowCount: %v, LocklessRowCount: %v)",
-            transaction->GetId(),
-            lockedRowCount,
-            locklessRowCount);
+        YT_TLOG_DEBUG_IF(lockedRowCount > 0 || locklessRowCount > 0, "Dropping transaction write logs")
+            .With("TransactionId", transaction->GetId())
+            .With("LockedRowCount", lockedRowCount)
+            .With("LocklessRowCount", locklessRowCount);
 
-        DropTransactionWriteLog(transaction, &persistentWriteState->LockedWriteLog);
-        DropTransactionWriteLog(transaction, &persistentWriteState->LocklessWriteLog);
+        DropTransactionWriteLog(transaction, &writeLogState->LockedWriteLog);
+        DropTransactionWriteLog(transaction, &writeLogState->LocklessWriteLog);
     }
 
     void PrepareLocklessRows(TTransaction* transaction, bool persistent, bool snapshotLoading = false)
@@ -1079,8 +1092,8 @@ private:
             return;
         }
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        if (IsReplicatorWrite(transaction) && !persistentWriteState->LocklessWriteLog.Empty()) {
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        if (IsReplicatorWrite(transaction) && !writeLogState->LocklessWriteLog.Empty()) {
             Tablet_->PreparedReplicatorTransactionIds().insert(transaction->GetId());
         }
 
@@ -1088,7 +1101,7 @@ private:
             return;
         }
 
-        const auto& locklessWriteLog = persistentWriteState->LocklessWriteLog;
+        const auto& locklessWriteLog = writeLogState->LocklessWriteLog;
 
         if (!snapshotLoading) {
             for (const auto& writeRecord : locklessWriteLog) {
@@ -1097,7 +1110,7 @@ private:
                 if (auto error = lockManager->ValidateTransactionConflict(transaction->GetStartTimestamp());
                     !error.IsOK())
                 {
-                    THROW_ERROR error << TErrorAttribute("tablet_id", Tablet_->GetId());
+                    THROW_ERROR error.With("tablet_id", Tablet_->GetId());
                 }
 
                 ValidateSyncReplicaSet(writeRecord.SyncReplicaIds);
@@ -1115,8 +1128,8 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        auto writeState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        auto& locklessWriteLog = writeState->LocklessWriteLog;
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        auto& locklessWriteLog = writeLogState->LocklessWriteLog;
         if (locklessWriteLog.Empty()) {
             return;
         }
@@ -1148,44 +1161,40 @@ private:
             }
         }
 
-        YT_LOG_DEBUG(
-            "Lockless rows committed (TransactionId: %v, RowCount: %v)",
-            transaction->GetId(),
-            committedRowCount);
+        YT_TLOG_DEBUG("Lockless rows committed")
+            .With("TransactionId", transaction->GetId())
+            .With("RowCount", committedRowCount);
 
         if (delayed && Tablet_->IsPhysicallyLog()) {
             auto oldDelayedLocklessRowCount = Tablet_->GetDelayedLocklessRowCount();
             auto newDelayedLocklessRowCount = oldDelayedLocklessRowCount - committedRowCount;
             Tablet_->SetDelayedLocklessRowCount(newDelayedLocklessRowCount);
             Tablet_->RecomputeReplicaStatuses();
-            YT_LOG_DEBUG(
-                "Delayed lockless rows committed (TransactionId: %v, DelayedLocklessRowCount: %v -> %v)",
-                transaction->GetId(),
-                oldDelayedLocklessRowCount,
-                newDelayedLocklessRowCount);
+            YT_TLOG_DEBUG("Delayed lockless rows committed")
+                .With("TransactionId", transaction->GetId())
+                .WithFormat("DelayedLocklessRowCount", "%v -> %v", oldDelayedLocklessRowCount, newDelayedLocklessRowCount);
 
             for (auto [replicaInfo, rowCount] : replicaToCommittedRowCount) {
                 auto oldCommittedReplicationRowIndex = replicaInfo->GetCommittedReplicationRowIndex();
                 auto newCommittedReplicationRowIndex = oldCommittedReplicationRowIndex + rowCount;
                 replicaInfo->SetCommittedReplicationRowIndex(newCommittedReplicationRowIndex);
 
-                YT_LOG_DEBUG(
-                    "Delayed lockless rows committed "
-                    "(TransactionId: %v, TabletId: %v, ReplicaId: %v, CommittedReplicationRowIndex: %v -> %v, TotalRowCount: %v)",
-                    transaction->GetId(),
-                    Tablet_->GetId(),
-                    replicaInfo->GetId(),
-                    oldCommittedReplicationRowIndex,
-                    newCommittedReplicationRowIndex,
-                    Tablet_->GetTotalRowCount());
+                YT_TLOG_DEBUG("Delayed lockless rows committed")
+                    .With("TransactionId", transaction->GetId())
+                    .With("TabletId", Tablet_->GetId())
+                    .With("ReplicaId", replicaInfo->GetId())
+                    .WithFormat("CommittedReplicationRowIndex", "%v -> %v",
+                        oldCommittedReplicationRowIndex,
+                        newCommittedReplicationRowIndex)
+                    .With("TotalRowCount", Tablet_->GetTotalRowCount());
             }
         }
 
         if (IsReplicatorWrite(transaction)) {
             if (Tablet_->PreparedReplicatorTransactionIds().erase(transaction->GetId()) == 0) {
-                YT_LOG_ALERT("Unknown replicator transaction committed (%v, TransactionId: %v)",
-                    Tablet_->GetLoggingTag(),
-                    transaction->GetId());
+                YT_TLOG_ALERT("Unknown replicator transaction committed")
+                    .With(Tablet_->GetLoggingTags())
+                    .With("TransactionId", transaction->GetId());
             }
 
             // May be null in tests.
@@ -1203,12 +1212,12 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        auto writeState = FindTransactionPersistentWriteState(transaction->GetId());
-        if (!writeState) {
+        auto writeLogState = FindTransactionWriteLogState(transaction->GetId());
+        if (!writeLogState) {
             return;
         }
 
-        for (const auto& writeRecord : writeState->LocklessWriteLog) {
+        for (const auto& writeRecord : writeLogState->LocklessWriteLog) {
             if (writeRecord.HunkChunksInfo) {
                 const auto& hunkLockManager = Tablet_->GetHunkLockManager();
                 for (auto [hunkStoreId, _] : writeRecord.HunkChunksInfo->HunkChunkRefs) {
@@ -1218,17 +1227,17 @@ private:
         }
 
         // Rows are not prepared - nothing to abort.
-        if (!writeState->RowsPrepared) {
+        if (!writeLogState->RowsPrepared) {
             return;
         }
 
         UpdateLocklessRowCounters(transaction, ETransactionState::Aborted);
 
-        if (IsReplicatorWrite(transaction) && !writeState->LocklessWriteLog.Empty()) {
+        if (IsReplicatorWrite(transaction) && !writeLogState->LocklessWriteLog.Empty()) {
             if (Tablet_->PreparedReplicatorTransactionIds().erase(transaction->GetId()) == 0) {
-                YT_LOG_DEBUG("Unknown replicator transaction aborted (%v, TransactionId: %v)",
-                    Tablet_->GetLoggingTag(),
-                    transaction->GetId());
+                YT_TLOG_DEBUG("Unknown replicator transaction aborted")
+                    .With(Tablet_->GetLoggingTags())
+                    .With("TransactionId", transaction->GetId());
             }
 
             // May be null in tests.
@@ -1261,8 +1270,8 @@ private:
         TCompactFlatMap<TTableReplicaInfo*, int, 8> replicaToRowCount;
         int rowCount = 0;
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        const auto& locklessWriteLog = persistentWriteState->LocklessWriteLog;
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        const auto& locklessWriteLog = writeLogState->LocklessWriteLog;
         for (const auto& writeRecord : locklessWriteLog) {
             for (auto replicaId : writeRecord.SyncReplicaIds) {
                 auto* replicaInfo = Tablet_->FindReplicaInfo(replicaId);
@@ -1283,15 +1292,16 @@ private:
                 auto oldCurrentReplicationRowIndex = replicaInfo->GetCurrentReplicationRowIndex();
                 auto newCurrentReplicationRowIndex = oldCurrentReplicationRowIndex + rowCount * multiplier;
                 replicaInfo->SetCurrentReplicationRowIndex(newCurrentReplicationRowIndex);
-                YT_LOG_DEBUG(
-                    "Sync replicated rows %v (TransactionId: %v, ReplicaId: %v, CurrentReplicationRowIndex: %v -> %v, "
-                    "TotalRowCount: %v)",
-                    state == ETransactionState::Aborted ? "aborted" : "prepared",
-                    transaction->GetId(),
-                    replicaInfo->GetId(),
-                    oldCurrentReplicationRowIndex,
-                    newCurrentReplicationRowIndex,
-                    tablet->GetTotalRowCount());
+                YT_TLOG_DEBUG("Sync replicated rows processed")
+                    .With("State", state)
+                    .With("TransactionId", transaction->GetId())
+                    .With("ReplicaId", replicaInfo->GetId())
+                    .WithFormat(
+                        "CurrentReplicationRowIndex",
+                        "%v -> %v",
+                        oldCurrentReplicationRowIndex,
+                        newCurrentReplicationRowIndex)
+                    .With("TotalRowCount", tablet->GetTotalRowCount());
             }
         }
 
@@ -1300,12 +1310,14 @@ private:
             auto newDelayedLocklessRowCount = oldDelayedLocklessRowCount + rowCount * multiplier;
             Tablet_->SetDelayedLocklessRowCount(newDelayedLocklessRowCount);
             Tablet_->RecomputeReplicaStatuses();
-            YT_LOG_DEBUG(
-                "Delayed lockless rows %v (TransactionId: %v, DelayedLocklessRowCount: %v -> %v)",
-                state == ETransactionState::Aborted ? "aborted" : "prepared",
-                transaction->GetId(),
-                oldDelayedLocklessRowCount,
-                newDelayedLocklessRowCount);
+            YT_TLOG_DEBUG("Delayed lockless rows processed")
+                .With("State", state)
+                .With("TransactionId", transaction->GetId())
+                .WithFormat(
+                    "DelayedLocklessRowCount",
+                    "%v -> %v",
+                    oldDelayedLocklessRowCount,
+                    newDelayedLocklessRowCount);
         }
     }
 
@@ -1327,10 +1339,9 @@ private:
             transaction->SetHasSharedWriteLocks(true);
         }
 
-        YT_LOG_DEBUG(
-            "Rows locked (TransactionId: %v, RowCount: %v)",
-            transaction->GetId(),
-            context.RowCount);
+        YT_TLOG_DEBUG("Rows locked")
+            .With("TransactionId", transaction->GetId())
+            .With("RowCount", context.RowCount);
     }
 
     void PrepareLockedRows(TTransaction* transaction)
@@ -1346,28 +1357,24 @@ private:
             }
         };
 
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transactionId);
-        const auto& lockedRows = transientWriteState->LockedRows;
+        auto lockState = GetOrCreateTransactionLockState(transactionId);
+        const auto& lockedRows = lockState->LockedRows;
         for (const auto& lockedRow : lockedRows) {
             prepareRow(lockedRow);
         }
 
-        YT_LOG_DEBUG_IF(
-            std::ssize(lockedRows) > 0,
-            "Locked rows prepared (TransactionId: %v, LockedRowCount: %v)",
-            transaction->GetId(),
-            lockedRows.size());
+        YT_TLOG_DEBUG_IF(std::ssize(lockedRows) > 0, "Locked rows prepared")
+            .With("TransactionId", transaction->GetId())
+            .With("LockedRowCount", lockedRows.size());
 
-        auto& prelockedRows = transientWriteState->PrelockedRows;
+        auto& prelockedRows = lockState->PrelockedRows;
         for (const auto& prelockedRow : TRingQueueIterableWrapper(prelockedRows)) {
             prepareRow(prelockedRow);
         }
 
-        YT_LOG_DEBUG_IF(
-            std::ssize(prelockedRows) > 0,
-            "Prelocked rows prepared (TransactionId: %v, PrelockedRowCount: %v)",
-            transactionId,
-            prelockedRows.size());
+        YT_TLOG_DEBUG_IF(std::ssize(prelockedRows) > 0, "Prelocked rows prepared")
+            .With("TransactionId", transactionId)
+            .With("PrelockedRowCount", prelockedRows.size());
     }
 
     void UnprepareLockedRows(TTransaction* transaction, TTimestamp transientPrepareTimestamp)
@@ -1384,28 +1391,24 @@ private:
             }
         };
 
-        auto transientWriteState = GetOrCrash(TransactionIdToTransientWriteState_, transactionId);
-        const auto& lockedRows = transientWriteState->LockedRows;
+        auto lockState = GetOrCrash(TransactionIdToLockState_, transactionId);
+        const auto& lockedRows = lockState->LockedRows;
         for (const auto& lockedRow : lockedRows) {
             unprepareRow(lockedRow);
         }
 
-        YT_LOG_DEBUG_IF(
-            std::ssize(lockedRows) > 0,
-            "Locked rows unprepared (TransactionId: %v, LockedRowCount: %v)",
-            transaction->GetId(),
-            lockedRows.size());
+        YT_TLOG_DEBUG_IF(std::ssize(lockedRows) > 0, "Locked rows unprepared")
+            .With("TransactionId", transaction->GetId())
+            .With("LockedRowCount", lockedRows.size());
 
-        auto& prelockedRows = transientWriteState->PrelockedRows;
+        auto& prelockedRows = lockState->PrelockedRows;
         for (const auto& prelockedRow : TRingQueueIterableWrapper(prelockedRows)) {
             unprepareRow(prelockedRow);
         }
 
-        YT_LOG_DEBUG_IF(
-            std::ssize(prelockedRows) > 0,
-            "Prelocked rows unprepared (TransactionId: %v, PrelockedRowCount: %v)",
-            transactionId,
-            prelockedRows.size());
+        YT_TLOG_DEBUG_IF(std::ssize(prelockedRows) > 0, "Prelocked rows unprepared")
+            .With("TransactionId", transactionId)
+            .With("PrelockedRowCount", prelockedRows.size());
     }
 
     void StartSerializingLockedRows(TTransaction* transaction, bool onAfterSnapshotLoaded)
@@ -1413,12 +1416,12 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
 
-        YT_VERIFY(transientWriteState->PrelockedRows.empty());
-        auto& lockedRows = transientWriteState->LockedRows;
-        auto& writeLog = persistentWriteState->LockedWriteLog;
+        YT_VERIFY(lockState->PrelockedRows.empty());
+        auto& lockedRows = lockState->LockedRows;
+        auto& writeLog = writeLogState->LockedWriteLog;
         auto lockedRowCount = lockedRows.size();
 
         if (lockedRows.empty()) {
@@ -1446,10 +1449,9 @@ private:
             Host_->OnTabletRowUnlocked(tablet);
         }
 
-        YT_LOG_DEBUG(
-            "Locked rows started fine serialization (TransactionId: %v, LockedRowCount: %v)",
-            transaction->GetId(),
-            lockedRowCount);
+        YT_TLOG_DEBUG("Locked rows started fine serialization")
+            .With("TransactionId", transaction->GetId())
+            .With("LockedRowCount", lockedRowCount);
     }
 
     void CommitLockedRows(TTransaction* transaction)
@@ -1457,12 +1459,12 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
 
-        YT_VERIFY(transientWriteState->PrelockedRows.empty());
-        auto& lockedRows = transientWriteState->LockedRows;
-        auto& writeLog = persistentWriteState->LockedWriteLog;
+        YT_VERIFY(lockState->PrelockedRows.empty());
+        auto& lockedRows = lockState->LockedRows;
+        auto& writeLog = writeLogState->LockedWriteLog;
         auto lockedRowCount = lockedRows.size();
 
         if (lockedRows.empty()) {
@@ -1490,18 +1492,17 @@ private:
         DropTransactionWriteLog(transaction, &writeLog);
         lockedRows.clear();
 
-        YT_LOG_DEBUG(
-            "Locked rows committed (TransactionId: %v, LockedRowCount: %v)",
-            transaction->GetId(),
-            lockedRowCount);
+        YT_TLOG_DEBUG("Locked rows committed")
+            .With("TransactionId", transaction->GetId())
+            .With("LockedRowCount", lockedRowCount);
     }
 
     void AbortPrelockedRows(TTransaction* transaction)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        auto writeState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
-        auto& prelockedRows = writeState->PrelockedRows;
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
+        auto& prelockedRows = lockState->PrelockedRows;
         auto prelockedRowCount = prelockedRows.size();
 
         for (const auto& prelockedRow : TRingQueueIterableWrapper(prelockedRows)) {
@@ -1513,23 +1514,21 @@ private:
 
         prelockedRows.clear();
 
-        YT_LOG_DEBUG_IF(
-            prelockedRowCount != 0,
-            "Prelocked rows aborted (TransactionId: %v, RowCount: %v)",
-            transaction->GetId(),
-            prelockedRowCount);
+        YT_TLOG_DEBUG_IF(prelockedRowCount != 0, "Prelocked rows aborted")
+            .With("TransactionId", transaction->GetId())
+            .With("RowCount", prelockedRowCount);
     }
 
     void AbortLockedRows(TTransaction* transaction)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        auto writeState = FindTransactionTransientWriteState(transaction->GetId());
-        if (!writeState) {
+        auto lockState = FindTransactionLockState(transaction->GetId());
+        if (!lockState) {
             return;
         }
 
-        auto& lockedRows = writeState->LockedRows;
+        auto& lockedRows = lockState->LockedRows;
         auto lockedRowCount = lockedRows.size();
 
         for (const auto& lockedRow : lockedRows) {
@@ -1541,10 +1540,9 @@ private:
 
         lockedRows.clear();
 
-        YT_LOG_DEBUG_IF(lockedRowCount > 0,
-            "Locked rows aborted (TransactionId: %v, RowCount: %v)",
-            transaction->GetId(),
-            lockedRowCount);
+        YT_TLOG_DEBUG_IF(lockedRowCount > 0, "Locked rows aborted")
+            .With("TransactionId", transaction->GetId())
+            .With("RowCount", lockedRowCount);
     }
 
     void FinishCommit(
@@ -1565,10 +1563,9 @@ private:
             hydraManager->GetAutomatonState() == EPeerState::Leading)
         {
             auto unflushedTimestamp = Tablet_->GetUnflushedTimestamp();
-            YT_LOG_ALERT_IF(unflushedTimestamp > commitTimestamp,
-                "Inconsistent unflushed timestamp (UnflushedTimestamp: %v, CommitTimestamp: %v)",
-                unflushedTimestamp,
-                commitTimestamp);
+            YT_TLOG_ALERT_IF(unflushedTimestamp > commitTimestamp, "Inconsistent unflushed timestamp")
+                .With("UnflushedTimestamp", unflushedTimestamp)
+                .With("CommitTimestamp", commitTimestamp);
         }
 
         Tablet_->UpdateLastCommitTimestamp(commitTimestamp);
@@ -1578,18 +1575,15 @@ private:
             Tablet_->UpdateTotalRowCount();
             Tablet_->GetStoreManager()->UpdateCommittedStoreRowCount();
             auto newTotalRowCount = Tablet_->GetTotalRowCount();
-            YT_LOG_DEBUG_IF(oldTotalRowCount != newTotalRowCount,
-                "Tablet total row count updated (TabletId: %v, TotalRowCount: %v -> %v)",
-                Tablet_->GetId(),
-                oldTotalRowCount,
-                newTotalRowCount);
+            YT_TLOG_DEBUG_IF(oldTotalRowCount != newTotalRowCount, "Tablet total row count updated")
+                .With("TabletId", Tablet_->GetId())
+                .WithFormat("TotalRowCount", "%v -> %v", oldTotalRowCount, newTotalRowCount);
         }
 
-        YT_LOG_DEBUG(
-            "Finished transaction commit in tablet (TabletId: %v, TransactionId: %v, CommitTimestamp: %v)",
-            Tablet_->GetId(),
-            transactionId,
-            commitTimestamp);
+        YT_TLOG_DEBUG("Finished transaction commit in tablet")
+            .With("TabletId", Tablet_->GetId())
+            .With("TransactionId", transactionId)
+            .With("CommitTimestamp", commitTimestamp);
     }
 
 
@@ -1647,16 +1641,13 @@ private:
 
     void ValidateReplicaStatus(ETableReplicaStatus expected, const TTableReplicaInfo& replicaInfo) const
     {
-        YT_LOG_ALERT_IF(
-            replicaInfo.GetStatus() != expected,
-            "Table replica status mismatch "
-            "(Expected: %v, Actual: %v, CurrentReplicationRowIndex: %v, TotalRowCount: %v, DelayedLocklessRowCount: %v, Mode: %v)",
-            expected,
-            replicaInfo.GetStatus(),
-            replicaInfo.GetCurrentReplicationRowIndex(),
-            Tablet_->GetTotalRowCount(),
-            Tablet_->GetDelayedLocklessRowCount(),
-            replicaInfo.GetMode());
+        YT_TLOG_ALERT_IF(replicaInfo.GetStatus() != expected, "Table replica status mismatch")
+            .With("Expected", expected)
+            .With("Actual", replicaInfo.GetStatus())
+            .With("CurrentReplicationRowIndex", replicaInfo.GetCurrentReplicationRowIndex())
+            .With("TotalRowCount", Tablet_->GetTotalRowCount())
+            .With("DelayedLocklessRowCount", Tablet_->GetDelayedLocklessRowCount())
+            .With("Mode", replicaInfo.GetMode());
     }
 
     void ValidateReplicaWritable(const TTableReplicaInfo& replicaInfo)
@@ -1676,19 +1667,17 @@ private:
                         "Replica %v of tablet %v is not synchronously writeable since some rows are not replicated yet",
                         replicaInfo.GetId(),
                         Tablet_->GetId())
-                        << TErrorAttribute("current_replication_row_index", currentReplicationRowIndex)
-                        << TErrorAttribute("total_row_count", totalRowCount)
-                        << TErrorAttribute("delayed_lockless_row_count", delayedLocklessRowCount);
+                        .With("current_replication_row_index", currentReplicationRowIndex)
+                        .With("total_row_count", totalRowCount)
+                        .With("delayed_lockless_row_count", delayedLocklessRowCount);
                 }
                 if (currentReplicationRowIndex > totalRowCount + delayedLocklessRowCount) {
-                    YT_LOG_ALERT(
-                        "Current replication row index is too high (TabletId: %v, ReplicaId: %v, "
-                        "CurrentReplicationRowIndex: %v, TotalRowCount: %v, DelayedLocklessRowCount: %v)",
-                        Tablet_->GetId(),
-                        replicaInfo.GetId(),
-                        currentReplicationRowIndex,
-                        totalRowCount,
-                        delayedLocklessRowCount);
+                    YT_TLOG_ALERT("Current replication row index is too high")
+                        .With("TabletId", Tablet_->GetId())
+                        .With("ReplicaId", replicaInfo.GetId())
+                        .With("CurrentReplicationRowIndex", currentReplicationRowIndex)
+                        .With("TotalRowCount", totalRowCount)
+                        .With("DelayedLocklessRowCount", delayedLocklessRowCount);
                 }
                 if (replicaInfo.GetState() != ETableReplicaState::Enabled) {
                     ValidateReplicaStatus(ETableReplicaStatus::SyncNotWritable, replicaInfo);
@@ -1709,8 +1698,8 @@ private:
                         "Replica %v of tablet %v is not asynchronously writeable: some synchronous writes are still in progress",
                         replicaInfo.GetId(),
                         Tablet_->GetId())
-                        << TErrorAttribute("current_replication_row_index", currentReplicationRowIndex)
-                        << TErrorAttribute("total_row_count", totalRowCount);
+                        .With("current_replication_row_index", currentReplicationRowIndex)
+                        .With("total_row_count", totalRowCount);
                 }
 
                 if (currentReplicationRowIndex >= totalRowCount + delayedLocklessRowCount) {
@@ -1737,9 +1726,9 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
         return
-            !persistentWriteState->LocklessWriteLog.Empty() &&
+            !writeLogState->LocklessWriteLog.Empty() &&
             Tablet_->GetCommitOrdering() == ECommitOrdering::Strong;
     }
 
@@ -1747,26 +1736,37 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        auto persistentWriteState = GetOrCreateTransactionPersistentWriteState(transaction->GetId());
+        auto writeLogState = GetOrCreateTransactionWriteLogState(transaction->GetId());
         return transaction->GetHasSharedWriteLocks() &&
-            !persistentWriteState->LockedWriteLog.Empty();
+            !writeLogState->LockedWriteLog.Empty();
     }
 
     TWriteContext CreateWriteContext(TTransaction* transaction)
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        auto transientWriteState = GetOrCreateTransactionTransientWriteState(transaction->GetId());
+        auto lockState = GetOrCreateTransactionLockState(transaction->GetId());
         return TWriteContext{
             .Transaction = transaction,
-            .PrelockedRows = &transientWriteState->PrelockedRows,
-            .LockedRows = &transientWriteState->LockedRows,
+            .PrelockedRows = &lockState->PrelockedRows,
+            .LockedRows = &lockState->LockedRows,
         };
     }
 
     TCodicilGuard MakeCodicilGuard()
     {
-        return TCodicilGuard(MakeNonOwningCodicilBuilder(Tablet_->GetLoggingTag()));
+        return TCodicilGuard(MakeOwningCodicilBuilder(ToString(Tablet_->GetLoggingTags())));
+    }
+
+    TTransactionExternalizationToken GetTransactionExternalizationToken() const
+    {
+        const auto& movementData = Tablet_->SmoothMovementData();
+        if (movementData.GetRole() == ESmoothMovementRole::Target && !Tablet_->IsActiveServant()) {
+            return TTransactionExternalizationToken(
+                GetSiblingAvenueEndpointId(movementData.GetSiblingAvenueEndpointId()));
+        }
+
+        return {};
     }
 };
 

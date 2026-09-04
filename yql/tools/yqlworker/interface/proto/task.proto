@@ -131,9 +131,11 @@ message TRole {
     }
 
     enum EKind {
+        reserved 2;
+        reserved "CLUSTER_ADMIN";
         UNKNOWN_KIND = 0;
         CLUSTER_USE  = 1;
-        CLUSTER_ADMIN = 2;
+        CLUSTER_OWNER = 3;
     }
 
     message TClusterFields {
@@ -202,6 +204,7 @@ message TTaskData {
     optional TUserRoles UserRoles = 30;
     optional string DefaultTranslationCluster = 31;
     optional string Runner = 32;
+    optional string Host = 33;
 }
 
 message TTaskError {
@@ -245,6 +248,7 @@ message TTaskProgress {
         optional uint32 Total = 6; // deprecated
         optional string Category = 7;
         optional string RemoteId = 8;
+        optional string WaitingRemoteId = 15;
         optional TCounters Counters = 9;
         map<string,int64> CustomCounters = 13;
         optional string Stage = 10; // deprecated

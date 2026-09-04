@@ -288,6 +288,7 @@ class TestStandaloneTabletBalancer(TestStandaloneTabletBalancerBase, TabletBalan
         for index in range(1, 4):
             wait(lambda: get(f"//tmp/t{index}/@tablet_count") == 1)
 
+        wait_for_tablet_state("//tmp/t3", "mounted")
         sync_unmount_table("//tmp/t3")
         set("//tmp/t3/@tablet_cell_bundle", "another")
 
@@ -571,6 +572,7 @@ class TestStandaloneTabletBalancerSlow(TestStandaloneTabletBalancerBase, TabletA
 @authors("alexelexa")
 class TestParameterizedBalancing(TestStandaloneTabletBalancerBase, DynamicTablesBase):
     ENABLE_MULTIDAEMON = True
+    NUM_TEST_PARTITIONS = 2
 
     @classmethod
     def modify_tablet_balancer_config(cls, config, multidaemon_config):

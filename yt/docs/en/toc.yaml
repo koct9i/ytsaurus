@@ -42,12 +42,16 @@ items:
    - name: User guide
      expanded: true
      items:
+       - name: Overview
+         href: user-guide/index.md
        - name: Authentication
          when: audience == "public"
          href: user-guide/storage/auth.md
        - name: Data storage
          when: audience == "public"
          items:
+           - name: Overview
+             href: user-guide/storage/index.md
            - name: Metadata tree
              href: user-guide/storage/cypress.md
            - name: Attributes
@@ -167,6 +171,8 @@ items:
            href: user-guide/dynamic-tables/hunks-guide.md
          - name: Usage examples
            items:
+             - name: Overview
+               href: user-guide/dynamic-tables/tutorials/index.md
              - name: Creating a web service
                href: user-guide/dynamic-tables/tutorials/dyn-tables-tutorial.md
                 #- name: Предоставление прав на tablet cell bundle
@@ -257,6 +263,9 @@ items:
          - name: Root file system images
            when: audience == "public"
            href: user-guide/data-processing/layers/layer-paths.md
+         - name: Job file environment
+           when: audience == "public"
+           href: user-guide/data-processing/layers/nbd-squashfs-layers.md
          - name: Switching between tables
            when: audience == "public"
            href: user-guide/data-processing/operations/table-switch.md
@@ -277,18 +286,44 @@ items:
                href: user-guide/data-processing/chyt/queries/joins.md
            - name: Working with {{product-name}} tables
              href: user-guide/data-processing/chyt/yt-tables.md
-           - name: Cliques
+           - name: Clique interface and settings
              items:
-             - name: How to start a private clique
-               href: user-guide/data-processing/chyt/cliques/start.md
-             - name: A clique in the {{product-name}} web interface
+             - name: Overview
+               href: user-guide/data-processing/chyt/cliques/overview.md
+             - name: The clique web interface in {{product-name}}
                href: user-guide/data-processing/chyt/cliques/ui.md
+             - name: Click as a YT operation
+               href: user-guide/data-processing/chyt/cliques/yt-operation-ui.md
+             - name: Clique settings
+               href: user-guide/data-processing/chyt/cliques/configs.md
              - name: Access permissions
                href: user-guide/data-processing/chyt/cliques/access.md
+           - name: Scenarios of clique management
+             items:
+             - name: Scenarios overview
+               href: user-guide/data-processing/chyt/how-to-guides/overview.md
+             - name: Creating, starting, and stopping a clique
+               href: user-guide/data-processing/chyt/how-to-guides/create-start.md
+             - name: Adding compute resources
+               href: user-guide/data-processing/chyt/how-to-guides/manage-resources.md
+             - name: Access permissions managing
+               href: user-guide/data-processing/chyt/how-to-guides/acl.md
+             - name: Getting query logs
+               href: user-guide/data-processing/chyt/how-to-guides/query-logs.md
+             - name: Getting CHYT and Clickhouse versions
+               href: user-guide/data-processing/chyt/how-to-guides/versions.md
+             - name: Installing a custom CHYT version
+               href: user-guide/data-processing/chyt/how-to-guides/custom-chyt-version.md
+             - name: Advanced settings configuration
+               href: user-guide/data-processing/chyt/how-to-guides/manage-advanced-settings.md
+             - name: Checking failed jobs
+               href: user-guide/data-processing/chyt/how-to-guides/failed-jobs.md
            - name: CLI and Python API
              href: user-guide/data-processing/chyt/cli-and-api.md
            - name: Reference
              items:
+             - name: Overview
+               href: user-guide/data-processing/chyt/reference/index.md
              - name: Executing queries
                href: user-guide/data-processing/chyt/reference/execute.md
              - name: Selecting a coordinator
@@ -297,6 +332,8 @@ items:
                href: user-guide/data-processing/chyt/reference/settings.md
              - name: Instance configuration
                href: user-guide/data-processing/chyt/reference/configuration.md
+             - name: Connecting external databases over ODBC
+               href: user-guide/data-processing/chyt/reference/odbc.md
              - name: Data types
                href: user-guide/data-processing/chyt/reference/data-types.md
              - name: Functions
@@ -336,8 +373,6 @@ items:
                  href: user-guide/data-processing/spyt/cluster/cluster-desc.md
                - name: Starting a Spark cluster
                  href: user-guide/data-processing/spyt/cluster/cluster-start.md
-               - name: Livy server
-                 href: user-guide/data-processing/spyt/cluster/livy.md
                - name: Versioning rules
                  href: user-guide/data-processing/spyt/version.md
               #  - name: Metrics in Prometheus
@@ -348,6 +383,12 @@ items:
                  href: user-guide/data-processing/spyt/logs.md
                - name: Troubleshooting
                  href: user-guide/data-processing/spyt/problems.md
+             - name: SPYT Connect
+               items:
+               - name: SPYT Connect
+                 href: user-guide/data-processing/spyt/connect.md
+               - name: Livy server
+                 href: user-guide/data-processing/spyt/cluster/livy.md
              - name: Structured Streaming
                items:
                 - name: General
@@ -365,10 +406,14 @@ items:
                href: user-guide/data-processing/spyt/spark-sql.md
              - name: Spark UI
                href: user-guide/data-processing/spyt/spark-ui.md
+             - name: Building an offline Docker image of SPYT
+               href: user-guide/data-processing/spyt/offline-image.md
              - name: Using the {{product-name}} Shuffle service
                href: user-guide/data-processing/spyt/shuffle.md
              - name: API
                items:
+                 - name: Overview
+                   href: user-guide/data-processing/spyt/API/index.md
                  - name: SPYT in Python
                    href: user-guide/data-processing/spyt/API/spyt-python.md
                  - name: SPYT in Jupyter
@@ -379,6 +424,8 @@ items:
                    href: user-guide/data-processing/spyt/API/spyt-java.md
              - name: Thesaurus
                items:
+                 - name: Overview
+                   href: user-guide/data-processing/spyt/thesaurus/index.md
                  - name: Data type mapping
                    href: user-guide/data-processing/spyt/thesaurus/data-types.md
                  - name: Configuration parameters
@@ -431,6 +478,8 @@ items:
        - name: Problems
          when: audience == "public"
          items:
+         - name: Overview
+           href: user-guide/problems/index.md
          - name: Debugging MapReduce programs
            href: user-guide/problems/mapreduce-debug.md
          - name: Jobshell and slow jobs
@@ -461,6 +510,8 @@ items:
    - name: API and reference
      when: audience == "public"
      items:
+       - name: Overview
+         href: api/index.md
        - name: Working from the command line
          items:
            - name: Overview
@@ -510,6 +561,8 @@ items:
    - name: Admin guide
      when: audience == "public"
      items:
+       - name: Overview
+         href: admin-guide/index.md
        - name: Cluster components
          href: admin-guide/components.md
        - name: Install
@@ -534,6 +587,24 @@ items:
              href: admin-guide/install-monitoring.md
            - name: Task-proxy
              href: admin-guide/install-task-proxy.md
+       - name: Updating cluster
+         items:
+          - name: Upgrade strategies
+            href: admin-guide/update/update_strategy.md
+          - name: YTsaurus
+            href: admin-guide/update/update-ytsaurus.md
+          - name: CHYT
+            href: admin-guide/update/update-chyt.md
+          - name: SPYT
+            href: admin-guide/update/update-spyt.md
+          - name: Cron
+            href: admin-guide/update/update-cron.md
+          - name: Odin
+            href: admin-guide/update/update-odin.md
+          - name: Task-proxy
+            href: admin-guide/update/update-task-proxy.md
+          - name: Updating volumes
+            href: admin-guide/update/update-volumes.md
        - name: Getting the YTsaurus specification ready
          items:
           - name: Description
@@ -553,12 +624,10 @@ items:
          when: audience == "public"
        - name: Monitoring
          href: admin-guide/monitoring.md
-       - name: Updating YTsaurus server components
-         href: admin-guide/update-ytsaurus.md
-       - name: Updating volumes
-         href: admin-guide/update-volumes.md
        - name: Cluster operation
          href: admin-guide/cluster-operations.md
+       - name: CLI admin commands
+         href: admin-guide/cli-admin.md
        - name: Node administration
          href: admin-guide/node-maintenance.md
        - name: Tagging cluster nodes
@@ -585,6 +654,8 @@ items:
          href: admin-guide/native-encryption.md
        - name: Inter-cluster network bandwidth throttling
          href: admin-guide/cluster-throttlers.md
+       - name: NBD on cluster
+         href: admin-guide/nbd.md
        - name: Misc
          items:
            - name: Reading from remote clusters via RPC proxy
@@ -599,5 +670,61 @@ items:
    - name: How to report
      when: audience == "public"
      href: user-guide/problems/howtoreport.md
-   - name: Event presentations, publications, and workshops
-     href: other/video-posts.md
+   - name: Other materials
+     items:
+       - name: Overview
+         href: other/index.md
+       - name: Event presentations, publications, and workshops
+         href: other/video-posts.md
+   - name: Draft
+     items:
+        - name: About drafts (draft-0)
+          href: draft/draft-0.md
+        - name: Master server architecture overview (draft-1)
+          href: draft/master-architecture-draft-1.md
+        - name: Master cell topology and inter-cell communication (draft-2)
+          href: draft/master-architecture-draft-2.md
+        - name: Master transaction lifecycle and mutation pipeline (draft-3)
+          href: draft/master-architecture-draft-3.md
+        - name: Master read request execution (draft-4)
+          href: draft/master-architecture-draft-4.md
+        - name: Master performance and administration (draft-5)
+          href: draft/master-architecture-draft-5.md
+        - name: Dynamic tables performance profiling and bottleneck analysis (draft-6)
+          href: draft/dynamic-tables-profiling-draft-6.md
+        - name: Dynamic tables capacity planning and scaling (draft-7)
+          href: draft/dynamic-tables-capacity-scaling-draft-7.md
+        - name: Dynamic tables production operations overview (draft-8)
+          href: draft/dynamic-tables-operations-topic-draft-8.md
+        - name: Sorted dynamic tables operational corner cases (draft-9)
+          href: draft/dynamic-tables-sorted-ops-corner-cases-draft-9.md
+        - name: Ordered dynamic tables operational corner cases (draft-10)
+          href: draft/dynamic-tables-ordered-ops-corner-cases-draft-10.md
+        - name: Queues corner cases, performance analysis, and administration (draft-11)
+          href: draft/queues-corner-cases-draft-11.md
+        - name: YQL-agent configuration and administration (draft-12)
+          href: draft/yql-agent-administration-draft-12.md
+        - name: YSON formats and SDK guide (draft-13)
+          href: draft/yson-formats-sdk-draft-13.md
+        - name: YT bus RPC service performance tuning for data-node table I/O (draft-14)
+          href: draft/bus-rps-service-performance-tuning-draft-14.md
+        - name: Local filesystem representation of Cypress trees (draft-16)
+          href: draft/cypress-local-filesystem-format-draft-16.md
+        - name: Cluster and node states, locks, and maintenance (draft-17)
+          href: draft/cluster-node-states-maintenance-draft-17.md
+        - name: Data storage failure handling and recovery (draft-18)
+          href: draft/data-storage-failure-recovery-draft-18.md
+        - name: Using tracing in YTsaurus server (draft-19)
+          href: draft/tracing-in-ytsaurus-server-draft-19.md
+        - name: YTsaurus audit logging (draft-20)
+          href: draft/audit-logging-draft-20.md
+        - name: Configuring cross-cluster communication (draft-21)
+          href: draft/cross-cluster-communication-draft-21.md
+        - name: YTsaurus components compatibility (draft-22)
+          href: draft/components-compatibility-draft-22.md
+        - name: CRI job execution environment setup (draft-23)
+          href: draft/exec-node-cri-job-environment-draft-23.md
+        - name: Cluster node and proxy memory management (draft-24)
+          href: draft/cluster-resource-management-memory-draft-24.md
+        - name: Chunk management architecture (draft-25)
+          href: draft/chunk-management-draft-25.md

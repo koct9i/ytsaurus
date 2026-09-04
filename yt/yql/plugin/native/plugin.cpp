@@ -5,6 +5,7 @@
 #include "provider_load.h"
 #include "secret_masker.h"
 
+#include <yt/yql/plugin/config.h>
 #include <yt/yql/plugin/lib/error_helpers.h>
 #include <yt/yql/plugin/lib/progress_merger.h>
 
@@ -28,10 +29,13 @@
 #include <yql/essentials/providers/common/codec/yql_codec.h>
 #include <yql/essentials/providers/common/comp_nodes/yql_factory.h>
 #include <yql/essentials/providers/common/proto/gateways_config.pb.h>
+#include <yql/essentials/providers/common/proto/static_gateways_config.pb.h>
+#include <yql/essentials/providers/common/gateways_utils/gateways_utils.h>
 #include <yql/essentials/providers/common/provider/yql_provider_names.h>
 #include <yql/essentials/providers/common/udf_resolve/yql_simple_udf_resolver.h>
 
 #include <contrib/ydb/library/yql/providers/dq/provider/yql_dq_gateway.h>
+#include <yt/yql/providers/dq/gateway/yql_dq_gateway_factory.h>
 #include <contrib/ydb/library/yql/providers/dq/provider/yql_dq_provider.h>
 #include <contrib/ydb/library/yql/providers/dq/provider/yql_dq_state.h>
 #include <contrib/ydb/library/yql/providers/dq/provider/exec/yql_dq_exectransformer.h>
@@ -56,7 +60,7 @@
 #include <yql/essentials/utils/backtrace/backtrace.h>
 #include <yql/essentials/utils/log/context.h>
 #include <yql/essentials/utils/log/log.h>
-#include <yql/essentials/sql/v1/sql.h>
+#include <yql/essentials/sql/v1/translation/sql.h>
 #include <yql/essentials/sql/v1/lexer/antlr4/lexer.h>
 #include <yql/essentials/sql/v1/lexer/antlr4_ansi/lexer.h>
 #include <yql/essentials/sql/v1/proto_parser/antlr4/proto_parser.h>
@@ -84,6 +88,8 @@
 #include <library/cpp/digest/md5/md5.h>
 
 #include <library/cpp/resource/resource.h>
+
+#include <util/datetime/base.h>
 
 #include <util/folder/path.h>
 
@@ -362,6 +368,15 @@ public:
         , StartDqManager_(options.StartDqManager)
     {
         try {
+            if (StartDqManager_) {
+                if (!DqManagerConfig_) {
+                    ythrow yexception() << "DQ manager cannot be started without DQ manager config";
+                }
+                if (DqManagerConfig_->YtBackends.empty()) {
+                    ythrow yexception() << "DQ manager cannot be started without YT backends";
+                }
+            }
+
             NYql::NLog::InitLogger(std::move(options.LogBackend));
 
             auto& logger = NYql::NLog::YqlLogger();
@@ -413,13 +428,18 @@ public:
                 NYson::ReflectProtobufMessageType<NYql::TSolomonGatewayConfig>(),
                 protobufWriterOptions));
 
+            // TODO(aneporada): Add static gatewaays config to TYqlNativePluginOptions
+            SyncWithStaticGateways(StaticGatewaysConfig_, GatewaysConfigInitial_);
+
+            YtClusters_ = MakeIntrusive<TConfigClusters>(GatewaysConfigInitial_.GetYt());
+
             NYql::TFileStorageConfig fileStorageConfig;
             fileStorageConfig.ParseFromStringOrThrow(NYson::YsonStringToProto(
                 options.FileStorageConfig,
                 NYson::ReflectProtobufMessageType<NYql::TFileStorageConfig>(),
                 protobufWriterOptions));
 
-            FileStorage_ = WithAsync(CreateFileStorage(fileStorageConfig, {MakeYtDownloader(fileStorageConfig)}));
+            FileStorage_ = WithAsync(CreateFileStorage(fileStorageConfig, {MakeYtDownloader(fileStorageConfig, YtClusters_)}));
 
             NYql::TYtTvmConfig tvmConfig;
             tvmConfig.ParseFromStringOrThrow(NYson::YsonStringToProto(
@@ -441,13 +461,14 @@ public:
                 NKikimr::NMiniKQL::CreateBuiltinRegistry())->Clone();
             const NKikimr::NMiniKQL::TUdfModuleRemappings emptyRemappings;
             FuncRegistry_->SetBackTraceCallback(&NYql::NBacktrace::KikimrBackTrace);
+
+            auto* staticGatewayYtConfig = StaticGatewaysConfig_.MutableYt();
+            staticGatewayYtConfig->SetMrJobBinMd5(CalculateMD5Checksum(staticGatewayYtConfig->GetMrJobBin()));
+            YQL_LOG(DEBUG) <<  "SetMrJobBinMd5 ready";
+
             TVector<TString> udfPaths;
-            NKikimr::NMiniKQL::FindUdfsInDir(gatewayYtConfig->GetMrJobUdfsDir(), &udfPaths);
+            NKikimr::NMiniKQL::FindUdfsInDir(staticGatewayYtConfig->GetMrJobUdfsDir(), &udfPaths);
             for (const auto& path : udfPaths) {
-                // Skip YQL plugin shared library itself, it is not a UDF.
-                if (path.EndsWith("libyqlplugin.so")) {
-                    continue;
-                }
                 ui32 flags = 0;
                 // System Python UDFs are not used locally so we only need types.
                 if (path.Contains("systempython") && path.Contains(TString("udf") + MKQL_UDF_LIB_SUFFIX)) {
@@ -458,7 +479,7 @@ public:
                     DqManagerConfig_->UdfsWithMd5.emplace(path, CalculateMD5Checksum(path));
                 }
             }
-            gatewayYtConfig->ClearMrJobUdfsDir();
+            staticGatewayYtConfig->ClearMrJobUdfsDir();
             NKikimr::NMiniKQL::TUdfModulePathsMap systemModules;
             for (const auto& m : FuncRegistry_->GetAllModuleNames()) {
                 TMaybe<TString> path = FuncRegistry_->FindUdfPath(m);
@@ -470,7 +491,7 @@ public:
             }
             FuncRegistry_->SetSystemModulePaths(systemModules);
 
-            if (DqManagerConfig_) {
+            if (DqManagerConfig_ && !DqManagerConfig_->YtBackends.empty()) {
                 DqManagerConfig_->FileStorage = FileStorage_;
                 DqManager_ = New<TDqManager>(DqManagerConfig_);
             }
@@ -494,8 +515,6 @@ public:
 
             OperationAttributes_ = options.OperationAttributes;
 
-            DynamicConfig_.Store(CreateDynamicConfig(NYql::TGatewaysConfig(GatewaysConfigInitial_)));
-
             if (options.YTTokenPath) {
                 TFsPath path(options.YTTokenPath);
                 YqlAgentToken_ = TIFStream(path).ReadAll();
@@ -509,13 +528,16 @@ public:
             TLangVersionBuffer buf;
             TStringBuf versionStringBuf;
 
-            ParseLangVersion(options.MaxYqlLangVersion, MaxYqlLangVersionInitial_);
-            MaxYqlLangVersion_ = MaxYqlLangVersionInitial_;
-            YQL_LOG(INFO) << Format("Maximum supported YQL version is set (Version: %v)", options.MaxYqlLangVersion);
-
             DefaultYqlApiLangVersion_ = MinLangVersion;
             FormatLangVersion(DefaultYqlApiLangVersion_, buf, versionStringBuf);
             YQL_LOG(INFO) << Format("Default YQL version for API and CLI is set (Version: %v)", versionStringBuf);
+
+            auto initialDynamicConfig = New<TYqlPluginDynamicConfig>();
+            initialDynamicConfig->Load(NYTree::ConvertToNode(options.InitialDynamicConfig));
+            YT_VERIFY(initialDynamicConfig->MaxSupportedYqlVersion);
+
+            OnDynamicConfigChanged(std::move(initialDynamicConfig));
+            MaxYqlLangVersionInitial_ = MaxYqlLangVersion_;
 
         } catch (const std::exception& ex) {
             // NB: YQL_LOG may be not initialized yet (for example, during singletons config parse),
@@ -531,7 +553,7 @@ public:
         if (DqManager_ && StartDqManager_) {
             DqManager_->Start();
         }
-        if (DqManager_) {
+        if (DqGatewayOffloadThreadPool_) {
             // This pool is required for all DQ queries
             DqGatewayOffloadThreadPool_->Start(1);
         }
@@ -629,11 +651,21 @@ public:
         TString queryText,
         TYsonString settings,
         std::vector<TQueryFile> files,
-        int executeMode)
+        int executeMode,
+        NYqlClient::EQueryType queryType)
     {
+        if (queryType != NYqlClient::EQueryType::Regular) {
+            return TQueryResult{
+                .YsonError = MessageToYtErrorYson(
+                    Format("Unsupported query type: %v", queryType)),
+            };
+        }
+
         auto dynamicConfig = DynamicConfig_.Acquire();
         auto factory = CreateProgramFactory(queryId, *dynamicConfig);
-        factory->SetUrlListerManager(MakeUrlListerManager({MakeYtUrlLister()}));
+        factory->SetUrlListerManager(MakeUrlListerManager({
+            MakeYtUrlLister(MakeIntrusive<TConfigClusters>(dynamicConfig->GatewaysConfig.GetYt()))
+        }));
         auto [program, sqlSettings] = CreateProgramAndSqlSettingsFromParameters(
             queryId,
             queryText,
@@ -859,7 +891,8 @@ public:
         TString queryText,
         TYsonString settings,
         std::vector<TQueryFile> files,
-        int executeMode) noexcept override
+        int executeMode,
+        NYqlClient::EQueryType queryType) noexcept override
     {
         TQueryResult result;
 
@@ -875,7 +908,7 @@ public:
                 });
 
                 try {
-                    result = GuardedRun(queryId, user, credentials, queryText, settings, files, executeMode);
+                    result = GuardedRun(queryId, user, credentials, queryText, settings, files, executeMode, queryType);
                 } catch (const std::exception& ex) {
                     YQL_LOG(DEBUG) << "Query " << ToString(queryId) << " finished with errors";
                     result = TQueryResult{
@@ -1010,17 +1043,17 @@ public:
         return {};
     }
 
-    void OnDynamicConfigChanged(TYqlPluginDynamicConfig config) noexcept override
+    void OnDynamicConfigChanged(TYqlPluginDynamicConfigPtr config) noexcept override
     {
         YQL_LOG(INFO) << "Dynamic config update started";
-        YQL_LOG(DEBUG) << __FUNCTION__ << ": config.GatewaysConfig = " << config.GatewaysConfig.AsStringBuf();
+        YQL_LOG(DEBUG) << __FUNCTION__ << ": config.GatewaysConfig = " << config->GatewaysConfig.AsStringBuf();
 
         NYson::TProtobufWriterOptions protobufWriterOptions;
         protobufWriterOptions.ConvertSnakeToCamelCase = true;
 
         NYql::TGatewaysConfig dynamicGatewaysConfig;
         dynamicGatewaysConfig.ParseFromStringOrThrow(NYson::YsonStringToProto(
-            config.GatewaysConfig,
+            config->GatewaysConfig,
             NYson::ReflectProtobufMessageType<NYql::TGatewaysConfig>(),
             protobufWriterOptions));
 
@@ -1038,13 +1071,12 @@ public:
 
         DynamicConfig_.Store(CreateDynamicConfig(std::move(newGatewaysConfig)));
 
-        if (!config.MaxSupportedYqlVersion) {
+        if (!config->MaxSupportedYqlVersion) {
             MaxYqlLangVersion_ = MaxYqlLangVersionInitial_;
         } else {
-            const auto maxVersionStr = config.MaxSupportedYqlVersion.ToString();
-            YQL_LOG(DEBUG) << __FUNCTION__ << ": config.MaxSupportedYqlVersion = " << maxVersionStr;
+            YQL_LOG(DEBUG) << __FUNCTION__ << ": config.MaxSupportedYqlVersion = " << config->MaxSupportedYqlVersion;
             TLangVersion maxVersion;
-            if (ParseLangVersion(maxVersionStr, maxVersion)) {
+            if (ParseLangVersion(config->MaxSupportedYqlVersion, maxVersion)) {
                 MaxYqlLangVersion_ = maxVersion;
             } else {
                 YQL_LOG(DEBUG) << __FUNCTION__ << ": cannot parse config.MaxSupportedYqlVersion";
@@ -1052,6 +1084,11 @@ public:
             }
         }
         YQL_LOG(INFO) << "Dynamic config update finished";
+    }
+
+    void OnUdfMetaChanged(TUdfMetaPtr /*udfMeta*/) override
+    {
+        // Not implemented
     }
 
     void RegisterQuery(TQueryId queryId) noexcept override
@@ -1092,10 +1129,12 @@ private:
     const bool StartDqManager_;
     TDqManagerPtr DqManager_;
     THolder<IThreadPool> DqGatewayOffloadThreadPool_;
+    TConfigClusters::TPtr YtClusters_;
     NYql::TFileStoragePtr FileStorage_;
     ::TIntrusivePtr<NKikimr::NMiniKQL::IMutableFunctionRegistry> FuncRegistry_;
     TAtomicIntrusivePtr<TDynamicConfig> DynamicConfig_;
     NYql::TGatewaysConfig GatewaysConfigInitial_;
+    NYql::TStaticGatewaysConfig StaticGatewaysConfig_;
     THashMap<TString, TString> Modules_;
     TYsonString OperationAttributes_;
     TString YqlAgentToken_;
@@ -1195,18 +1234,11 @@ private:
 
         auto dynamicConfig = New<TDynamicConfig>();
         dynamicConfig->GatewaysConfig = std::move(gatewaysConfig);
-        auto* gatewayYtConfig = dynamicConfig->GatewaysConfig.MutableYt();
+        const auto& gatewayYtConfig = dynamicConfig->GatewaysConfig.GetYt();
         auto* gatewayPqConfig = dynamicConfig->GatewaysConfig.MutablePq();
         auto* gatewaySolomonConfig = dynamicConfig->GatewaysConfig.MutableSolomon();
 
-        // Ignore MrJobUdfsDir in dynamic config (we won't reload udfs and won't restart DqManager_).
-        gatewayYtConfig->ClearMrJobUdfsDir();
-        YQL_LOG(DEBUG) << __FUNCTION__ << ": TDynamicConfig ready";
-
-        gatewayYtConfig->SetMrJobBinMd5(CalculateMD5Checksum(gatewayYtConfig->GetMrJobBin()));
-        YQL_LOG(DEBUG) << __FUNCTION__ << ": SetMrJobBinMd5 ready";
-
-        for (const auto& mapping : gatewayYtConfig->GetClusterMapping()) {
+        for (const auto& mapping : gatewayYtConfig.GetClusterMapping()) {
             dynamicConfig->Clusters.insert({mapping.name(), TString(NYql::YtProviderName)});
             dynamicConfig->ClusterAddresses.insert({mapping.name(), mapping.cluster()});
             if (mapping.GetDefault()) {
@@ -1247,7 +1279,13 @@ private:
         }
         YQL_LOG(DEBUG) << __FUNCTION__ << ": CompileLibraries ready";
 
-        dynamicConfig->ModuleResolver = std::make_shared<NYql::TModuleResolver>(translators, std::move(modulesTable), dynamicConfig->ExprContext.NextUniqueId, dynamicConfig->Clusters, THashSet<TString>{});
+        dynamicConfig->ModuleResolver = std::make_shared<NYql::TModuleResolver>(
+            translators,
+            std::move(modulesTable),
+            dynamicConfig->ExprContext.NextUniqueId,
+            dynamicConfig->Clusters,
+            NSQLTranslation::TExtendedSqlFlags{});
+
         YQL_LOG(DEBUG) << __FUNCTION__ << ": ModuleResolver ready";
 
         YQL_LOG(DEBUG) << __FUNCTION__ << ": done";
@@ -1263,13 +1301,26 @@ private:
         ytServices.FunctionRegistry = FuncRegistry_.Get();
         ytServices.FileStorage = FileStorage_;
         ytServices.Config = std::make_shared<NYql::TYtGatewayConfig>(dynamicConfig.GatewaysConfig.GetYt());
+        ytServices.StaticConfig = std::make_shared<NYql::TYtStaticGatewayConfig>(StaticGatewaysConfig_.GetYt());
         ytServices.SecretMasker = CreateSecretMasker();
         ytServices.TvmClient = TvmClient_;
         ytServices.YtAccessProvider = YtAccessProvider_;
 
         TVector<NYql::TDataProviderInitializer> dataProvidersInit;
         if (DqManagerConfig_) {
-            auto dqGateway = NYql::CreateDqGateway("localhost", DqManagerConfig_->GrpcPort);
+            NYql::NProto::TDqConfig dqConfig;
+            dqConfig.SetPort(DqManagerConfig_->GrpcPort);
+            dqConfig.SetOpenSessionTimeoutMs(TDuration::Minutes(60).MilliSeconds());
+            dqConfig.SetRequestTimeoutMs(TDuration::Max().MilliSeconds());
+
+            if (DqManager_) {
+                const auto vanillaJobLite = DqManager_->GetVanillaJobLite();
+                auto* ytBackend = dqConfig.AddYtBackends();
+                ytBackend->SetVanillaJobLite(vanillaJobLite->GetPath());
+                ytBackend->SetVanillaJobLiteMd5(vanillaJobLite->GetMd5());
+            }
+
+            auto dqGateway = NYql::CreateDqGateway(dqConfig);
             // NOTE: prevent deadlock upon thread joining
             // details in https://st.yandex-team.ru/YT-26302
             auto dqGatewayWithOffloading = CreateDqGatewayWithOffloading(

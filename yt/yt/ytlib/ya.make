@@ -13,7 +13,6 @@ SRCS(
     api/native/bundle_controller_client_impl.cpp
     api/native/cell_commit_session.cpp
     api/native/chaos_helpers.cpp
-    api/native/chaos_lease.cpp
     api/native/chaos_lease_type_handler.cpp
     api/native/chaos_replicated_table_type_handler.cpp
     api/native/chaos_table_replica_type_handler.cpp
@@ -120,6 +119,7 @@ SRCS(
     chaos_client/banned_replica_tracker.cpp
     chaos_client/chaos_cell_channel_factory.cpp
     chaos_client/chaos_cell_directory_synchronizer.cpp
+    chaos_client/chaos_leases_watcher.cpp
     chaos_client/chaos_object_channel_factory.cpp
     chaos_client/chaos_residency_cache.cpp
     chaos_client/config.cpp
@@ -163,6 +163,7 @@ SRCS(
     GLOBAL chunk_client/configure_dispatcher.cpp
     chunk_client/confirming_writer.cpp
     chunk_client/data_sink.cpp
+    chunk_client/data_slice.cpp
     chunk_client/data_slice_descriptor.cpp
     chunk_client/data_source.cpp
     chunk_client/deferred_chunk_meta.cpp
@@ -181,8 +182,8 @@ SRCS(
     chunk_client/helpers.cpp
     chunk_client/input_chunk_slice.cpp
     chunk_client/input_chunk.cpp
+    chunk_client/job_io_meter.cpp
     GLOBAL chunk_client/job_spec_extensions.cpp
-    chunk_client/legacy_data_slice.cpp
     chunk_client/medium_directory_synchronizer.cpp
     chunk_client/medium_directory.cpp
     chunk_client/medium_descriptor.cpp
@@ -259,12 +260,15 @@ SRCS(
 
     distributed_chunk_session_client/config.cpp
     distributed_chunk_session_client/helpers.cpp
-    distributed_chunk_session_client/distributed_chunk_session_pool.cpp
-    distributed_chunk_session_client/distributed_chunk_writer.cpp
-    distributed_chunk_session_client/distributed_chunk_session_controller.cpp
-    distributed_chunk_session_client/distributed_chunk_session_reader.cpp
+    distributed_chunk_session_client/seal_summary_fetcher.cpp
+    distributed_chunk_session_client/seal_monitor.cpp
+    distributed_chunk_session_client/statistics.cpp
+    distributed_chunk_session_client/session_pool.cpp
+    distributed_chunk_session_client/session_writer.cpp
+    distributed_chunk_session_client/session_controller.cpp
+    distributed_chunk_session_client/session_reader.cpp
 
-    distributed_chunk_session_client/proto/distributed_chunk_session_service.proto
+    distributed_chunk_session_client/proto/session_service.proto
 
     driver/config.cpp
 
@@ -383,6 +387,10 @@ SRCS(
     push_based_shuffle_client/session_provider.cpp
     push_based_shuffle_client/partition_reader.cpp
     push_based_shuffle_client/shuffle_writer.cpp
+    push_based_shuffle_client/shuffle_writer_adapter.cpp
+    push_based_shuffle_client/sort_reader.cpp
+    push_based_shuffle_client/sort_reader_adapter.cpp
+    push_based_shuffle_client/sorted_merging_reader.cpp
 
     query_client/executor.cpp
     query_client/explain.cpp
@@ -422,6 +430,7 @@ SRCS(
     security_client/helpers.cpp
     security_client/permission_cache.cpp
     security_client/public.cpp
+    security_client/query_pool_permission_cache.cpp
     security_client/user_attribute_cache.cpp
 
     security_client/proto/account_ypath.proto
@@ -827,6 +836,7 @@ PEERDIR(
     library/cpp/containers/absl
     yt/yt/library/erasure/impl
     yt/yt/library/containers
+    yt/yt/library/discovery_client
     yt/yt/library/disk_manager
     yt/yt/library/process
     yt/yt/library/random
@@ -856,17 +866,15 @@ PEERDIR(
     yt/yt/library/vector_hdrf
     yt/yt/library/web_assembly/api
     yt/yt/ytlib/admin
-    yt/yt/ytlib/discovery_client
     yt/yt/ytlib/query_tracker_client
     yt/yt_proto/yt/client
-    yt/yt/flow/lib/client
-    yt/yt/flow/lib/native_client
+    yt/yt/flow/library/cpp/client
+    yt/yt/flow/library/cpp/native_client
 )
 
 END()
 
 RECURSE(
-    discovery_client
     distributed_throttler
 )
 

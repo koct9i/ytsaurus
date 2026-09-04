@@ -17,7 +17,8 @@
 #include <yt/yt/client/object_client/helpers.h>
 
 #include <yt/yt/core/misc/collection_helpers.h>
-#include <yt/yt/core/misc/range_formatters.h>
+
+#include <library/cpp/yt/misc/range_formatters.h>
 
 namespace NYT::NObjectServer {
 
@@ -217,8 +218,8 @@ void TGarbageCollector::EphemeralUnrefObject(TObject* object)
 
             YT_VERIFY(!IsObjectAlive(object));
 
-            YT_LOG_TRACE("Ephemeral ghost disposed (ObjectId: %v)",
-                object->GetId());
+            YT_TLOG_TRACE("Ephemeral ghost disposed")
+                .With("ObjectId", object->GetId());
             YT_VERIFY(EphemeralGhosts_.erase(object) == 1);
             delete object;
         }
@@ -262,13 +263,13 @@ int TGarbageCollector::WeakUnrefObject(TObject* object)
             YT_VERIFY(!IsObjectAlive(object));
 
             if (ephemeralRefCounter == 0) {
-                YT_LOG_TRACE("Weak ghost disposed (ObjectId: %v)",
-                    object->GetId());
+                YT_TLOG_TRACE("Weak ghost disposed")
+                    .With("ObjectId", object->GetId());
                 YT_VERIFY(WeakGhosts_.erase(object->GetId()) == 1);
                 delete object;
             } else {
-                YT_LOG_TRACE("Weak ghost became ephemeral ghost (ObjectId: %v)",
-                    object->GetId());
+                YT_TLOG_TRACE("Weak ghost became ephemeral ghost")
+                    .With("ObjectId", object->GetId());
                 YT_VERIFY(WeakGhosts_.erase(object->GetId()) == 1);
                 YT_VERIFY(EphemeralGhosts_.insert(object).second);
             }
@@ -287,8 +288,8 @@ void TGarbageCollector::RegisterZombie(TObject* object)
         CollectPromise_ = NewPromise<void>();
     }
 
-    YT_LOG_TRACE("Object has become zombie (ObjectId: %v)",
-        object->GetId());
+    YT_TLOG_TRACE("Object has become zombie")
+        .With("ObjectId", object->GetId());
     InsertOrCrash(Zombies_, object);
     UpdateZombieCount(object, +1);
 }
@@ -300,8 +301,8 @@ void TGarbageCollector::UnregisterZombie(TObject* object)
 
     if (Zombies_.erase(object) == 1) {
         UpdateZombieCount(object, -1);
-        YT_LOG_DEBUG("Object has been resurrected (ObjectId: %v)",
-            object->GetId());
+        YT_TLOG_DEBUG("Object has been resurrected")
+            .With("ObjectId", object->GetId());
         CheckEmpty();
     }
 }
@@ -325,21 +326,21 @@ void TGarbageCollector::DestroyZombie(TObject* object)
     }
 
     if (weakRefCounter > 0) {
-        YT_LOG_TRACE("Zombie has become weak ghost (ObjectId: %v, EphemeralRefCounter: %v, WeakRefCounter: %v)",
-            object->GetId(),
-            ephemeralRefCounter,
-            weakRefCounter);
+        YT_TLOG_TRACE("Zombie has become weak ghost")
+            .With("ObjectId", object->GetId())
+            .With("EphemeralRefCounter", ephemeralRefCounter)
+            .With("WeakRefCounter", weakRefCounter);
         YT_VERIFY(WeakGhosts_.emplace(object->GetId(), object).second);
     } else if (ephemeralRefCounter > 0) {
         YT_ASSERT(weakRefCounter == 0);
-        YT_LOG_TRACE("Zombie has become ephemeral ghost (ObjectId: %v, EphemeralRefCounter: %v, WeakRefCounter: %v)",
-            object->GetId(),
-            ephemeralRefCounter,
-            weakRefCounter);
+        YT_TLOG_TRACE("Zombie has become ephemeral ghost")
+            .With("ObjectId", object->GetId())
+            .With("EphemeralRefCounter", ephemeralRefCounter)
+            .With("WeakRefCounter", weakRefCounter);
         YT_VERIFY(EphemeralGhosts_.insert(object).second);
     } else {
-        YT_LOG_TRACE("Zombie disposed (ObjectId: %v)",
-            object->GetId());
+        YT_TLOG_TRACE("Zombie disposed")
+            .With("ObjectId", object->GetId());
         delete object;
     }
 }
@@ -358,15 +359,22 @@ bool TGarbageCollector::IsEphemeralGhost(TObject* object) const
     return EphemeralGhosts_.contains(object);
 }
 
+bool TGarbageCollector::IsWeakGhost(TObject* object) const
+{
+    VerifyPersistentStateRead();
+
+    return WeakGhosts_.contains(object->GetId());
+}
+
 void TGarbageCollector::RegisterRemovalAwaitingCellsSyncObject(TObject* object, const TCellTagSet& cellTags)
 {
     YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
     EmplaceOrCrash(RemovalAwaitingCellsSyncObjects_, object, cellTags);
 
-    YT_LOG_DEBUG("Removal awaiting cells sync object registered (ObjectId: %v, CellTags: %v)",
-        object->GetId(),
-        cellTags);
+    YT_TLOG_DEBUG("Removal awaiting cells sync object registered")
+        .With("ObjectId", object->GetId())
+        .With("CellTags", cellTags);
 }
 
 void TGarbageCollector::UnregisterRemovalAwaitingCellsSyncObject(TObject* object)
@@ -374,11 +382,11 @@ void TGarbageCollector::UnregisterRemovalAwaitingCellsSyncObject(TObject* object
     YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
     if (RemovalAwaitingCellsSyncObjects_.erase(object) == 1) {
-        YT_LOG_DEBUG("Removal awaiting cells sync object unregistered (ObjectId: %v)",
-            object->GetId());
+        YT_TLOG_DEBUG("Removal awaiting cells sync object unregistered")
+            .With("ObjectId", object->GetId());
     } else {
-        YT_LOG_ALERT("Attempt to unregister an unknown removal awaiting cells sync object (ObjectId: %v)",
-            object->GetId());
+        YT_TLOG_ALERT("Attempt to unregister an unknown removal awaiting cells sync object")
+            .With("ObjectId", object->GetId());
     }
 }
 
@@ -406,8 +414,8 @@ void TGarbageCollector::Reset()
 
 void TGarbageCollector::ClearEphemeralGhosts()
 {
-    YT_LOG_INFO("Started deleting ephemeral ghost objects (Count: %v)",
-        EphemeralGhosts_.size());
+    YT_TLOG_INFO("Started deleting ephemeral ghost objects")
+        .With("Count", EphemeralGhosts_.size());
 
     for (auto* object : EphemeralGhosts_) {
         YT_ASSERT(object->IsGhost());
@@ -417,13 +425,13 @@ void TGarbageCollector::ClearEphemeralGhosts()
     LockedObjectCount_ -= EphemeralGhosts_.size();
 
     EphemeralGhosts_.clear();
-    YT_LOG_INFO("Finished deleting ephemeral ghost objects");
+    YT_TLOG_INFO("Finished deleting ephemeral ghost objects");
 }
 
 void TGarbageCollector::ClearWeakGhosts()
 {
-    YT_LOG_INFO("Started deleting weak ghost objects (Count: %v)",
-        WeakGhosts_.size());
+    YT_TLOG_INFO("Started deleting weak ghost objects")
+        .With("Count", WeakGhosts_.size());
 
     for (auto [objectId, object] : WeakGhosts_) {
         YT_VERIFY(object->IsGhost());
@@ -433,7 +441,7 @@ void TGarbageCollector::ClearWeakGhosts()
     LockedObjectCount_ -= WeakGhosts_.size();
 
     WeakGhosts_.clear();
-    YT_LOG_INFO("Finished deleting weak ghost objects");
+    YT_TLOG_INFO("Finished deleting weak ghost objects");
 }
 
 void TGarbageCollector::CheckEmpty()
@@ -441,7 +449,7 @@ void TGarbageCollector::CheckEmpty()
     YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
     if (Zombies_.empty() && CollectPromise_ && !CollectPromise_.IsSet()) {
-        YT_LOG_DEBUG("Zombie queue is empty");
+        YT_TLOG_DEBUG("Zombie queue is empty");
         CollectPromise_.Set();
     }
 }
@@ -479,16 +487,14 @@ void TGarbageCollector::SweepZombies()
         }
     }
 
-    YT_LOG_DEBUG("Starting zombie objects sweep (Count: %v, Weight: %v)",
-        objectIds.size(),
-        totalWeight);
+    YT_TLOG_DEBUG("Starting zombie objects sweep")
+        .With("Count", objectIds.size())
+        .With("Weight", totalWeight);
 
     const auto& objectManager = Bootstrap_->GetObjectManager();
     auto result = WaitFor(objectManager->DestroyObjects(std::move(objectIds)));
-    YT_LOG_DEBUG_UNLESS(
-        result.IsOK(),
-        result,
-        "Error destroying objects");
+    YT_TLOG_DEBUG_UNLESS(result.IsOK(), "Error destroying objects")
+        .With(result);
 }
 
 void TGarbageCollector::SweepEphemeralGhosts()
@@ -546,15 +552,16 @@ void TGarbageCollector::OnObjectRemovalCellsSync()
 
     auto result = WaitFor(AllSucceeded(futures));
     if (!result.IsOK()) {
-        YT_LOG_WARNING(result, "Error synchronizing secondary cells");
+        YT_TLOG_WARNING("Error synchronizing secondary cells")
+            .With(result);
         return;
     }
 
     NProto::TReqConfirmRemovalAwaitingCellsSyncObjects request;
     ToProto(request.mutable_object_ids(), objectIds);
 
-    YT_LOG_DEBUG("Confirming removal awaiting cells sync objects (ObjectIds: %v)",
-        objectIds);
+    YT_TLOG_DEBUG("Confirming removal awaiting cells sync objects")
+        .With("ObjectIds", objectIds);
 
     auto asyncResult = CreateMutation(hydraManager, request)
         ->CommitAndLog(Logger());

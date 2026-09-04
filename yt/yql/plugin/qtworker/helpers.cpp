@@ -27,7 +27,7 @@ NYql::NProto::TTaskFile::EType FileTypeToProto(EQueryFileContentType type)
             return NYql::NProto::TTaskFile::URL;
         default:
             THROW_ERROR_EXCEPTION("Unexpected file content")
-                << TErrorAttribute("type", static_cast<int>(type));
+                .With("type", static_cast<int>(type));
     }
 }
 
@@ -62,9 +62,6 @@ void UpdateTaskResultData(NYql::NProto::TTaskResult& to, const NYql::NProto::TTa
     if (from.IssuesSize() > 0) {
         *to.MutableIssues() = from.GetIssues();
     }
-    if (from.ErrorsSize() > 0) {
-        *to.MutableErrors() = from.GetErrors();
-    }
     if (from.ResultsSize() > 0) {
         *to.MutableResults() = from.GetResults();
     }
@@ -87,32 +84,26 @@ TString BuildYsonResultList(const NYql::NProto::TTaskResult& result)
 
 TQueryResult TaskResultToYqlResult(const NYql::NProto::TTaskResult& result, TString progress)
 {
-    if (result.IssuesSize() > 0) {
-        NYql::TIssues issues;
-        IssuesFromMessage(result.GetIssues(), issues);
-        return TQueryResult{
-            .YsonError = IssuesToYtErrorYson(issues),
-        };
-    }
-    if (result.ErrorsSize() > 0) {
-        return TQueryResult{
-            .YsonError = MessageToYtErrorYson(result.GetErrors(0).GetMessage()),
-        };
-    }
-    if (result.GetStatus() == NYql::NProto::ETaskStatus::ERROR) {
-        return TQueryResult{
-            .YsonError = MessageToYtErrorYson("Query finished with ERROR status on worker"),
-        };
-    }
-
     TString ysonResult = BuildYsonResultList(result);
-    return TQueryResult{
+    auto queryResult = TQueryResult{
         .YsonResult = ysonResult ? std::make_optional(ysonResult) : std::nullopt,
         .Plan = result.HasPlan() ? std::make_optional(result.GetPlan()) : std::nullopt,
         .Statistics = result.HasStatistics() ? std::make_optional(result.GetStatistics()) : std::nullopt,
         .Progress = std::move(progress),
         .Ast = result.HasAst() ? std::make_optional(result.GetAst()) : std::nullopt,
     };
+
+    if (result.GetStatus() == NYql::NProto::ETaskStatus::ERROR) {
+        if (result.IssuesSize() > 0) {
+            NYql::TIssues issues;
+            IssuesFromMessage(result.GetIssues(), issues);
+            queryResult.YsonError = IssuesToYtErrorYson(issues);
+        } else {
+            queryResult.YsonError = MessageToYtErrorYson("Query finished with ERROR status on worker");
+        }
+    }
+
+    return queryResult;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

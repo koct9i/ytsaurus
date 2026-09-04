@@ -19,3 +19,7 @@ main:
   source: stable
 0.31.0:
   source: stable
+0.32.0:
+  source: stable
+0.33.0:
+  source: stable

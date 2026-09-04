@@ -80,12 +80,13 @@ constexpr auto DefaultGatewaySettings = std::to_array<std::pair<TStringBuf, TStr
     {"UseNativeDynamicTableRead", "true"},
     {"RuntimeClusterSelection", "auto"},
     {"_EnableRLSTablesSupport", "true"},
+    {"_EnableDynamicTablesWrite", "true"},
 });
 
 constexpr auto DefaultDQGatewaySettings = std::to_array<std::pair<TStringBuf, TStringBuf>>({
     {"EnableComputeActor", "1"},
     {"ComputeActorType", "async"},
-    {"EnableStrip", "true"},
+    {"EnableStrip", "false"},
     {"EnableInsert", "true"},
     {"ChannelBufferSize", "1000000"},
     {"PullRequestTimeoutMs", "3000000"},
@@ -171,7 +172,9 @@ void TVanillaJobFile::Register(TRegistrar registrar)
 void TDQYTBackend::Register(TRegistrar registrar)
 {
     registrar.Parameter("cluster_name", &TThis::ClusterName)
-        .Default();
+        .Default().DontSerializeDefault();
+    registrar.Parameter("proxy_address", &TThis::ProxyAddress)
+        .Default().DontSerializeDefault();
     registrar.Parameter("jobs_per_operation", &TThis::JobsPerOperation)
         .Default(5);
     registrar.Parameter("max_jobs", &TThis::MaxJobs)
@@ -224,7 +227,9 @@ void TDQYTBackend::Register(TRegistrar registrar)
 void TDQYTCoordinator::Register(TRegistrar registrar)
 {
     registrar.Parameter("cluster_name", &TThis::ClusterName)
-        .Default();
+        .Default().DontSerializeDefault();
+    registrar.Parameter("proxy_address", &TThis::ProxyAddress)
+        .Default().DontSerializeDefault();
     registrar.Parameter("prefix", &TThis::Prefix)
         .Default("//sys/yql_agent/dq_coord");
     registrar.Parameter("token_file", &TThis::TokenFile)
@@ -344,8 +349,6 @@ void TYqlPluginConfig::Register(TRegistrar registrar)
         .Default(GetEphemeralNodeFactory()->CreateMap())
         .ResetOnLoad();
     registrar.Parameter("yt_token_path", &TThis::YTTokenPath)
-        .Default();
-    registrar.Parameter("yql_plugin_shared_library", &TThis::YqlPluginSharedLibrary)
         .Default();
     registrar.Parameter("additional_system_libs", &TThis::AdditionalSystemLibs)
         .Default();
@@ -467,6 +470,18 @@ void TYqlPluginConfig::Register(TRegistrar registrar)
             icSettingsConfig->AddChild("close_on_idle_ms", BuildYsonNodeFluently().Value(0));
         }
     });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TYqlPluginDynamicConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("gateways_config", &TThis::GatewaysConfig)
+        .Default();
+    registrar.Parameter("max_supported_yql_version", &TThis::MaxSupportedYqlVersion)
+        .Default();
+    registrar.Parameter("proto_gateways_configs", &TThis::ProtoGatewaysConfigs)
+        .Default();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

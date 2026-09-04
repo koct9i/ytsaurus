@@ -1,5 +1,7 @@
 from yt_env_setup import (
     YTEnvSetup,
+    Restarter,
+    CONTROLLER_AGENTS_SERVICE,
     is_asan_build,
 )
 
@@ -53,7 +55,7 @@ def get_running_job_count(op_id):
 
 
 class TestGetOperation(YTEnvSetup):
-    ENABLE_MULTIDAEMON = True
+    ENABLE_MULTIDAEMON = False  # test_get_operation_no_archive restarts the controller agent.
     NUM_TEST_PARTITIONS = 4
     NUM_MASTERS = 1
     NUM_NODES = 3
@@ -95,7 +97,7 @@ class TestGetOperation(YTEnvSetup):
         del operation_result["brief_progress"]["build_time"]
         del operation_result["progress"]["build_time"]
 
-    @authors("omgronny", "babenko", "ignat")
+    @authors("bystrovserg")
     def test_get_operation(self):
         create("table", "//tmp/t1")
         create("table", "//tmp/t2")
@@ -163,11 +165,20 @@ class TestGetOperation(YTEnvSetup):
 
         res_get_operations_archive = get_operation(op.id)
 
+        def drop_build_time(result):
+            for key in ["brief_progress", "progress"]:
+                if isinstance(result.get(key), dict):
+                    result[key].pop("build_time", None)
+
+        drop_build_time(res_cypress_finished)
+        drop_build_time(res_get_operations_archive)
+
         for key in res_get_operations_archive.keys():
             if key in res_cypress:
                 assert res_get_operations_archive[key] == res_cypress_finished[key]
 
         res_get_operations_archive_raw = _get_operation_from_archive(op.id)
+        drop_build_time(res_get_operations_archive_raw)
 
         for key in res_get_operations_archive_raw.keys():
             if key in res_cypress and key not in ["start_time", "finish_time"]:
@@ -258,10 +269,12 @@ class TestGetOperation(YTEnvSetup):
         res_get_operation_new = get_operation(op.id)
         self.clean_build_time(res_get_operation_new)
         assert res_get_operation_new["brief_progress"] != {"ivan": "ivanov"}
-        assert res_get_operation_new["progress"] != {
-            "semen": "semenych",
-            "semenych": "gorbunkov",
-        }
+
+        # NB(bystrovserg): We do not write Cypress progress to archive anymore.
+        # assert res_get_operation_new["progress"] != {
+        #     "semen": "semenych",
+        #     "semenych": "gorbunkov",
+        # }
 
     @authors("ignat")
     @pytest.mark.parametrize("annotations", [{}, {"foo": "abc"}])
@@ -420,13 +433,13 @@ class TestGetOperation(YTEnvSetup):
         release_breakpoint()
         op.track()
 
-    @authors("omgronny")
+    @authors("bystrovserg")
     def test_archive_failure(self):
         create("table", "//tmp/t1")
         create("table", "//tmp/t2")
         write_table("//tmp/t1", [{"foo": "bar"}, {"foo": "baz"}, {"foo": "qux"}])
 
-        # Unmount table to check that controller agent writes to Cypress during archive unavailability.
+        # Unmount the archive to simulate it being temporarily unavailable.
         sync_unmount_table("//sys/operations_archive/ordered_by_id")
 
         op = map(
@@ -439,38 +452,13 @@ class TestGetOperation(YTEnvSetup):
         )
 
         wait_breakpoint()
-        wait(lambda: _get_operation_from_cypress(op.id).get("brief_progress", {}).get("jobs", {}).get("running") == 1)
-        wait(lambda: _get_operation_from_cypress(op.id).get("progress", {}).get("jobs", {}).get("running") == 1)
 
-        res_api = get_operation(op.id)
-        self.clean_build_time(res_api)
-        res_cypress = _get_operation_from_cypress(op.id)
-        self.clean_build_time(res_cypress)
+        # Progress is still served from the orchid (include_runtime) even though the archive is down.
+        wait(lambda: get_operation(op.id, include_runtime=True).get("brief_progress", {}).get("jobs", {}).get("running") == 1)
+        wait(lambda: get_operation(op.id, include_runtime=True).get("progress", {}).get("jobs", {}).get("running") == 1)
 
-        assert res_api["brief_progress"] == res_cypress["brief_progress"]
-        assert res_api["progress"] == res_cypress["progress"]
-
-        sync_mount_table("//sys/operations_archive/ordered_by_id")
-
-        wait(lambda: _get_operation_from_archive(op.id))
-        assert _get_operation_from_archive(op.id).get("brief_progress", {}).get("jobs", {}).get("running") == 1
-        assert _get_operation_from_archive(op.id).get("progress", {}).get("jobs", {}).get("running") == 1
-        release_breakpoint()
-        op.track()
-
-        res_api = get_operation(op.id)
-        res_cypress = _get_operation_from_cypress(op.id)
-
-        assert res_api["brief_progress"]["jobs"]["running"] == 0
-        # Brief progress in Cypress is obsolete as archive is up now.
-        assert res_cypress["brief_progress"]["jobs"]["running"] > 0
-
-        assert res_api["progress"]["jobs"]["running"] == 0
-        # Progress in Cypress is obsolete as archive is up now.
-        assert res_cypress["progress"]["jobs"]["running"] > 0
-
-        sync_unmount_table("//sys/operations_archive/ordered_by_id")
-
+        # The operation is in Cypress, but its Cypress progress is forced stale (maximum_cypress_progress_age=0)
+        # while the archive is unavailable, so get_operation must surface a retriable archive error.
         with raises_yt_error(code=yt_error_codes.RetriableArchiveError):
             get_operation(op.id, maximum_cypress_progress_age=0)
 
@@ -489,34 +477,21 @@ class TestGetOperation(YTEnvSetup):
             assert get_operation_from_archive_timeout_counter.get_delta() == 0
             wait(lambda: get_operation_from_archive_failure_counter.get_delta() > 0)
 
+        release_breakpoint()
+        op.track()
+
         sync_mount_table("//sys/operations_archive/ordered_by_id")
 
-        clean_operations()
-
-        res_api = get_operation(op.id)
-        res_archive = _get_operation_from_archive(op.id)
-
-        assert res_api["brief_progress"] == res_archive["brief_progress"]
-        assert res_api["progress"] == res_archive["progress"]
-
-        # Unmount table again and check that error is _not_ "No such operation".
-        sync_unmount_table("//sys/operations_archive/ordered_by_id")
-        with raises_yt_error(code=yt_error_codes.TabletNotMounted):
-            get_operation(op.id)
-
-    @authors("omgronny")
+    @authors("bystrovserg")
     def test_get_operation_no_archive(self):
         remove("//sys/operations_archive", force=True)
-        create("table", "//tmp/t1")
-        create("table", "//tmp/t2")
-        write_table("//tmp/t1", [{"foo": "bar"}, {"foo": "baz"}, {"foo": "qux"}])
 
-        op = map(
-            track=False,
-            in_="//tmp/t1",
-            out="//tmp/t2",
-            command=with_breakpoint("cat ; BREAKPOINT"),
-        )
+        # The controller agent memoizes archive existence for its whole lifetime.
+        # Restart it so it observes that the archive is gone.
+        with Restarter(self.Env, CONTROLLER_AGENTS_SERVICE):
+            pass
+
+        op = run_test_vanilla(command=with_breakpoint("BREAKPOINT"), track=False)
 
         wait_breakpoint()
         wait(lambda: _get_operation_from_cypress(op.id).get("brief_progress", {}).get("jobs", {}).get("running") == 1)

@@ -15,11 +15,13 @@
 add_subdirectory(misc)
 add_subdirectory(http)
 add_subdirectory(https)
+add_subdirectory(yaml)
 add_subdirectory(rpc)
 add_subdirectory(service_discovery)
 add_subdirectory(test_framework)
 add_subdirectory(actions)
 add_subdirectory(concurrency)
+add_subdirectory(dns)
 add_subdirectory(net)
 add_subdirectory(tracing)
 add_subdirectory(yson)
@@ -71,6 +73,7 @@ target_link_libraries(yt-yt-core PUBLIC
   cpp-yt-logging
   yt-logging-plain_text_formatter
   cpp-yt-misc
+  cpp-yt-mpl
   cpp-yt-memory
   cpp-yt-string
   cpp-yt-yson
@@ -269,6 +272,7 @@ target_sources(yt-yt-core PRIVATE
   ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/config.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/dispatcher.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/dynamic_channel_pool.cpp
+  ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/dynamic_channel_pool_provider.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/endpoint_address.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/hedging_channel.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/rpc/helpers.cpp
@@ -344,6 +348,7 @@ target_sources(yt-yt-core PRIVATE
   ${PROJECT_SOURCE_DIR}/yt/yt/core/yson/list_verb_lazy_yson_consumer.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/yson/attributes_stripper.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/ytree/attribute_consumer.cpp
+  ${PROJECT_SOURCE_DIR}/yt/yt/core/ytree/composite_map.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/ytree/helpers.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/ytree/attributes.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/core/ytree/attribute_filter.cpp
@@ -420,6 +425,7 @@ target_link_libraries(yt-yt-core.global PUBLIC
   cpp-yt-logging
   yt-logging-plain_text_formatter
   cpp-yt-misc
+  cpp-yt-mpl
   cpp-yt-memory
   cpp-yt-string
   cpp-yt-yson

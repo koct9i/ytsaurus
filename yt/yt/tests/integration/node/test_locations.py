@@ -1,6 +1,6 @@
 from yt_env_setup import YTEnvSetup, Restarter, NODES_SERVICE
 
-from yt_helpers import profiler_factory, read_structured_log
+from yt_helpers import profiler_factory, read_structured_log, write_log_barrier
 
 from yt_commands import (
     authors, read_table, wait, ls, set, get, map, update_nodes_dynamic_config, create,
@@ -13,6 +13,7 @@ import yt_error_codes
 import pytest
 import builtins
 import os
+import shutil
 import time
 
 
@@ -193,6 +194,43 @@ for line in sys.stdin:
 
         wait(lambda: cache_artifact_count() == 0)
 
+    @authors("dann239")
+    def test_disabled_location_alert(self):
+        node = ls("//sys/cluster_nodes")[0]
+        chunk_cache = self.Env.configs["node"][0]["data_node"]["cache_locations"][0]["path"]
+        assert not os.path.exists(f"{chunk_cache}/disabled")
+
+        # We set compression_codec here so that it trips the test_cache_location_disabling check.
+        create("file", "//tmp/file", attributes={"compression_codec": "lz4"})
+        write_file(
+            "//tmp/file",
+            b"x" * (1024 * 1024),
+            file_writer={"upload_replication_factor": 1},
+        )
+
+        update_nodes_dynamic_config({
+            "exec_node": {
+                "chunk_cache": {
+                    "test_cache_location_disabling": True,
+                },
+            },
+        })
+
+        op = run_test_vanilla(
+            command="true",
+            task_patch={"file_paths": ["//tmp/file"]},
+            track=False,
+        )
+
+        wait(lambda: os.path.exists(f"{chunk_cache}/disabled"))
+        op.abort()
+
+        def check_alerts():
+            alerts = get(f"//sys/cluster_nodes/{node}/@alerts")
+            return len(alerts) == 1 and "is disabled" in alerts[0]["message"]
+
+        wait(check_alerts)
+
 
 class TestPerLocationFullHeartbeats(YTEnvSetup):
     ENABLE_MULTIDAEMON = False
@@ -245,9 +283,6 @@ class TestPerLocationFullHeartbeats(YTEnvSetup):
 
     @authors("grphil")
     def test_empty_locations_are_reported(self):
-        # COMPAT(danilalexeev): YT-23781. Remove this once location fhb are enabled by default.
-        set("//sys/@config/chunk_manager/data_node_tracker/enable_validation_full_heartbeats", False)
-
         nodes = ls("//sys/cluster_nodes")
         assert len(nodes) == 1
         node = nodes[0]
@@ -273,9 +308,6 @@ class TestPerLocationFullHeartbeats(YTEnvSetup):
         wait(lambda: get(f"//sys/cluster_nodes/{node}/@state") == "being_disposed")
         set("//sys/@config/node_tracker/max_locations_being_disposed", 20)
 
-        set("//sys/@config/chunk_manager/data_node_tracker/enable_per_location_full_heartbeats", False)
-        wait(lambda: get(f"//sys/cluster_nodes/{node}/@state") == "online")
-
         update_nodes_dynamic_config({
             "data_node": {
                 "testing_options": {
@@ -284,7 +316,7 @@ class TestPerLocationFullHeartbeats(YTEnvSetup):
             }
         })
 
-        set("//sys/@config/chunk_manager/data_node_tracker/enable_per_location_full_heartbeats", True)
+        wait(lambda: get(f"//sys/cluster_nodes/{node}/@state") == "online")
 
         with Restarter(self.Env, NODES_SERVICE, sync=False):
             pass
@@ -293,9 +325,6 @@ class TestPerLocationFullHeartbeats(YTEnvSetup):
 
     @authors("danilalexeev")
     def test_interrupt_full_heartbeat_session(self):
-        # COMPAT(danilalexeev): YT-23781. Remove this once location fhb are enabled by default.
-        set("//sys/@config/chunk_manager/data_node_tracker/enable_validation_full_heartbeats", False)
-
         self.create_chunk_on_every_medium()
 
         nodes = ls("//sys/cluster_nodes")
@@ -317,11 +346,10 @@ class TestPerLocationFullHeartbeats(YTEnvSetup):
         # Full heartbeat is in session.
         wait(lambda: get(f"//sys/cluster_nodes/{node}/@state") == "registered")
 
-        set("//sys/@config/chunk_manager/data_node_tracker/enable_per_location_full_heartbeats", False)
+        with Restarter(self.Env, NODES_SERVICE, sync=False):
+            pass
 
         wait(lambda: get(f"//sys/cluster_nodes/{node}/@state") == "online")
-
-        set("//sys/@config/chunk_manager/data_node_tracker/enable_per_location_full_heartbeats", True)
 
     @authors("grphil")
     def test_location_indexes_in_heartbeats(self):
@@ -522,7 +550,7 @@ class TestAsyncTrashLoad(YTEnvSetup):
         wait(lambda: wait_sensor_change('location/trash_chunk_count', trash_chunk_count))
 
 
-class TestCacheLocationOverflow(YTEnvSetup):
+class CacheLocationOverflowBase(YTEnvSetup):
     USE_PORTO = True
     NUM_MASTERS = 1
     NUM_NODES = 1
@@ -530,12 +558,15 @@ class TestCacheLocationOverflow(YTEnvSetup):
     NUM_CONTROLLER_AGENTS = 1
     STORE_LOCATION_COUNT = 1
 
-    _TMPFS_SIZE = 10 * 1024 * 1024
+    _VOLUME_SIZE = 10 * 1024 * 1024
+
+    _BACKEND = None
+    _EXPECTED_ERROR = None
 
     @classmethod
     def setup_class(cls):
         import porto
-        vol = porto.Connection().CreateVolume(backend="tmpfs", space_limit=str(cls._TMPFS_SIZE))
+        vol = porto.Connection().CreateVolume(backend=cls._BACKEND, space_limit=str(cls._VOLUME_SIZE))
         cls.cache_volume_path = vol.path
         super().setup_class()
 
@@ -571,7 +602,7 @@ class TestCacheLocationOverflow(YTEnvSetup):
             }
         })
 
-        artifact_size = self._TMPFS_SIZE + 2 * 1024 * 1024
+        artifact_size = self._VOLUME_SIZE + 2 * 1024 * 1024
 
         create("file", "//tmp/big_file")
         write_file(
@@ -580,7 +611,7 @@ class TestCacheLocationOverflow(YTEnvSetup):
             file_writer={
                 "upload_replication_factor": 1,
                 "desired_chunk_size":
-                    self._TMPFS_SIZE // 4
+                    self._VOLUME_SIZE // 4
                     if multi_chunk
                     else artifact_size * 2
             },
@@ -590,6 +621,9 @@ class TestCacheLocationOverflow(YTEnvSetup):
 
         assert get(f"//sys/cluster_nodes/{node}/@resource_limits/user_slots") == 1
         assert not os.path.exists(f"{self.cache_volume_path}/disabled")
+
+        controller_agent_address = ls("//sys/controller_agents/instances")[0]
+        from_barrier = write_log_barrier(controller_agent_address)
 
         op = run_test_vanilla(
             command="true",
@@ -602,9 +636,11 @@ class TestCacheLocationOverflow(YTEnvSetup):
             wait(lambda: get(f"//sys/cluster_nodes/{node}/@resource_limits/user_slots") == 0)
             wait(lambda: os.path.exists(f"{self.cache_volume_path}/disabled"))
             assert op.get_job_count("aborted") == 1
+            to_barrier = write_log_barrier(controller_agent_address)
             op.abort()
         else:
             wait(lambda: op.get_job_count("aborted") >= 2)
+            to_barrier = write_log_barrier(controller_agent_address)
             op.abort()
 
             assert get(f"//sys/cluster_nodes/{node}/@resource_limits/user_slots") == 1
@@ -618,14 +654,108 @@ class TestCacheLocationOverflow(YTEnvSetup):
         ]
         assert len(leftover_temp_files) == 0, leftover_temp_files
 
-        entries = read_structured_log(
-            self.path_to_run + "/logs/controller-agent-0.json.log",
-            row_filter=lambda e: (
-                e.get("event_type") == "job_aborted" and
-                e.get("operation_id") == op.id and
-                "Job aborted by" not in e["error"]["message"]
-            ),
+        def read_abort_entries():
+            return read_structured_log(
+                self.path_to_run + "/logs/controller-agent-0.json.log",
+                from_barrier=from_barrier,
+                to_barrier=to_barrier,
+                row_filter=lambda e: (
+                    e.get("event_type") == "job_aborted" and
+                    e.get("operation_id") == op.id and
+                    "Job aborted by" not in e["error"]["message"]
+                ),
+            )
+
+        wait(lambda: len(read_abort_entries()) > 0)
+        for entry in read_abort_entries():
+            assert self._EXPECTED_ERROR in str(entry), entry
+
+
+class TestCacheLocationOverflow(CacheLocationOverflowBase):
+    _BACKEND = "tmpfs"
+    _EXPECTED_ERROR = "No space left on device"
+
+
+class TestCacheLocationQuotaOverflow(CacheLocationOverflowBase):
+    _BACKEND = "native"
+    _EXPECTED_ERROR = "Disk quota exceeded"
+
+
+class TestSlotLocationOverflow(YTEnvSetup):
+    USE_PORTO = True
+    NUM_MASTERS = 1
+    NUM_NODES = 1
+    NUM_SCHEDULERS = 1
+    NUM_CONTROLLER_AGENTS = 1
+
+    _TMPFS_SIZE = 10 * 1024 * 1024
+    _INODE_LIMIT = 1024
+
+    @classmethod
+    def setup_class(cls):
+        import porto
+        vol = porto.Connection().CreateVolume(
+            backend="tmpfs",
+            space_limit=str(cls._TMPFS_SIZE),
+            inode_limit=str(cls._INODE_LIMIT),
         )
-        assert len(entries) > 0
-        for entry in entries:
-            assert 'No space left on device' in str(entry), entry
+        cls.slot_volume_path = vol.path
+        super().setup_class()
+
+    @classmethod
+    def teardown_class(cls):
+        super().teardown_class()
+
+        import porto
+        porto.Connection().UnlinkVolume(cls.slot_volume_path)
+
+    @classmethod
+    def modify_node_config(cls, config, cluster_index):
+        super().modify_node_config(config, cluster_index)
+        config["exec_node"]["slot_manager"]["locations"][0]["path"] = cls.slot_volume_path
+
+    def teardown_method(self, method):
+        shutil.rmtree(f"{self.slot_volume_path}/filler", ignore_errors=True)
+        with Restarter(self.Env, NODES_SERVICE):
+            pass
+        super().teardown_method(method)
+
+    def _fill_inodes(self):
+        filler_dir = f"{self.slot_volume_path}/filler"
+        os.makedirs(filler_dir, exist_ok=True)
+        for i in range(self._INODE_LIMIT):
+            try:
+                with open(f"{filler_dir}/{i}", "wb"):
+                    pass
+            except OSError:
+                break
+        assert os.statvfs(self.slot_volume_path).f_favail == 0
+
+    def _slot_location_alert(self, node):
+        for alert in get(f"//sys/cluster_nodes/{node}/@alerts"):
+            if alert["code"] == yt_error_codes.SlotLocationDisabled:
+                return alert
+        return None
+
+    @authors("dann239")
+    @pytest.mark.parametrize("wipe_only_nested", [True, False])
+    def test_disk_full_is_reported(self, wipe_only_nested):
+        node = ls("//sys/cluster_nodes")[0]
+        assert self._slot_location_alert(node) is None
+
+        slot_path = f"{self.slot_volume_path}/0"
+
+        with Restarter(self.Env, NODES_SERVICE):
+            if wipe_only_nested:
+                assert os.path.exists(slot_path)
+                for name in os.listdir(slot_path):
+                    shutil.rmtree(f"{slot_path}/{name}", ignore_errors=True)
+            else:
+                shutil.rmtree(slot_path, ignore_errors=True)
+            self._fill_inodes()
+
+        wait(lambda: self._slot_location_alert(node) is not None)
+        alert = str(self._slot_location_alert(node))
+
+        assert "Failed to create directory" in alert, alert
+        assert "No space left on device" in alert, alert

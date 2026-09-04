@@ -7,7 +7,7 @@ from .default_config import get_dynamic_master_config, get_dynamic_queue_agent_c
 from .helpers import (
     read_config, write_config, is_dead, OpenPortIterator,
     wait_for_removing_file_lock, get_value_from_config, WaitFailed,
-    is_port_opened, push_front_env_path, wait_for_dynamic_config_update)
+    is_port_opened, push_front_env_path, wait_for_dynamic_config_update, gdb_binary)
 from .porto_helpers import PortoSubprocess, porto_available
 from .watcher import ProcessWatcher
 from .init_cluster import _initialize_world_for_local_cluster
@@ -18,7 +18,9 @@ from .local_cluster_configuration import (
 
 from .tls_helpers import create_ca, create_certificate
 
-from yt.common import YtError, remove_file, makedirp, update, get_fqdn, get_value, which, to_native_str
+from yt.common import (
+    YtError, remove_file, makedirp, update, get_fqdn, get_value, which, to_native_str,
+    date_string_to_datetime, utcnow)
 from yt.wrapper.common import flatten
 from yt.wrapper.constants import FEEDBACK_URL
 from yt.wrapper.errors import YtResponseError
@@ -126,7 +128,7 @@ def _get_yt_versions(custom_paths):
     binaries = ["ytserver-master", "ytserver-node", "ytserver-scheduler", "ytserver-controller-agent",
                 "ytserver-http-proxy", "ytserver-proxy", "ytserver-job-proxy",
                 "ytserver-clock", "ytserver-discovery", "ytserver-cell-balancer",
-                "ytserver-exec", "ytserver-tools", "ytserver-timestamp-provider", "ytserver-master-cache",
+                "ytserver-exec", "ytserver-tools", "ytserver-timestamp-provider", "ytserver-master-cache", "ytserver-chaos-cache",
                 "ytserver-tablet-balancer", "ytserver-replicated-table-tracker", "ytserver-kafka-proxy", "ytserver-queue-agent",
                 "ytserver-cypress-proxy", "ytserver-offshore-data-gateway"]
 
@@ -243,7 +245,7 @@ class YTInstance(object):
                 makedirp(self.bin_path)
                 programs = ["master", "clock", "node", "job-proxy", "exec", "cell-balancer",
                             "proxy", "http-proxy", "tools", "scheduler", "discovery",
-                            "controller-agent", "timestamp-provider", "master-cache",
+                            "controller-agent", "timestamp-provider", "master-cache", "chaos-cache",
                             "tablet-balancer", "replicated-table-tracker", "queue-agent", "kafka-proxy", "multi",
                             "offshore-data-gateway"]
                 for program in programs:
@@ -321,6 +323,8 @@ class YTInstance(object):
         else:
             self._open_port_iterator = _get_ports_generator(yt_config)
 
+        self._multi_start_time = None
+
         self._prepare_builtin_environment(
             self._open_port_iterator,
             modify_configs_func,
@@ -359,6 +363,7 @@ class YTInstance(object):
                 "node_tmpfs": self._make_service_dirs("node", self.yt_config.node_count, in_tmpfs=True),
                 "chaos_node": self._make_service_dirs("chaos_node", self.yt_config.chaos_node_count),
                 "master_cache": self._make_service_dirs("master_cache", self.yt_config.master_cache_count),
+                "chaos_cache": self._make_service_dirs("chaos_cache", self.yt_config.chaos_cache_count),
                 "http_proxy": self._make_service_dirs("http_proxy", self.yt_config.http_proxy_count),
                 "queue_agent": self._make_service_dirs("queue_agent", self.yt_config.queue_agent_count),
                 "kafka_proxy": self._make_service_dirs("kafka_proxy", self.yt_config.kafka_proxy_count),
@@ -495,6 +500,7 @@ class YTInstance(object):
             ("ytserver-timestamp-provider", "timestamp providers", self.yt_config.timestamp_provider_count),
             ("ytserver-node", "nodes", "{} ({} chaos)".format(self.yt_config.node_count, self.yt_config.chaos_node_count)),
             ("ytserver-master-cache", "master caches", self.yt_config.master_cache_count),
+            ("ytserver-chaos-cache", "chaos caches", self.yt_config.chaos_cache_count),
             ("ytserver-scheduler", "schedulers", self.yt_config.scheduler_count),
             ("ytserver-controller-agent", "controller agents", self.yt_config.controller_agent_count),
             ("ytserver-cell-balancer", "cell balancers", self.yt_config.cell_balancer_count),
@@ -553,6 +559,8 @@ class YTInstance(object):
             self._prepare_chaos_nodes(cluster_configuration["chaos_node"])
         if self.yt_config.master_cache_count > 0:
             self._prepare_master_caches(cluster_configuration["master_cache"])
+        if self.yt_config.chaos_cache_count > 0:
+            self._prepare_chaos_caches(cluster_configuration["chaos_cache"])
         if self.yt_config.scheduler_count > 0:
             self._prepare_schedulers(cluster_configuration["scheduler"])
         if self.yt_config.controller_agent_count > 0:
@@ -661,6 +669,9 @@ class YTInstance(object):
 
             if self.yt_config.master_cache_count > 0:
                 self.start_master_caches(sync=False)
+
+            if self.yt_config.chaos_cache_count > 0:
+                self.start_chaos_caches(sync=False)
 
             if self.yt_config.rpc_proxy_count > 0:
                 self.start_rpc_proxy(sync=False)
@@ -813,7 +824,7 @@ class YTInstance(object):
             components = ["multi"]
         else:
             components = ["http_proxy", "node", "chaos_node", "scheduler", "controller_agent", "master",
-                          "rpc_proxy", "timestamp_provider", "master_caches", "cell_balancer",
+                          "rpc_proxy", "timestamp_provider", "master_caches", "cell_balancer", "offshore_data_gateway",
                           "tablet_balancer", "cypress_proxy", "replicated_table_tracker", "queue_agent", "kafka_proxy", "multi"]
 
         self._send_component_kills(components)
@@ -835,6 +846,8 @@ class YTInstance(object):
             if hasattr(self._open_port_iterator, "release"):
                 self._open_port_iterator.release()
             self._open_port_iterator = None
+
+        self._multi_start_time = None
 
         wait_for_removing_file_lock(os.path.join(self.path, "lock_file"))
 
@@ -1003,6 +1016,14 @@ class YTInstance(object):
                         get_value_from_config(config, "monitoring_port", "master_cache"))
                 for config in self.configs["master_cache"]]
 
+    def get_chaos_cache_monitoring_addresses(self):
+        if self.yt_config.chaos_cache_count == 0:
+            raise YtError("Chaos caches are not started")
+        return ["{0}:{1}"
+                .format(self.yt_config.fqdn,
+                        get_value_from_config(config, "monitoring_port", "chaos_cache"))
+                for config in self.configs["chaos_cache"]]
+
     def get_cell_balancer_monitoring_addresses(self):
         if self.yt_config.cell_balancer_count == 0:
             raise YtError("Cell balancers are not started")
@@ -1087,6 +1108,9 @@ class YTInstance(object):
 
     def kill_master_caches(self, indexes=None):
         self.kill_service("master_cache", indexes=indexes)
+
+    def kill_chaos_caches(self, indexes=None):
+        self.kill_service("chaos_cache", indexes=indexes)
 
     def kill_queue_agents(self, indexes=None):
         self.kill_service("queue_agent", indexes=indexes)
@@ -1388,9 +1412,7 @@ class YTInstance(object):
             return p
 
     def _dump_backtraces(self, pid):
-        from .arcadia_interop import get_gdb_path
-
-        gdb_path = get_gdb_path()
+        gdb_path = gdb_binary()
         if not shutil.which(gdb_path):
             logger.warning("Cannot dump backtraces of process %s: gdb is not available (path: %s)", pid, gdb_path)
             return
@@ -1587,12 +1609,16 @@ class YTInstance(object):
 
             def quorum_ready_and_cell_registered():
                 result = quorum_ready()
-                if isinstance(result, tuple) and not result[0]:
+                if result is not True:
                     return result
 
-                return cell_tag in primary_cell_client.get(
+                registered_cell_tags = primary_cell_client.get(
                     "//sys/@registered_master_cell_tags",
                     suppress_transaction_coordinator_sync=True)
+                if cell_tag not in registered_cell_tags:
+                    return False, (f"Secondary master cell {cell_tag} is not registered at the primary cell; "
+                                   f"registered cells: {registered_cell_tags}")
+                return True
 
             cell_ready = quorum_ready_and_cell_registered
 
@@ -1642,7 +1668,9 @@ class YTInstance(object):
                     resp = requests.get(f"http://{address}/orchid/clock_cell/hydra/active")
                     resp.raise_for_status()
                     clock_statuses_logger.debug(resp.text)
-                    return resp.text == "true"
+                    if resp.text != "true":
+                        return False, f"Clock at {address} reports that hydra is not active"
+                return True
             except (requests.exceptions.RequestException, socket.error):
                 return False, traceback.format_exc()
 
@@ -1698,16 +1726,16 @@ class YTInstance(object):
 
             try:
                 if not client.exists("//sys/queue_agents/instances"):
-                    return False
+                    return False, "//sys/queue_agents/instances does not exist yet"
                 instances = client.list("//sys/queue_agents/instances")
                 if len(instances) != self.yt_config.queue_agent_count:
-                    return False
+                    return False, (f"{len(instances)} queue agents registered in cypress, "
+                                   f"expected {self.yt_config.queue_agent_count}")
                 for instance in instances:
                     if not client.exists("//sys/queue_agents/instances/" + instance + "/orchid/queue_agent"):
-                        return False
-            except YtError:
-                logger.exception("Error while waiting for queue agents")
-                return False
+                        return False, f"Queue agent {instance} does not expose its orchid yet"
+            except YtError as err:
+                return False, err
 
             return True
 
@@ -1786,7 +1814,8 @@ class YTInstance(object):
 
             instances = client.list("//sys/cell_balancers/instances")
             if len(instances) != self.yt_config.cell_balancer_count:
-                return False
+                return False, (f"{len(instances)} cell balancers registered in cypress, "
+                               f"expected {self.yt_config.cell_balancer_count}")
             try:
                 active_cell_balancer_orchid_path = None
                 for instance in instances:
@@ -1862,14 +1891,27 @@ class YTInstance(object):
 
             nodes = self._list_nodes(pick_chaos=False)
             # "mixed" is for the first start, "online" is for potential later restarts.
-            target_states = ("mixed", "online") if self.yt_config.defer_secondary_cell_start else ("online")
+            target_states = ("mixed", "online") if self.yt_config.defer_secondary_cell_start else ("online",)
 
             def check_node(node):
                 if node.attributes["banned"]:
                     return node.attributes["state"] == "offline"
                 return node.attributes["state"] in target_states
 
-            return len(nodes) == self.yt_config.node_count and all(map(check_node, nodes))
+            if len(nodes) != self.yt_config.node_count:
+                return False, (f"{len(nodes)} nodes registered in cypress, "
+                               f"expected {self.yt_config.node_count}")
+
+            not_ready_nodes = {}
+            for node in nodes:
+                if not check_node(node):
+                    description = f"state={node.attributes['state']}"
+                    if node.attributes["banned"]:
+                        description = "banned, " + description
+                    not_ready_nodes[str(node)] = description
+            if not_ready_nodes:
+                return False, f"Nodes are not ready: {not_ready_nodes}"
+            return True
 
         self._wait_for_component(
             "node",
@@ -1903,10 +1945,19 @@ class YTInstance(object):
         self._run_builtin_yt_component("node", name="chaos_node")
 
         def chaos_nodes_ready():
-            self._validate_processes_are_running("node")
+            self._validate_processes_are_running("chaos_node")
 
             nodes = self._list_nodes(pick_chaos=True)
-            return len(nodes) == self.yt_config.chaos_node_count and all(node.attributes["state"] == "online" for node in nodes)
+            if len(nodes) != self.yt_config.chaos_node_count:
+                return False, (f"{len(nodes)} chaos nodes registered in cypress, "
+                               f"expected {self.yt_config.chaos_node_count}")
+
+            offline_nodes = {
+                str(node): node.attributes["state"]
+                for node in nodes if node.attributes["state"] != "online"}
+            if offline_nodes:
+                return False, f"Chaos nodes are not online: {offline_nodes}"
+            return True
 
         self._wait_for_component(
             "chaos_node",
@@ -1950,6 +2001,44 @@ class YTInstance(object):
         self._wait_for_component(
             "master_cache",
             master_caches_ready,
+            sync)
+
+    def _prepare_chaos_caches(self, chaos_cache_configs):
+        for chaos_cache_index in range(self.yt_config.chaos_cache_count):
+            chaos_cache_config_name = "chaos_cache-{0}.yson".format(chaos_cache_index)
+            config_path = os.path.join(self.configs_path, chaos_cache_config_name)
+            if self._load_existing_environment:
+                if not os.path.isfile(config_path):
+                    raise YtError("Chaos cache config {0} not found. It is possible that you requested "
+                                  "more chaos caches than configs exist".format(config_path))
+                config = read_config(config_path)
+            else:
+                config = chaos_cache_configs[chaos_cache_index]
+                write_config(config, config_path)
+
+            self.configs["chaos_cache"].append(config)
+            self.config_paths["chaos_cache"].append(config_path)
+            self._service_processes["chaos_cache"].append(None)
+
+    def start_chaos_caches(self, sync=True):
+        self._run_builtin_yt_component("chaos-cache", name="chaos_cache")
+
+        def chaos_caches_ready():
+            self._validate_processes_are_running("chaos_cache")
+
+            addresses = self.get_chaos_cache_monitoring_addresses()
+            try:
+                for address in addresses:
+                    resp = requests.get("http://{0}/orchid".format(address))
+                    resp.raise_for_status()
+            except (requests.exceptions.RequestException, socket.error):
+                return False, traceback.format_exc()
+
+            return True
+
+        self._wait_for_component(
+            "chaos_cache",
+            chaos_caches_ready,
             sync)
 
     def _prepare_schedulers(self, scheduler_configs, force_overwrite=False):
@@ -2024,16 +2113,18 @@ class YTInstance(object):
         self._run_builtin_yt_component("scheduler", custom_paths=custom_paths)
 
         def schedulers_ready():
-            def check_node_state(node):
+            def get_node_state(node):
                 if "state" in node:
-                    return node["state"] == "online"
-                return node["scheduler_state"] == "online" and node["master_state"] == "online"
+                    return node["state"] == "online", node["state"]
+                description = f"scheduler_state={node['scheduler_state']}, master_state={node['master_state']}"
+                return node["scheduler_state"] == "online" and node["master_state"] == "online", description
 
             self._validate_processes_are_running("scheduler")
 
             instances = client.list("//sys/scheduler/instances")
             if len(instances) != self.yt_config.scheduler_count:
-                return False
+                return False, (f"{len(instances)} schedulers registered in cypress, "
+                               f"expected {self.yt_config.scheduler_count}")
 
             try:
                 active_scheduler_orchid_path = None
@@ -2078,8 +2169,18 @@ class YTInstance(object):
                 exec_nodes = list(filter(check_node, nodes))
 
                 if not self.yt_config.defer_node_start:
-                    nodes = list(client.get(active_scheduler_orchid_path + "/scheduler/nodes").values())
-                    return len(nodes) == len(exec_nodes) and all(check_node_state(node) for node in nodes)
+                    scheduler_nodes = client.get(active_scheduler_orchid_path + "/scheduler/nodes")
+                    if len(scheduler_nodes) != len(exec_nodes):
+                        return False, (f"Scheduler sees {len(scheduler_nodes)} nodes, "
+                                       f"expected {len(exec_nodes)} exec nodes")
+
+                    offline_nodes = {}
+                    for address, node in scheduler_nodes.items():
+                        is_online, state = get_node_state(node)
+                        if not is_online:
+                            offline_nodes[address] = state
+                    if offline_nodes:
+                        return False, f"Nodes are not online at scheduler: {offline_nodes}"
 
                 return True
 
@@ -2202,12 +2303,34 @@ class YTInstance(object):
         client = self._create_cluster_client()
         try:
             tx_id = client.get("//sys/scheduler/lock/@locks/0/transaction_id")
-            if tx_id:
-                client.abort_transaction(tx_id)
-                logger.info("Previous scheduler transaction was aborted")
+            if not tx_id:
+                return
+            # Under multidaemon the current scheduler has been running since start_multi and may
+            # already hold the lock itself; only a transaction older than the multi process is stale.
+            if self.yt_config.enable_multidaemon:
+                if self._multi_start_time is None:
+                    logger.warning("Multidaemon is enabled but its start time is unknown; "
+                                   "aborting the scheduler lock transaction without checking whether it is stale")
+                elif not self._scheduler_lock_transaction_is_stale(client, tx_id):
+                    logger.info("Scheduler lock is held by a transaction from the current run; "
+                                "not aborting it (transaction_id: %s)", tx_id)
+                    return
+            client.abort_transaction(tx_id)
+            logger.info("Previous scheduler transaction was aborted")
         except YtResponseError as error:
-            if not error.is_resolve_error():
+            # The transaction may expire between reading the lock and aborting it.
+            if not error.is_resolve_error() and not error.is_no_such_transaction():
                 raise
+
+    def _scheduler_lock_transaction_is_stale(self, client, tx_id):
+        tx_start_time = client.get(f"#{tx_id}/@start_time")
+        try:
+            return date_string_to_datetime(tx_start_time) < self._multi_start_time
+        except (ValueError, TypeError):
+            # Neither is a YtError, so letting it out would escape start()'s cleanup handler.
+            logger.warning("Failed to parse the start time %r of the scheduler lock transaction %s",
+                           tx_start_time, tx_id)
+            return True
 
     def _prepare_drivers(self,
                          driver_configs,
@@ -2345,13 +2468,21 @@ class YTInstance(object):
 
     def start_multi(self):
         name = "multi"
+        self._multi_start_time = utcnow()
         self.run_yt_component(name, self.config_paths[name], name=name)
 
     def start_http_proxy(self, sync=True):
         self._run_builtin_yt_component("http-proxy", name="http_proxy")
 
         client = self._create_cluster_client()
-        expected_endpoints = set(self.get_http_proxy_addresses())
+
+        def _get_registered_endpoint(config):
+            public_fqdn = get_value(config.get("coordinator"), {}).get("public_fqdn")
+            if public_fqdn:
+                return public_fqdn
+            return "{0}:{1}".format(self.yt_config.fqdn, config["port"])
+
+        expected_endpoints = {_get_registered_endpoint(config) for config in self.configs["http_proxy"]}
 
         def proxy_ready():
             self._validate_processes_are_running("http_proxy")
@@ -2424,9 +2555,10 @@ class YTInstance(object):
                 missing = expected_endpoints - alive
                 return False, "RPC proxies not yet fully registered; waiting for {0}".format(missing)
 
-            proxies_ports_ready = all(is_port_opened(port) for port in proxies_ports)
-
-            return proxies_ports_ready
+            closed_port = next((port for port in proxies_ports if not is_port_opened(port)), None)
+            if closed_port is not None:
+                return False, f"RPC proxy port {closed_port} is not open yet"
+            return True
 
         self._wait_for_component(
             "rpc_proxy",
@@ -2578,10 +2710,14 @@ class YTInstance(object):
         logger.info("Waiting for %s...", name)
         while datetime.datetime.now() - start_time < datetime.timedelta(seconds=max_wait_time):
             result = condition()
-            if isinstance(result, tuple):
+            if result is True:
+                ok = True
+            elif isinstance(result, tuple) and len(result) == 2 and result[0] is False:
                 ok, condition_error = result
             else:
-                ok = result
+                raise YtError(
+                    f"Readiness check for {name} returned {result!r}; "
+                    "it must return True or a (False, reason) tuple")
 
             if ok:
                 logger.info("%s ready", name.capitalize())

@@ -34,6 +34,7 @@
 
 #include <yt/yt/core/logging/log_manager.h>
 
+#include <yt/yt/core/misc/collection_helpers.h>
 #include <yt/yt/core/misc/fs.h>
 #include <yt/yt/core/misc/proc.h>
 
@@ -138,17 +139,17 @@ public:
         TDuration timeout,
         const THashSet<std::string>& /*excludedVolumePaths*/) override
     {
-        YT_LOG_DEBUG("RemoveVolumes is empty in SimpleVolumeManager (Place: %v, Timeout: %v)",
-            place,
-            timeout);
+        YT_TLOG_DEBUG("RemoveVolumes is empty in SimpleVolumeManager")
+            .With("Place", place)
+            .With("Timeout", timeout);
         return OKFuture;
     }
 
     TFuture<void> RemoveLayers(const std::string& place, TDuration timeout) override
     {
-        YT_LOG_DEBUG("RemoveLayers is empty in SimpleVolumeManager (Place: %v, Timeout: %v)",
-            place,
-            timeout);
+        YT_TLOG_DEBUG("RemoveLayers is empty in SimpleVolumeManager")
+            .With("Place", place)
+            .With("Timeout", timeout);
         return OKFuture;
     }
 
@@ -172,7 +173,7 @@ public:
             auto error = WaitFor(CleanupTmpfsMountPaths(std::move(mountPaths)));
             if (!error.IsOK()) {
                 THROW_ERROR_EXCEPTION("Failed to initialize simple volume manager")
-                    << error;
+                    .With(error);
             }
         }
 
@@ -260,11 +261,10 @@ private:
         config->Size = volume->Size;
         config->UserId = volume->UserId;
 
-        YT_LOG_DEBUG(
-            "Creating tmpfs volume (Tag: %v, JobId: %v, Config: %v)",
-            tag,
-            jobId,
-            ConvertToYsonString(config, EYsonFormat::Text));
+        YT_TLOG_DEBUG("Creating tmpfs volume")
+            .With("Tag", tag)
+            .With("JobId", jobId)
+            .With("Config", ConvertToYsonString(config, EYsonFormat::Text));
 
         return BIND(
             [
@@ -281,7 +281,7 @@ private:
                     if (config->Path != sandboxPath) {
                         if (NFS::Exists(config->Path)) {
                             THROW_ERROR_EXCEPTION("Target path already exists")
-                                << TErrorAttribute("target", config->Path);
+                                .With("target", config->Path);
                         }
                         NFS::MakeDirRecursive(config->Path);
                     }
@@ -327,15 +327,16 @@ private:
     {
         return BIND([mountPaths = std::move(mountPaths), detachUnmount = DetachUnmount_] {
             for (const auto& path : mountPaths) {
-                YT_LOG_DEBUG("Removing mount point (Path: %v)",
-                    path);
+                YT_TLOG_DEBUG("Removing mount point")
+                    .With("Path", path);
                 try {
                     // Due to bug in the kernel, this can sometimes fail with "Directory is not empty" error.
                     // More info: https://bugzilla.redhat.com/show_bug.cgi?id=1066751
                     RunTool<TRemoveDirContentAsRootTool>(path);
                 } catch (const std::exception& ex) {
-                    YT_LOG_WARNING(ex, "Failed to remove mount point (Path: %v)",
-                        path);
+                    YT_TLOG_WARNING("Failed to remove mount point")
+                        .With("Path", path)
+                        .With(ex);
                 }
 
                 auto config = New<TUmountConfig>();
@@ -426,8 +427,8 @@ public:
         auto errorOrResults = WaitFor(AllSet(initLocationResults));
 
         if (!errorOrResults.IsOK()) {
-            auto wrappedError = TError("Failed to initialize layer locations") << errorOrResults;
-            YT_LOG_WARNING(wrappedError);
+            YT_TLOG_WARNING("Proceeding with partially initialized layer locations")
+                .With(errorOrResults);
         }
 
         auto tmpfsExecutor = CreatePortoExecutor(
@@ -486,11 +487,20 @@ public:
     {
         auto tag = TGuid::Create();
 
-        YT_LOG_DEBUG(
-            "Preparing layers (Tag: %v, JobId: %v, LayerCount: %v)",
-            tag,
-            jobId,
-            layerOptions.size());
+        YT_TLOG_DEBUG("Preparing layers")
+            .With("Tag", tag)
+            .With("JobId", jobId)
+            .With("LayerCount", layerOptions.size());
+
+        if (DynamicConfig_.Acquire()->ThrowOnPrepareLayers) {
+            std::vector<TFuture<TOverlayData>> errorFutures;
+            errorFutures.reserve(layerOptions.size());
+            for (const auto& layerOption : layerOptions) {
+                errorFutures.push_back(MakeFuture<TOverlayData>(TError("Throw on prepare layers")
+                    .With("artifact_key", ToString(layerOption.ArtifactKey))));
+            }
+            return errorFutures;
+        }
 
         std::vector<TFuture<TOverlayData>> overlayDataFutures;
         overlayDataFutures.reserve(layerOptions.size());
@@ -537,45 +547,35 @@ public:
         auto userSandboxOptions = options.UserSandboxOptions;
 
         auto Logger = ExecNodeLogger()
-            .WithTag("Tag: %v, JobId: %v, LayerCount: %v",
-                tag,
-                options.JobId,
-                overlayDataArray.size());
+            .WithTag("Tag", tag)
+            .WithTag("JobId", options.JobId)
+            .WithTag("LayerCount", overlayDataArray.size());
 
-        YT_LOG_DEBUG("Preparing root volume");
+        YT_TLOG_DEBUG("Preparing root volume");
 
         if (DynamicConfig_.Acquire()->ThrowOnPrepareVolume) {
             auto error = TError(NExecNode::EErrorCode::RootVolumePreparationFailed, "Throw on prepare volume");
-            YT_LOG_INFO(
-                error,
-                "Failed to prepare root volume");
+            YT_TLOG_INFO("Failed to prepare root volume")
+                .With(error);
             THROW_ERROR(error);
         }
 
         auto jobId = options.JobId;
-        const auto& sandboxNbdRootVolumeData = options.SandboxNbdRootVolumeData;
+        const auto& sandboxNbdRootVolumeSpec = options.SandboxNbdRootVolumeSpec;
 
-        if (sandboxNbdRootVolumeData) {
+        if (sandboxNbdRootVolumeSpec) {
             // Create NBD root volume separately and use it as the upper layer,
             // the same way tmpfs/disk upper layers are handled in PrepareNonRootVolumes().
             return CreateRWNbdVolume(
                 tag,
                 TPrepareRWNbdVolumeOptions{
                     .JobId = jobId,
-                    .Size = sandboxNbdRootVolumeData->Size,
-                    .MediumIndex = sandboxNbdRootVolumeData->MediumIndex,
-                    .Filesystem = sandboxNbdRootVolumeData->FsType,
-                    .DeviceId = sandboxNbdRootVolumeData->DeviceId,
-                    .DataNodeChannel = {/*Channel will be filled later on.*/},
-                    .SessionId = {/*SessionId will be filled later on.*/},
-                    .DataNodeRpcTimeout = sandboxNbdRootVolumeData->DataNodeRpcTimeout,
-                    .DataNodeAddress = sandboxNbdRootVolumeData->DataNodeAddress,
-                    .DataNodeNbdServiceRpcTimeout = sandboxNbdRootVolumeData->DataNodeNbdServiceRpcTimeout,
-                    .DataNodeNbdServiceMakeTimeout = sandboxNbdRootVolumeData->DataNodeNbdServiceMakeTimeout,
-                    .MasterRpcTimeout = sandboxNbdRootVolumeData->MasterRpcTimeout,
-                    .MinDataNodeCount = sandboxNbdRootVolumeData->MinDataNodeCount,
-                    .MaxDataNodeCount = sandboxNbdRootVolumeData->MaxDataNodeCount,
-                    .MultiplexingParallelism = sandboxNbdRootVolumeData->MultiplexingParallelism,
+                    .DeviceId = sandboxNbdRootVolumeSpec->DeviceId,
+                    .DeviceSize = sandboxNbdRootVolumeSpec->DeviceSize,
+                    .FilesystemType = sandboxNbdRootVolumeSpec->FilesystemType,
+                    .BackendOptions = TChunkNbdVolumeOptions{
+                        .Spec = GetOrCrash<TChunkNbdVolumeSpec>(sandboxNbdRootVolumeSpec->BackendSpec),
+                    },
                 })
                 .AsUnique()
                 .Apply(BIND(
@@ -590,7 +590,8 @@ public:
                     ] (IVolumePtr&& nbdVolume) mutable -> TFuture<TOverlayVolumePtr> {
                         // See PORTO-460 for "//" prefix.
                         TString placePath = "//" + nbdVolume->GetPath();
-                        YT_LOG_DEBUG("Place overlay volume in NBD volume (PortoPlace: %v)", placePath);
+                        YT_TLOG_DEBUG("Place overlay volume in NBD volume")
+                            .With("PortoPlace", placePath);
                         return DoCreateOverlayVolume(
                             tag,
                             jobId,
@@ -661,7 +662,7 @@ public:
                             return MakeFuture(result);
                         }
 
-                        auto placePath = NFS::JoinPaths(result->Volume->GetPath(), "place");
+                        auto placePath = "//" + NFS::JoinPaths(result->Volume->GetPath(), "place");
                         // TODO If an exception is thrown here, then all volumes must be properly cleaned up.
                         return DoCreateOverlayVolume(
                             tag,
@@ -701,6 +702,7 @@ public:
             future = future
                 .Apply(
                     BIND([tag, volume, target] {
+                        NFS::MakeDirRecursive(target);
                         return volume->Volume->Link(tag, target);
                     })
                     .AsyncVia(GetCurrentInvoker())
@@ -844,12 +846,11 @@ private:
         TGuid tag,
         const TTmpfsVolumeParamsPtr& volumeParams)
     {
-        YT_LOG_INFO(
-            "Creating tmpfs volume (Tag: %v, VolumeId: %v, Size: %v, UserId: %v)",
-            tag,
-            volumeParams->VolumeId,
-            volumeParams->Size,
-            volumeParams->UserId);
+        YT_TLOG_INFO("Creating tmpfs volume")
+            .With("Tag", tag)
+            .With("VolumeId", volumeParams->VolumeId)
+            .With("Size", volumeParams->Size)
+            .With("UserId", volumeParams->UserId);
 
         auto tagSet = TVolumeProfilerCounters::MakeTagSet(
             /*volume type*/ "tmpfs",
@@ -888,13 +889,12 @@ private:
         TGuid tag,
         const TLocalDiskVolumeParamsPtr& volumeParams)
     {
-        YT_LOG_INFO(
-            "Creating loop volume (Tag: %v, VolumeId: %v, Size: %v, InodeLimit: %v, UserId: %v)",
-            tag,
-            volumeParams->VolumeId,
-            volumeParams->Size,
-            volumeParams->InodeLimit,
-            volumeParams->UserId);
+        YT_TLOG_INFO("Creating loop volume")
+            .With("Tag", tag)
+            .With("VolumeId", volumeParams->VolumeId)
+            .With("Size", volumeParams->Size)
+            .With("InodeLimit", volumeParams->InodeLimit)
+            .With("UserId", volumeParams->UserId);
 
         auto tagSet = TVolumeProfilerCounters::MakeTagSet(
             /*volume type*/ "loop",
@@ -945,24 +945,21 @@ private:
         TEventTimerGuard volumeCreateTimeGuard(TVolumeProfilerCounters::Get()->GetTimer(tagSet, "/create_time"));
 
         auto Logger = ExecNodeLogger()
-            .WithTag("Tag: %v, JobId: %v, OverlayDataArraySize: %v",
-                tag,
-                jobId,
-                overlayDataArray.size());
+            .WithTag("Tag", tag)
+            .WithTag("JobId", jobId)
+            .WithTag("OverlayDataArraySize", overlayDataArray.size());
 
-        YT_LOG_DEBUG("Creating overlay volume");
+        YT_TLOG_DEBUG("Creating overlay volume");
 
         for (const auto& volumeOrLayer : overlayDataArray) {
             if (volumeOrLayer.IsLayer()) {
                 LayerCache_->Touch(volumeOrLayer.GetLayer());
 
-                YT_LOG_DEBUG(
-                    "Using layer to create overlay volume (LayerId: %v)",
-                    volumeOrLayer.GetLayer()->GetMeta().Id);
+                YT_TLOG_DEBUG("Using layer to create overlay volume")
+                    .With("LayerId", volumeOrLayer.GetLayer()->GetMeta().Id);
             } else {
-                YT_LOG_DEBUG(
-                    "Using volume to create overlay volume (VolumeId: %v)",
-                    volumeOrLayer.GetVolume()->GetId());
+                YT_TLOG_DEBUG("Using volume to create overlay volume")
+                    .With("VolumeId", volumeOrLayer.GetVolume()->GetId());
             }
         }
 
@@ -989,7 +986,7 @@ private:
                     overlayDataArray = std::move(overlayDataArray),
                     volumeForUpperLayer = std::move(volumeForUpperLayer)
                 ] (TVolumeMeta&& volumeMeta) {
-                    YT_LOG_DEBUG("Created overlay volume");
+                    YT_TLOG_DEBUG("Created overlay volume");
                     return New<TOverlayVolume>(
                         std::move(tagSet),
                         std::move(volumeMeta),
@@ -1010,14 +1007,14 @@ private:
         std::optional<std::string> placePath;
 
         const auto& userSandboxOptions = options.UserSandboxOptions;
-        if (userSandboxOptions.EnableRootVolumeDiskQuota && !userSandboxOptions.SlotPath.empty()) {
+        if (userSandboxOptions.DisableRbindRootVolume && !userSandboxOptions.SlotPath.empty()) {
             // Plant porto place for overlay volume in user slot.
             placePath = NFS::CombinePaths(
                 userSandboxOptions.SlotPath,
                 GetSandboxRelPath(ESandboxKind::PortoPlace));
 
-            YT_LOG_DEBUG("Place overlay volume in user slot (PortoPlace: %v)",
-                placePath);
+            YT_TLOG_DEBUG("Place overlay volume in user slot")
+                .With("PortoPlace", placePath);
 
             placeInUserSlot = true;
         }
@@ -1025,7 +1022,7 @@ private:
         std::optional<i64> diskSpaceLimit;
         std::optional<i64> inodeLimit;
 
-        if (userSandboxOptions.EnableDiskQuota && userSandboxOptions.EnableRootVolumeDiskQuota) {
+        if (userSandboxOptions.EnableDiskQuota) {
             if (userSandboxOptions.DiskSpaceLimit) {
                 diskSpaceLimit = *userSandboxOptions.DiskSpaceLimit;
             }

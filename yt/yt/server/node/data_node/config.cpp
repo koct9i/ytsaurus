@@ -6,6 +6,7 @@
 namespace NYT::NDataNode {
 
 using namespace NConcurrency;
+using namespace NNode;
 using namespace NYTree;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -110,6 +111,9 @@ void TChunkLocationConfig::ApplyDynamicInplace(const TChunkLocationDynamicConfig
         UpdateYsonStructField(FairShareWorkloadCategoryWeights[category], dynamicConfig.FairShareWorkloadCategoryWeights[category]);
     }
 
+    UpdateYsonStructField(WeightedRequestWeight, dynamicConfig.WeightedRequestWeight);
+    UpdateYsonStructField(UnweightedRequestWeight, dynamicConfig.UnweightedRequestWeight);
+
     UpdateYsonStructField(MemoryLimitFractionForStartingNewSessions, dynamicConfig.MemoryLimitFractionForStartingNewSessions);
 }
 
@@ -126,6 +130,13 @@ void TChunkLocationConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("fair_share_workload_category_weights", &TThis::FairShareWorkloadCategoryWeights)
         .Default();
+
+    registrar.Parameter("weighted_request_weight", &TThis::WeightedRequestWeight)
+        .GreaterThanOrEqual(0.0)
+        .Default(1.0);
+    registrar.Parameter("unweighted_request_weight", &TThis::UnweightedRequestWeight)
+        .GreaterThanOrEqual(0.0)
+        .Default(1.0);
 
     registrar.Parameter("memory_limit_fraction_for_starting_new_sessions", &TThis::MemoryLimitFractionForStartingNewSessions)
         .GreaterThanOrEqual(0.0)
@@ -148,8 +159,6 @@ void TChunkLocationConfig::Register(TRegistrar registrar)
         .Default(0);
 
     registrar.Postprocessor([] (TThis* config) {
-        config->LegacyWriteMemoryLimit = config->WriteMemoryLimit;
-
         for (auto kind : TEnumTraits<EChunkLocationThrottlerKind>::GetDomainValues()) {
             if (!config->Throttlers[kind]) {
                 config->Throttlers[kind] = New<TRelativeThroughputThrottlerConfig>();
@@ -178,14 +187,17 @@ void TChunkLocationDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("fair_share_workload_category_weights", &TThis::FairShareWorkloadCategoryWeights)
         .Default();
 
+    registrar.Parameter("weighted_request_weight", &TThis::WeightedRequestWeight)
+        .GreaterThanOrEqual(0.0)
+        .Optional();
+    registrar.Parameter("unweighted_request_weight", &TThis::UnweightedRequestWeight)
+        .GreaterThanOrEqual(0.0)
+        .Optional();
+
     registrar.Parameter("memory_limit_fraction_for_starting_new_sessions", &TThis::MemoryLimitFractionForStartingNewSessions)
         .GreaterThanOrEqual(0.0)
         .LessThanOrEqual(1.0)
         .Optional();
-
-    registrar.Postprocessor([] (TThis* config) {
-        config->LegacyWriteMemoryLimit = config->WriteMemoryLimit;
-    });
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -842,6 +854,24 @@ void TJobControllerDynamicConfig::Register(TRegistrar registrar)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+void TMediumAwareBlockCacheManagerConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("enable", &TThis::Enable)
+        .Default(false);
+    registrar.Parameter("block_cache_config_per_medium_per_location", &TThis::BlockCacheConfigPerMediumPerLocation)
+        .Default();
+}
+
+void TMediumAwareBlockCacheManagerDynamicConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("enable", &TThis::Enable)
+        .Optional();
+    registrar.Parameter("block_cache_config_per_medium_per_location", &TThis::BlockCacheConfigPerMediumPerLocation)
+        .Default();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 void TDataNodeConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("lease_transaction_timeout", &TThis::LeaseTransactionTimeout)
@@ -890,6 +920,8 @@ void TDataNodeConfig::Register(TRegistrar registrar)
             blockCache->CompressedData = TSlruCacheConfig::CreateWithCapacity(6_GB, 16);
             return blockCache;
         });
+    registrar.Parameter("medium_aware_block_cache_manager", &TThis::MediumAwareBlockCacheManager)
+        .DefaultNew();
     registrar.Parameter("blob_reader_cache", &TThis::BlobReaderCache)
         .DefaultCtor([] {
             return TSlruCacheConfig::CreateWithCapacity(1_MB, 16);
@@ -919,6 +951,9 @@ void TDataNodeConfig::Register(TRegistrar registrar)
         .Default(4_GB);
     registrar.Parameter("net_out_throttling_duration", &TThis::NetOutThrottlingDuration)
         .Default(TDuration::Seconds(30));
+    registrar.Parameter("net_in_throttling_limit", &TThis::NetInThrottlingLimit)
+        .GreaterThan(0)
+        .Default(4_GB);
     registrar.Parameter("enable_send_blocks_net_throttling", &TThis::EnableSendBlocksNetThrottling)
         .Default(false);
 
@@ -931,6 +966,17 @@ void TDataNodeConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("enable_sequential_io_requests", &TThis::EnableSequentialIORequests)
         .Default(true);
+
+    registrar.Parameter("read_io_requests_mode", &TThis::ReadIORequestsMode)
+        .Default();
+
+    registrar.Parameter("max_in_flight_read_request_count", &TThis::MaxInFlightReadRequestCount)
+        .GreaterThan(0)
+        .Default(std::numeric_limits<int>::max());
+
+    registrar.Parameter("max_in_flight_read_data_size", &TThis::MaxInFlightReadDataSize)
+        .GreaterThan(0)
+        .Default(16_MB);
 
     registrar.Parameter("return_blocks_if_session_fails", &TThis::ReturnBlocksIfSessionFails)
         .Default(false);
@@ -1094,6 +1140,8 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
         .DefaultNew();
     registrar.Parameter("block_cache", &TThis::BlockCache)
         .DefaultNew();
+    registrar.Parameter("medium_aware_block_cache_manager", &TThis::MediumAwareBlockCacheManager)
+        .DefaultNew();
     registrar.Parameter("blob_reader_cache", &TThis::BlobReaderCache)
         .DefaultNew();
     registrar.Parameter("changelog_reader_cache", &TThis::ChangelogReaderCache)
@@ -1110,6 +1158,13 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
         .DefaultNew();
 
     registrar.Parameter("long_live_read_session_threshold", &TThis::LongLiveReadSessionThreshold)
+        .Optional();
+    registrar.Parameter("session_block_reorder_timeout", &TThis::SessionBlockReorderTimeout)
+        .GreaterThan(TDuration::Zero())
+        .Optional();
+    registrar.Parameter("max_out_of_turn_sessions", &TThis::MaxOutOfTurnSessions)
+        .GreaterThanOrEqual(0)
+        .LessThan(64)
         .Optional();
 
     registrar.Parameter("chunk_reader_retention_timeout", &TThis::ChunkReaderRetentionTimeout)
@@ -1139,10 +1194,10 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("use_probe_put_blocks", &TThis::UseProbePutBlocks)
         .Default(false);
 
-    registrar.Parameter("preallocate_disk_space", &TThis::PreallocateDiskSpace)
+    registrar.Parameter("enable_probe_put_blocks_fair_share", &TThis::EnableProbePutBlocksFairShare)
         .Default(false);
 
-    registrar.Parameter("use_direct_io", &TThis::UseDirectIO)
+    registrar.Parameter("preallocate_disk_space", &TThis::PreallocateDiskSpace)
         .Default(false);
 
     registrar.Parameter("wait_preceding_blocks_received", &TThis::WaitPrecedingBlocksReceived)
@@ -1151,6 +1206,12 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("p2p", &TThis::P2P)
         .Optional();
 
+    registrar.Parameter("max_blocks_per_read", &TThis::MaxBlocksPerRead)
+        .GreaterThan(0)
+        .Optional();
+    registrar.Parameter("max_bytes_per_read", &TThis::MaxBytesPerRead)
+        .GreaterThan(0)
+        .Optional();
     registrar.Parameter("bytes_per_write", &TThis::BytesPerWrite)
         .GreaterThan(0)
         .Default();
@@ -1197,6 +1258,12 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("net_out_throttling_limit", &TThis::NetOutThrottlingLimit)
         .Default();
+    registrar.Parameter("net_out_throttling_duration", &TThis::NetOutThrottlingDuration)
+        .GreaterThan(TDuration::Zero())
+        .Optional();
+
+    registrar.Parameter("net_in_throttling_limit", &TThis::NetInThrottlingLimit)
+        .Default();
 
     registrar.Parameter("enable_send_blocks_net_throttling", &TThis::EnableSendBlocksNetThrottling)
         .Optional();
@@ -1212,7 +1279,24 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("skip_write_throttling_locations", &TThis::SkipWriteThrottlingLocations)
         .Default();
 
+    registrar.Parameter("enable_write_throttling_writable_check", &TThis::EnableWriteThrottlingWritableCheck)
+        .Default();
+
+    registrar.Parameter("enable_in_throttler_queue_writable_check", &TThis::EnableInThrottlerQueueWritableCheck)
+        .Default();
+
     registrar.Parameter("enable_sequential_io_requests", &TThis::EnableSequentialIORequests)
+        .Optional();
+
+    registrar.Parameter("read_io_requests_mode", &TThis::ReadIORequestsMode)
+        .Optional();
+
+    registrar.Parameter("max_in_flight_read_request_count", &TThis::MaxInFlightReadRequestCount)
+        .GreaterThan(0)
+        .Optional();
+
+    registrar.Parameter("max_in_flight_read_data_size", &TThis::MaxInFlightReadDataSize)
+        .GreaterThan(0)
         .Optional();
 
     registrar.Parameter("return_blocks_if_session_fails", &TThis::ReturnBlocksIfSessionFails)
@@ -1232,6 +1316,25 @@ void TDataNodeDynamicConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("overload_controller", &TThis::OverloadController)
         .DefaultNew();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+EReadIORequestsMode GetReadIORequestsMode(
+    const TDataNodeConfigPtr& config,
+    const TDataNodeDynamicConfigPtr& dynamicConfig)
+{
+    if (dynamicConfig->ReadIORequestsMode) {
+        return *dynamicConfig->ReadIORequestsMode;
+    }
+
+    if (config->ReadIORequestsMode) {
+        return *config->ReadIORequestsMode;
+    }
+
+    return dynamicConfig->EnableSequentialIORequests.value_or(config->EnableSequentialIORequests)
+        ? EReadIORequestsMode::Sequential
+        : EReadIORequestsMode::Parallel;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

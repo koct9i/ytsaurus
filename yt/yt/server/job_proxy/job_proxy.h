@@ -79,6 +79,7 @@ public:
     std::string AdjustPath(const std::string& path) const override;
 
     NChunkClient::TTrafficMeterPtr GetTrafficMeter() const override;
+    NChunkClient::TJobIoMeterPtr GetJobIoMeter() const override;
 
     NConcurrency::IThroughputThrottlerPtr GetInBandwidthThrottler(const NScheduler::TClusterName& clusterName) const override;
     NConcurrency::IThroughputThrottlerPtr GetOutBandwidthThrottler() const override;
@@ -177,6 +178,7 @@ private:
     std::optional<int> JobProxyRpcServerPort_;
 
     NChunkClient::TTrafficMeterPtr TrafficMeter_;
+    NChunkClient::TJobIoMeterPtr JobIoMeter_;
 
     mutable THashMap<NScheduler::TClusterName, NConcurrency::IThroughputThrottlerPtr> InBandwidthThrottlers_;
     YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, InBandwidthThrottlersSpinLock_);
@@ -205,6 +207,8 @@ private:
     void InitializeOrchid();
 
     void UpdateCumulativeMemoryUsage(i64 memoryUsage);
+
+    void SetCpuGuarantee(double cpuGuarantee);
 
     void SetJob(IJobPtr job);
     IJobPtr FindJob() const;
@@ -284,6 +288,7 @@ private:
 
     void LogSystemStats() const;
 
+    bool UpdateOomScoreAdj(pid_t pid, int* mutableExpectedScoreAdj, int desiredScoreAdj) override;
     void SetOomScoreAdj(int score);
 
     void OnMemoryReserveExceeded(i64 usage);

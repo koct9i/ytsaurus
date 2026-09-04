@@ -10,6 +10,8 @@ void TFeatureFlagConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("enable_smooth_movement", &TThis::EnableSmoothMovement)
         .Default();
+    registrar.Parameter("enable_smooth_movement_for_ordered", &TThis::EnableSmoothMovementForOrdered)
+        .Default();
     registrar.Parameter("enable_inplace_split", &TThis::EnableInplaceSplit)
         .Default();
     registrar.Parameter("enable_inplace_merge", &TThis::EnableInplaceMerge)
@@ -100,6 +102,9 @@ void TParameterizedBalancingConfig::Register(TRegistrar registrar)
     registrar.Parameter("min_relative_metric_improvement", &TThis::MinRelativeMetricImprovement)
         .Default()
         .GreaterThanOrEqual(0);
+    registrar.Parameter("min_tablets_per_move_recomputation_worker", &TThis::MinTabletsPerMoveRecomputationWorker)
+        .Default()
+        .GreaterThan(0);
     registrar.Parameter("replica_clusters", &TThis::ReplicaClusters)
         .Default();
     registrar.Parameter("factors", &TThis::Factors)

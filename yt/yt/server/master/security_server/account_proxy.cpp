@@ -144,9 +144,9 @@ private:
         }
 
         if (account->ClusterStatistics() != TAccountStatistics::Empty) {
-            THROW_ERROR_EXCEPTION("Cannot remove an account %Qv because its usage is not zero (AccountUsage: %v)",
-                account->GetName(),
-                account->ClusterStatistics());
+            THROW_ERROR_EXCEPTION("Cannot remove account %Qv because its usage is not zero",
+                account->GetName())
+                .With("current_usage", ToString(account->ClusterStatistics()));
         }
 
         const auto& securityManager = Bootstrap_->GetSecurityManager();
@@ -504,6 +504,9 @@ private:
         auto proxy = NObjectClient::TObjectServiceProxy::FromDirectMasterChannel(
             multicellManager->GetMasterChannelOrThrow(cellTag, NHydra::EPeerKind::Follower));
         auto batchReq = proxy.ExecuteBatch();
+
+        const auto& securityManager = Bootstrap_->GetSecurityManager();
+        batchReq->SetUser(securityManager->GetAuthenticatedUserNameToForward());
 
         auto accountId = GetId();
 

@@ -591,13 +591,14 @@ private:
 
                     if (actualChecksum != expectedChecksum) {
                         auto error = TError("Invalid block checksum in repaired part")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("block_index", blockIndex)
-                            << TErrorAttribute("expected_checksum", expectedChecksum)
-                            << TErrorAttribute("actual_checksum", actualChecksum)
-                            << TErrorAttribute("recalculated_checksum", GetChecksum(blocks[index].Data));
+                            .With("chunk_id", ChunkId_)
+                            .With("block_index", blockIndex)
+                            .With("expected_checksum", expectedChecksum)
+                            .With("actual_checksum", actualChecksum)
+                            .With("recalculated_checksum", GetChecksum(blocks[index].Data));
 
-                        YT_LOG_ALERT(error);
+                        YT_TLOG_ALERT("Invalid block checksum in repaired part")
+                            .With(error);
                         THROW_ERROR error;
                     }
                 }
@@ -793,11 +794,12 @@ TFuture<void> AdaptiveRepairErasedParts(
                     .Apply(BIND([=] (const TError& cancelError) {
                         if (!cancelError.IsOK()) {
                             const auto& Logger = logger;
-                            YT_LOG_WARNING(cancelError, "Failed to cancel chunk writers");
+                            YT_TLOG_WARNING("Failed to cancel chunk writers")
+                                .With(cancelError);
                             return TError(
                                 NChunkClient::EErrorCode::UnrecoverableRepairError,
                                 "Failed to cancel chunk writers")
-                                << cancelError;
+                                .With(cancelError);
                         }
                         return repairError;
                     }));

@@ -3,6 +3,7 @@
 #include <contrib/ydb/library/actors/core/event_local.h>
 #include <contrib/ydb/library/actors/core/events.h>
 
+#include <util/generic/strbuf.h>
 #include <util/generic/variant.h>
 
 namespace NYql::NDq {
@@ -96,6 +97,7 @@ enum class EEnabledSpillingNodes : ui64 {
     None        = 0ULL      /* "None" */,
     GraceJoin   = 1ULL      /* "GraceJoin" */,
     Aggregation = 2ULL      /* "Aggregation" */,
+    WideSort    = 4ULL      /* "WideSort" */,
     All         = ~0ULL     /* "All" */,
 };
 
@@ -122,9 +124,15 @@ public:
         return Mask & ui64(EEnabledSpillingNodes::Aggregation);
     }
 
+    bool IsWideSortSpillingEnabled() const {
+        return Mask & ui64(EEnabledSpillingNodes::WideSort);
+    }
+
 private:
     const ui64 Mask = 0;
 };
+
+constexpr TStringBuf PqSource = "PqSource";
 
 } // namespace NYql::NDq
 

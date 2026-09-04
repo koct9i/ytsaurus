@@ -82,6 +82,11 @@ const std::vector<IInvokerPtr>& TStrategyHost::GetNodeShardInvokers() const
     return NodeShardInvokers_;
 }
 
+NObjectClient::TCellTag TStrategyHost::GetPrimaryMasterCellTag() const
+{
+    return NObjectClient::TCellTag(0);
+}
+
 TFluentLogEvent TStrategyHost::LogFairShareEventFluently(TInstant now)
 {
     return LogEventFluently(GetEventLogger(), ELogEventType::FairShareInfo, now);
@@ -225,7 +230,9 @@ const NLogging::TLogger* TStrategyHost::GetEventLogger()
 void TStrategyHost::SetSchedulerAlert(ESchedulerAlertType alertType, const TError& alert)
 {
     if (!alert.IsOK()) {
-        YT_LOG_WARNING(alert, "Setting scheduler alert (AlertType: %v)", alertType);
+        YT_TLOG_WARNING("Setting scheduler alert")
+            .With("AlertType", alertType)
+            .With(alert);
     }
 }
 

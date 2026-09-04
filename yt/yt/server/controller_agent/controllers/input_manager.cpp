@@ -20,7 +20,6 @@
 
 #include <yt/yt/ytlib/table_client/chunk_meta_extensions.h>
 #include <yt/yt/ytlib/table_client/chunk_slice_fetcher.h>
-#include <yt/yt/ytlib/table_client/chunk_slice_fetcher.h>
 #include <yt/yt/ytlib/table_client/chunk_slice_size_fetcher.h>
 #include <yt/yt/ytlib/table_client/columnar_statistics_fetcher.h>
 #include <yt/yt/ytlib/table_client/table_ypath_proxy.h>
@@ -216,7 +215,7 @@ TInputCluster::TInputCluster(
     TClusterName name,
     TLogger logger)
     : Name_(std::move(name))
-    , Logger(logger.WithTag("Cluster: %v", Name_))
+    , Logger(logger.WithTag("Cluster", Name_))
 { }
 
 void TInputCluster::InitializeClient(IClientPtr localClient)
@@ -235,10 +234,9 @@ void TInputCluster::InitializeClient(IClientPtr localClient)
 void TInputCluster::ReportIfHasUnavailableChunks() const
 {
     if (!UnavailableInputChunkIds_.empty()) {
-        YT_LOG_INFO(
-            "Have pending unavailable input chunks (Cluster: %v, SampleChunkIds: %v)",
-            Name_,
-            MakeShrunkFormattableView(UnavailableInputChunkIds_, TDefaultFormatter(), SampleChunkIdCount));
+        YT_TLOG_INFO("Have pending unavailable input chunks")
+            .With("Cluster", Name_)
+            .With("SampleChunkIds", MakeShrunkFormattableView(UnavailableInputChunkIds_, TDefaultFormatter(), SampleChunkIdCount));
     }
 }
 
@@ -310,7 +308,7 @@ void TInputManager::InitializeStructures(
 void TInputCluster::LockTables()
 {
     //! TODO(ignat): Merge in with lock input files method.
-    YT_LOG_INFO("Locking input tables");
+    YT_TLOG_INFO("Locking input tables");
 
     auto proxy = CreateObjectServiceWriteProxy(Client_);
     auto batchReq = proxy.ExecuteBatchWithRetries(Client_->GetNativeConnection()->GetConfig()->ChunkFetchRetries);
@@ -382,10 +380,10 @@ void TInputCluster::ValidateOutputTableLockedCorrectly(const TOutputTablePtr& ou
                     NScheduler::EErrorCode::OperationFailedWithInconsistentLocking,
                     "Table %v has changed between taking input and output locks",
                     inputTable->GetPath())
-                    << TErrorAttribute("input_object_id", inputTable->ObjectId)
-                    << TErrorAttribute("input_revision", inputTable->Revision)
-                    << TErrorAttribute("output_object_id", outputTable->ObjectId)
-                    << TErrorAttribute("output_revision", outputTable->Revision);
+                    .With("input_object_id", inputTable->ObjectId)
+                    .With("input_revision", inputTable->Revision)
+                    .With("output_object_id", outputTable->ObjectId)
+                    .With("output_revision", outputTable->Revision);
             }
         }
     }
@@ -419,46 +417,49 @@ IFetcherChunkScraperPtr TInputManager::CreateFetcherChunkScraper(const TClusterN
 
 TMasterChunkSpecFetcherPtr TInputManager::CreateChunkSpecFetcher(
     const TInputClusterPtr& cluster,
-    bool fetchHunkChunks) const
+    EChunkListContentType chunkListContentType) const
 {
     auto yielder = CreatePeriodicYielder(PrepareYieldPeriod);
 
     auto chunkSpecFetcher = New<TMasterChunkSpecFetcher>(
         cluster->Client(),
-        TMasterReadOptions{},
         cluster->NodeDirectory(),
         Host_->GetCancelableInvoker(EOperationControllerQueue::Default),
-        Host_->GetConfig()->MaxChunksPerFetch,
-        Host_->GetConfig()->MaxChunksPerLocateRequest,
-        [&] (const TChunkOwnerYPathProxy::TReqFetchPtr& req, int tableIndex) {
-            const auto& table = InputTables_[tableIndex];
-            req->set_fetch_all_meta_extensions(false);
-            req->add_extension_tags(TProtoExtensionTag<NChunkClient::NProto::TMiscExt>::Value);
+        TMasterChunkSpecFetcherOptions{
+            .MaxChunksPerFetch = Host_->GetConfig()->MaxChunksPerFetch,
+            .MaxChunksPerLocateRequest = Host_->GetConfig()->MaxChunksPerLocateRequest,
+            .FetchRequestInitializer = [&] (const TChunkOwnerYPathProxy::TReqFetchPtr& req, int tableIndex) {
+                const auto& table = InputTables_[tableIndex];
+                req->set_fetch_all_meta_extensions(false);
+                req->add_extension_tags(TProtoExtensionTag<NChunkClient::NProto::TMiscExt>::Value);
 
-            if (table->Path.GetColumns() && Host_->GetSpec()->InputTableColumnarStatistics->Enabled.value_or(Host_->GetConfig()->UseColumnarStatisticsDefault)) {
-                req->add_extension_tags(TProtoExtensionTag<THeavyColumnStatisticsExt>::Value);
-            }
-            if (table->Dynamic || Host_->IsBoundaryKeysFetchEnabled()) {
-                req->add_extension_tags(TProtoExtensionTag<TBoundaryKeysExt>::Value);
-            }
-            if (table->Dynamic) {
-                if (!Host_->GetSpec()->EnableDynamicStoreRead.value_or(true)) {
-                    req->set_omit_dynamic_stores(true);
+                if (table->Path.GetColumns() && Host_->GetSpec()->InputTableColumnarStatistics->Enabled.value_or(Host_->GetConfig()->UseColumnarStatisticsDefault)) {
+                    req->add_extension_tags(TProtoExtensionTag<THeavyColumnStatisticsExt>::Value);
                 }
-                if (Host_->GetOperationType() == EOperationType::RemoteCopy) {
-                    req->set_throw_on_chunk_views(true);
+                if (table->Dynamic || Host_->IsBoundaryKeysFetchEnabled()) {
+                    req->add_extension_tags(TProtoExtensionTag<TBoundaryKeysExt>::Value);
                 }
-                req->add_extension_tags(TProtoExtensionTag<THunkChunkRefsExt>::Value);
-            }
-            // NB: We always fetch parity replicas since
-            // erasure reader can repair data on flight.
-            req->set_fetch_parity_replicas(true);
-            AddCellTagToSyncWith(req, table->ObjectId);
-            SetTransactionId(req, table->ExternalTransactionId);
+                if (table->Dynamic) {
+                    // NB: Unfrozen input tables are copied best-effort: unflushed dynamic stores are omitted.
+                    if (!Host_->GetSpec()->EnableDynamicStoreRead.value_or(true) ||
+                        Host_->GetSpec()->AllowUnfrozenInputTables)
+                    {
+                        req->set_omit_dynamic_stores(true);
+                    }
+                    if (Host_->GetOperationType() == EOperationType::RemoteCopy) {
+                        req->set_throw_on_chunk_views(true);
+                    }
+                    req->add_extension_tags(TProtoExtensionTag<THunkChunkRefsExt>::Value);
+                }
+                // NB: We always fetch parity replicas since
+                // erasure reader can repair data on flight.
+                req->set_fetch_parity_replicas(true);
+                AddCellTagToSyncWith(req, table->ObjectId);
+                SetTransactionId(req, table->ExternalTransactionId);
+            },
+            .ChunkListContentType = chunkListContentType,
         },
-        Logger,
-        /*skipUnavailableChunks*/ false,
-        /*fetchHunkChunks*/ fetchHunkChunks);
+        Logger);
 
     for (int tableIndex = 0; tableIndex < std::ssize(InputTables_); ++tableIndex) {
         yielder.TryYield();
@@ -483,18 +484,17 @@ TMasterChunkSpecFetcherPtr TInputManager::CreateChunkSpecFetcher(
                 "Too many ranges on table: maximum allowed %v, actual %v",
                 Host_->GetConfig()->MaxRangesOnTable,
                 ranges.size())
-                << TErrorAttribute("table_path", table->Path);
+                .With("table_path", table->Path);
         }
 
-        YT_LOG_DEBUG("Adding input table for fetch (Path: %v, Id: %v, Dynamic: %v, ChunkCount: %v, RangeCount: %v, "
-            "HasColumnSelectors: %v, EnableDynamicStoreRead: %v)",
-            table->GetPath(),
-            table->ObjectId,
-            table->Dynamic,
-            table->ChunkCount,
-            ranges.size(),
-            hasColumnSelectors,
-            Host_->GetSpec()->EnableDynamicStoreRead);
+        YT_TLOG_DEBUG("Adding input table for fetch")
+            .With("Path", table->GetPath())
+            .With("Id", table->ObjectId)
+            .With("Dynamic", table->Dynamic)
+            .With("ChunkCount", table->ChunkCount)
+            .With("RangeCount", ranges.size())
+            .With("HasColumnSelectors", hasColumnSelectors)
+            .With("EnableDynamicStoreRead", Host_->GetSpec()->EnableDynamicStoreRead);
 
         chunkSpecFetcher->Add(
             table->ObjectId,
@@ -547,12 +547,12 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
         }
     }
 
-    YT_LOG_INFO("Fetching input tables");
+    YT_TLOG_INFO("Fetching input tables");
 
     THashMap<TClusterName, TMasterChunkSpecFetcherPtr> chunkSpecFetchers;
     std::vector<TFuture<void>> fetchChunkSpecFutures;
     for (const auto& [clusterName, cluster] : Clusters_) {
-        auto fetcher = CreateChunkSpecFetcher(cluster);
+        auto fetcher = CreateChunkSpecFetcher(cluster, EChunkListContentType::Main);
         chunkSpecFetchers.emplace(clusterName, fetcher);
         fetchChunkSpecFutures.push_back(fetcher->Fetch());
     }
@@ -571,7 +571,7 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
     {
         tableHunkChunks.resize(InputTables_.size());
         for (const auto& [clusterName, cluster] : Clusters_) {
-            auto fetcher = CreateChunkSpecFetcher(cluster, /*fetchHunkChunks*/ true);
+            auto fetcher = CreateChunkSpecFetcher(cluster, EChunkListContentType::Hunk);
             hunkChunkSpecFetchers.emplace(clusterName, fetcher);
             fetchChunkSpecFutures.push_back(fetcher->Fetch());
         }
@@ -581,7 +581,23 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
     WaitFor(AllSucceeded(fetchChunkSpecFutures))
         .ThrowOnError();
 
-    YT_LOG_INFO("Input tables fetched");
+    YT_TLOG_INFO("Input tables fetched");
+
+    auto processHunkChunk = [&] (const NChunkClient::NProto::TChunkSpec& chunkSpec) {
+        yielder.TryYield();
+
+        auto chunkId = FromProto<TChunkId>(chunkSpec.chunk_id());
+        if (IsJournalChunkId(chunkId)) {
+            // TODO(babenko): This is only relevant for remote copy.
+            THROW_ERROR_EXCEPTION("Journal hunk chunks are not supported yet");
+        }
+    };
+
+    for (const auto& [_, chunkSpecFetcher] : hunkChunkSpecFetchers) {
+        for (const auto& chunkSpec : chunkSpecFetcher->ChunkSpecs()) {
+            processHunkChunk(chunkSpec);
+        }
+    }
 
     auto processChunk = [&] (const NChunkClient::NProto::TChunkSpec& chunkSpec) {
         yielder.TryYield();
@@ -599,10 +615,9 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
 
         if (inputChunk->IsDynamicStore() && !table->Schema->IsSorted()) {
             if (!InputHasOrderedDynamicStores_) {
-                YT_LOG_DEBUG("Operation input has ordered dynamic stores, job interrupts "
-                    "are disabled (TableId: %v, TablePath: %v)",
-                    table->ObjectId,
-                    table->GetPath());
+                YT_TLOG_DEBUG("Operation input has ordered dynamic stores, job interrupts are disabled")
+                    .With("TableId", table->ObjectId)
+                    .With("TablePath", table->GetPath());
                 InputHasOrderedDynamicStores_ = true;
             }
         }
@@ -690,14 +705,14 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
     std::vector<TFuture<void>> statisticsFutures;
     for (const auto& [clusterName, fetcher] : columnarStatisticsFetchers) {
         if (fetcher->GetChunkCount() > 0) {
-            YT_LOG_INFO("Fetching chunk columnar statistics for tables with column selectors (Cluster: %v, ChunkCount: %v)",
-                clusterName,
-                fetcher->GetChunkCount());
+            YT_TLOG_INFO("Fetching chunk columnar statistics for tables with column selectors")
+                .With("Cluster", clusterName)
+                .With("ChunkCount", fetcher->GetChunkCount());
             Host_->MaybeCancel(ECancelationStage::ColumnarStatisticsFetch);
 
             auto applySelectivityFactors =
                 BIND([fetcher, Logger = GetClusterOrCrash(clusterName)->GetLogger()] {
-                    YT_LOG_INFO("Columnar statistics fetched");
+                    YT_TLOG_INFO("Columnar statistics fetched");
                     fetcher->ApplyColumnSelectivityFactors();
                 })
                     .AsyncVia(GetCurrentInvoker());
@@ -709,13 +724,13 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
 
     for (const auto& [clusterName, fetcher] : chunkSliceSizeFetchers) {
         if (fetcher && fetcher->GetChunkCount() > 0) {
-            YT_LOG_INFO("Fetching input chunk slice statistics for input tables (Cluster: %v, ChunkCount: %v)",
-                clusterName,
-                fetcher->GetChunkCount());
+            YT_TLOG_INFO("Fetching input chunk slice statistics for input tables")
+                .With("Cluster", clusterName)
+                .With("ChunkCount", fetcher->GetChunkCount());
 
             auto applySelectivityFactors =
                 BIND([fetcher, Logger = GetClusterOrCrash(clusterName)->GetLogger()] {
-                    YT_LOG_INFO("Input chunk slice statistics fetched");
+                    YT_TLOG_INFO("Input chunk slice statistics fetched");
                     fetcher->ApplyBlockSelectivityFactors();
                 })
                     .AsyncVia(GetCurrentInvoker());
@@ -735,12 +750,12 @@ TFetchInputTablesStatistics TInputManager::FetchInputTables()
         VerifyEventualExpiration(std::move(fetcher), Logger);
     }
 
-    YT_LOG_INFO("All statistics fetched from nodes");
+    YT_TLOG_INFO("All statistics fetched from nodes");
 
     // TODO(galtsev): remove after YT-20281 is fixed
     if (AnyOf(InputTables_, IsStaticTableWithHunks)) {
         InputHasStaticTableWithHunks_ = true;
-        YT_LOG_INFO("Static tables with hunks found, disabling job splitting");
+        YT_TLOG_INFO("Static tables with hunks found, disabling job splitting");
     }
 
     return fetchStatistics;
@@ -764,19 +779,19 @@ void TInputManager::Prepare()
                 }
 
                 if (!error.IsOK()) {
-                    error <<= TErrorAttribute("path", table->Path);
+                    error.Add("path", table->Path);
                     THROW_ERROR error;
                 }
             }
         }
     } else {
-        YT_LOG_INFO("Operation has no input tables");
+        YT_TLOG_INFO("Operation has no input tables");
     }
 }
 
 void TInputManager::FetchInputTablesAttributes()
 {
-    YT_LOG_INFO("Getting input tables attributes");
+    YT_TLOG_INFO("Getting input tables attributes");
 
     // NB(coteeq): Transaction id may still be NullTransactionId.
     YT_VERIFY(
@@ -805,7 +820,7 @@ void TInputManager::FetchInputTablesAttributes()
             for (const auto& table : cluster->InputTables()) {
                 if (table->Path.HasRowIndexInRanges() && table->RowLevelAcl) {
                     THROW_ERROR_EXCEPTION("Cannot use ranges with \"row_index\" to read a table with row-level ACL")
-                        << TErrorAttribute("path", table->Path);
+                        .With("path", table->Path);
                 }
             }
         });
@@ -833,7 +848,7 @@ void TInputManager::FetchInputTablesAttributes()
     }
     if (!omittedInaccessibleColumnsList.empty()) {
         auto error = TError("Some columns of input tables are inaccessible and were omitted")
-            << TErrorAttribute("input_tables", omittedInaccessibleColumnsList);
+            .With("input_tables", omittedInaccessibleColumnsList);
         Host_->SetOperationAlert(EOperationAlertType::OmittedInaccessibleColumnsInInputTables, error);
     }
 
@@ -865,6 +880,7 @@ void TInputManager::FetchInputTablesAttributes()
                 "schema_id",
                 "unflushed_timestamp",
                 "content_revision",
+                "primary_medium",
                 "enable_dynamic_store_read",
                 "tablet_state",
                 "account",
@@ -898,6 +914,20 @@ void TInputManager::FetchInputTablesAttributes()
         }
     }
 
+    if (Host_->GetConfig()->ForbidOperationsOnOffshoreMedia) {
+        const auto& mediumDirectory = Host_->GetMediumDirectory();
+        for (const auto& [table, attributes] : tableAttributes) {
+            auto mediumName = attributes->Get<std::string>("primary_medium");
+            auto mediumDescriptor = mediumDirectory->FindByName(mediumName);
+            if (mediumDescriptor && mediumDescriptor->IsOffshore()) {
+                THROW_ERROR_EXCEPTION(
+                    "Operations on tables with offshore medium are forbidden by controller agent configuration")
+                    .With("table_path", table->GetPath())
+                    .With("primary_medium", mediumName);
+            }
+        }
+    }
+
     bool needFetchSchemas = !InputTables_.empty() && InputTables_[0]->Type == EObjectType::Table;
 
     if (needFetchSchemas) {
@@ -927,13 +957,11 @@ void TInputManager::FetchInputTablesAttributes()
         table->RlsReadSpec = TRlsReadSpec::BuildFromRowLevelAclAndTableSchema(
             table->Schema,
             table->RowLevelAcl,
-            Logger().WithTag("TableIndex: %v", index));
-        YT_LOG_INFO_IF(
-            table->RlsReadSpec,
-            "Input table has non-trivial RLS read spec (Path: %v, TableIndex: %v, RlsReadSpec: %v)",
-            table->GetPath(),
-            index,
-            table->RlsReadSpec);
+            Logger().WithTag("TableIndex", index));
+        YT_TLOG_INFO_IF(table->RlsReadSpec, "Input table has non-trivial RLS read spec")
+            .With("Path", table->GetPath())
+            .With("TableIndex", index)
+            .With("RlsReadSpec", table->RlsReadSpec);
     }
 
     bool haveTablesWithEnabledDynamicStoreRead = false;
@@ -964,25 +992,24 @@ void TInputManager::FetchInputTablesAttributes()
             *attributes,
             !Host_->GetSpec()->EnableDynamicStoreRead.value_or(true));
 
-        YT_LOG_INFO("Input table locked (Path: %v, ObjectId: %v, Schema: %v, Dynamic: %v, ChunkCount: %v, SecurityTags: %v, "
-            "Revision: %x, ContentRevision: %x)",
-            table->GetPath(),
-            table->ObjectId,
-            *table->Schema,
-            table->Dynamic,
-            table->ChunkCount,
-            table->SecurityTags,
-            table->Revision,
-            table->ContentRevision);
+        YT_TLOG_INFO("Input table locked")
+            .With("Path", table->GetPath())
+            .With("ObjectId", table->ObjectId)
+            .With("Schema", *table->Schema)
+            .With("Dynamic", table->Dynamic)
+            .With("ChunkCount", table->ChunkCount)
+            .With("SecurityTags", table->SecurityTags)
+            .WithFormat("Revision", "%x", table->Revision)
+            .WithFormat("ContentRevision", "%x", table->ContentRevision);
 
         // NB(coteeq): This MUST happen after creation of table->RlsReadSpec.
         // Otherwise we will mess up column names for RLS.
         if (!table->ColumnRenameDescriptors.empty()) {
             if (table->Path.GetTeleport()) {
                 THROW_ERROR_EXCEPTION("Cannot rename columns in table with teleport")
-                    << TErrorAttribute("table_path", table->Path);
+                    .With("table_path", table->Path);
             }
-            YT_LOG_DEBUG("Start renaming columns of input table");
+            YT_TLOG_DEBUG("Start renaming columns of input table");
             auto description = Format("input table %v", table->GetPath());
             table->Schema = RenameColumnsInSchema(
                 description,
@@ -990,33 +1017,33 @@ void TInputManager::FetchInputTablesAttributes()
                 table->Dynamic,
                 table->ColumnRenameDescriptors,
                 /*changeStableName*/ !Host_->GetConfig()->EnableTableColumnRenaming);
-            YT_LOG_DEBUG(
-                "Columns of input table are renamed "
-                "(Path: %v, NewSchema: %v, RenamedOmittedInaccessibleColumns: %v)",
-                table->GetPath(),
-                *table->Schema,
-                table->OmittedInaccessibleColumns);
+            YT_TLOG_DEBUG("Columns of input table are renamed")
+                .With("Path", table->GetPath())
+                .With("NewSchema", *table->Schema)
+                .With("RenamedOmittedInaccessibleColumns", table->OmittedInaccessibleColumns);
         }
 
         if (Host_->GetOperationType() == EOperationType::RemoteCopy) {
             if (table->Dynamic) {
                 if (!Host_->GetConfig()->EnableVersionedRemoteCopy) {
                     THROW_ERROR_EXCEPTION("Remote copy for dynamic tables is disabled")
-                        << TErrorAttribute("table_path", table->Path);
+                        .With("table_path", table->Path);
                 }
 
                 auto tabletState = attributes->Get<ETabletState>("tablet_state");
                 if (tabletState != ETabletState::Frozen && tabletState != ETabletState::Unmounted) {
-                    THROW_ERROR_EXCEPTION("Input table has tablet state %Qlv: expected %Qlv or %Qlv",
-                        tabletState,
-                        ETabletState::Frozen,
-                        ETabletState::Unmounted)
-                        << TErrorAttribute("table_path", table->Path);
+                    if (!Host_->GetSpec()->AllowUnfrozenInputTables) {
+                        THROW_ERROR_EXCEPTION("Input table has tablet state %Qlv: expected %Qlv or %Qlv",
+                            tabletState,
+                            ETabletState::Frozen,
+                            ETabletState::Unmounted)
+                            .With("table_path", table->Path);
+                    }
                 }
             } else if (table->Schema->HasHunkColumns()) {
                 // NB: This is due to prohibition of remote copy of journal hunk chunks.
                 THROW_ERROR_EXCEPTION("Remote copy for static tables with hunks is not supported")
-                    << TErrorAttribute("table_path", table->Path);
+                    .With("table_path", table->Path);
             }
 
             if (table->Schema->HasHunkColumns()) {
@@ -1024,18 +1051,18 @@ void TInputManager::FetchInputTablesAttributes()
                     !Host_->GetSpec()->BypassHunkRemoteCopyProhibition.value_or(false))
                 {
                     THROW_ERROR_EXCEPTION("Remote copy for tables with hunks is disabled")
-                        << TErrorAttribute("table_path", table->Path);
+                        .With("table_path", table->Path);
                 }
 
                 if (!Host_->GetConfig()->EnableCompressionDictionaryRemoteCopy && HasCompressionDictionaries(attributes)) {
                     THROW_ERROR_EXCEPTION("Remote copy for tables with compression dictionaries is not supported")
-                        << TErrorAttribute("table_path", table->Path);
+                        .With("table_path", table->Path);
                 }
             }
 
             if (table->HunkStorageId) {
                 THROW_ERROR_EXCEPTION("Remote copy for tables connected to hunk storage is not supported")
-                    << TErrorAttribute("table_path", table->Path);
+                    .With("table_path", table->Path);
             }
         }
     }
@@ -1076,7 +1103,7 @@ void TInputManager::InitInputChunkScrapers()
                 MakeWeak(Host_),
                 BIND(&TInputManager::OnInputChunkBatchLocated, MakeWeak(this))),
             Host_->GetChunkAvailabilityPolicy(),
-            Logger.WithTag("Cluster: %v", clusterName));
+            Logger.WithTag("Cluster", clusterName));
     }
 
     for (const auto& [chunkId, chunkDescriptor] : InputChunkMap_) {
@@ -1091,11 +1118,10 @@ void TInputManager::InitInputChunkScrapers()
             cluster->ChunkScraper()->OnChunkBecameUnavailable(chunkId);
         }
         if (!cluster->UnavailableInputChunkIds().empty()) {
-            YT_LOG_INFO(
-                "Waiting for unavailable input chunks (Cluster: %v, Count: %v, SampleIds: %v)",
-                clusterName,
-                cluster->UnavailableInputChunkIds().size(),
-                MakeShrunkFormattableView(cluster->UnavailableInputChunkIds(), TDefaultFormatter(), SampleChunkIdCount));
+            YT_TLOG_INFO("Waiting for unavailable input chunks")
+                .With("Cluster", clusterName)
+                .With("Count", cluster->UnavailableInputChunkIds().size())
+                .With("SampleIds", MakeShrunkFormattableView(cluster->UnavailableInputChunkIds(), TDefaultFormatter(), SampleChunkIdCount));
             cluster->ChunkScraper()->Start();
         }
     }
@@ -1198,9 +1224,8 @@ void TInputManager::OnInputChunkBatchLocated(
         }
     }
 
-    YT_LOG_DEBUG(
-        "Located another batch of chunks (Count: %v)",
-        size(chunkBatch));
+    YT_TLOG_DEBUG("Located another batch of chunks")
+        .With("Count", size(chunkBatch));
 
     for (const auto& [_, cluster] : Clusters_) {
         cluster->ReportIfHasUnavailableChunks();
@@ -1270,13 +1295,13 @@ void TInputManager::OnInputChunkUnavailable(TChunkId chunkId, TInputChunkDescrip
                     std::remove_if(
                         dataSlices.begin(),
                         dataSlices.end(),
-                        [&] (TLegacyDataSlicePtr slice) {
+                        [&] (TDataSlicePtr slice) {
                             try {
                                 return chunkId == slice->GetSingleUnversionedChunk()->GetChunkId();
                             } catch (const std::exception& ex) {
                                 //FIXME(savrus) allow data slices to be unavailable.
                                 Host_->OnOperationFailed(TError(NChunkClient::EErrorCode::ChunkUnavailable, "Dynamic table chunk became unavailable")
-                                    << ex);
+                                    .With(ex));
                                 return true;
                             }
                         }),
@@ -1333,7 +1358,8 @@ void TInputManager::RegisterUnavailableInputChunk(TChunkId chunkId)
     auto& cluster = GetClusterOrCrash(chunkId);
     InsertOrCrash(cluster->UnavailableInputChunkIds(), chunkId);
 
-    YT_LOG_TRACE("Input chunk is unavailable (ChunkId: %v)", chunkId);
+    YT_TLOG_TRACE("Input chunk is unavailable")
+        .With("ChunkId", chunkId);
 }
 
 void TInputManager::UnregisterUnavailableInputChunk(TChunkId chunkId)
@@ -1341,7 +1367,8 @@ void TInputManager::UnregisterUnavailableInputChunk(TChunkId chunkId)
     auto& cluster = GetClusterOrCrash(chunkId);
     EraseOrCrash(cluster->UnavailableInputChunkIds(), chunkId);
 
-    YT_LOG_TRACE("Input chunk is no longer unavailable (ChunkId: %v)", chunkId);
+    YT_TLOG_TRACE("Input chunk is no longer unavailable")
+        .With("ChunkId", chunkId);
 }
 
 const TInputClusterPtr& TInputManager::GetClusterOrCrash(const TClusterName& clusterName) const
@@ -1385,7 +1412,9 @@ bool TInputManager::OnInputChunkFailed(TChunkId chunkId, TJobId jobId)
 {
     auto it = InputChunkMap_.find(chunkId);
     if (it != InputChunkMap_.end()) {
-        YT_LOG_DEBUG("Input chunk has failed (ChunkId: %v, JobId: %v)", chunkId, jobId);
+        YT_TLOG_DEBUG("Input chunk has failed")
+            .With("ChunkId", chunkId)
+            .With("JobId", jobId);
         auto* descriptor = &it->second;
         if (Host_->GetSpec()->UnavailableChunkTactics == EUnavailableChunkAction::Wait) {
             // Scrap unavailable chunk only if we need it.
@@ -1472,7 +1501,7 @@ std::pair<NTableClient::IChunkSliceFetcherPtr, TUnavailableChunksWatcherPtr> TIn
                 fetcherChunkScrapers.back(),
                 cluster->Client(),
                 Host_->GetRowBuffer(),
-                Logger.WithTag("Cluster: %v", clusterName)));
+                Logger.WithTag("Cluster", clusterName)));
     }
 
     std::vector<int> tableIndexToFetcherIndex;

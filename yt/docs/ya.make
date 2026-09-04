@@ -1,3 +1,5 @@
+INCLUDE(${ARCADIA_ROOT}/yt/docs/strict_yfm.inc)
+
 DOCS()
 
 DOCS_DIR(
@@ -87,4 +89,5 @@ IF (NOT OPENSOURCE)
     RECURSE(
         yandex-specific
     )
+
 ENDIF()

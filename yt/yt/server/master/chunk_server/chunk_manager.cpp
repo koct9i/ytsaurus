@@ -419,10 +419,12 @@ public:
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraScheduleChunkSeal, Unretained(this)));
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraCreateChunkLists, Unretained(this)));
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraAttachChunkTrees, Unretained(this)));
+        RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraDetachChunkTrees, Unretained(this)));
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraUnstageChunkTree, Unretained(this)));
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraUnstageExpiredChunks, Unretained(this)));
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraRedistributeConsistentReplicaPlacementTokens, Unretained(this)));
         RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraTopUpSequoiaChunkPurgatory, Unretained(this)));
+        RegisterMethod(BIND_NO_PROPAGATE(&TChunkManager::HydraScheduleMultipleChunkSeals, Unretained(this)));
 
         RegisterLoader(
             "ChunkManager.Keys",
@@ -526,13 +528,13 @@ public:
 
         // This is a temporary measure to make sure solomon quota is at least somewhat stabilized.
         // The plan was to move these metrics into a separate shard. See original PR for details.
-        CrpBufferedProducer_ = New<TBufferedProducer>();
+        DetailedBufferedProducer_ = New<TBufferedProducer>();
         ChunkServerProfiler()
             .WithDefaultDisabled()
             .WithProducerRemoveSupport()
             .WithSparse()
             .WithTag("cell_tag", ToString(Bootstrap_->GetMulticellManager()->GetCellTag()))
-            .AddProducer("", CrpBufferedProducer_);
+            .AddProducer("", DetailedBufferedProducer_);
 
         // NB: most ESequoiaTransactionType do not deal with replicas at all, hence WithDefaultDisabled.
         auto sequoiaReplicaModificationProfiler = ChunkServerProfiler()
@@ -544,12 +546,21 @@ public:
 
             auto typeSpecificProfiler = sequoiaReplicaModificationProfiler
                 .WithTag("sequoia_transaction_type", Format("%lv", sequoiaTransactionType));
-            profile.Counter = typeSpecificProfiler.Counter("/count");
+            profile.StartedCount = typeSpecificProfiler.Counter("/started_count");
+            profile.StartedReplicaCount = typeSpecificProfiler.Counter("/started_replica_count");
+            profile.SemaphoreWaiting = typeSpecificProfiler.Gauge("/semaphore_waiting_count");
+            profile.SemaphoreWaitingReplicas = typeSpecificProfiler.Gauge("/semaphore_waiting_replica_count");
+            profile.FinishedSuccessfullyCount = typeSpecificProfiler.Counter("/finished_successfully_count");
+            profile.FinishedSuccessfullyReplicaCount = typeSpecificProfiler.Counter("/finished_successfully_replica_count");
+            profile.FinishedWithErrorCount = typeSpecificProfiler.Counter("/finished_with_error_count");
+            profile.FinishedWithErrorReplicaCount = typeSpecificProfiler.Counter("/finished_with_error_replica_count");
 
             for (auto phase : TEnumTraits<ESequoiaReplicaModificationPhase>::GetDomainValues()) {
                 auto typeAndPhaseSpecificProfiler = typeSpecificProfiler
                     .WithTag("phase", Format("%lv", phase));
-                profile.CumulativeTime[phase] = typeAndPhaseSpecificProfiler.TimeCounter("/cumulative_time");
+                profile.PhaseTime[phase] = typeAndPhaseSpecificProfiler.Summary(
+                    "/time_seconds",
+                    ESummaryPolicy::Max | ESummaryPolicy::Avg);
             }
         }
 
@@ -776,6 +787,15 @@ public:
             this);
     }
 
+    std::unique_ptr<TMutation> CreateDetachChunkTreesMutation(TCtxDetachChunkTreesPtr context) override
+    {
+        return CreateMutation(
+            Bootstrap_->GetHydraFacade()->GetHydraManager(),
+            std::move(context),
+            &TChunkManager::HydraDetachChunkTrees,
+            this);
+    }
+
     std::unique_ptr<TMutation> CreateTopUpSequoiaChunkPurgatoryMutation(
         const NProto::TReqTopUpSequoiaChunkPurgatory& request) override
     {
@@ -783,6 +803,16 @@ public:
             Bootstrap_->GetHydraFacade()->GetHydraManager(),
             request,
             &TChunkManager::HydraTopUpSequoiaChunkPurgatory,
+            this);
+    }
+
+    std::unique_ptr<TMutation> CreateScheduleMultipleChunkSealsMutation(
+        const NProto::TReqScheduleMultipleChunkSeals& request) override
+    {
+        return CreateMutation(
+            Bootstrap_->GetHydraFacade()->GetHydraManager(),
+            request,
+            &TChunkManager::HydraScheduleMultipleChunkSeals,
             this);
     }
 
@@ -891,11 +921,31 @@ public:
 
         for (auto replica : replicas) {
             auto nodeId = replica.GetNodeId();
+
+            // Offshore replicas are confirmed via OffshoreNodeId sentinel — no real node.
+            if (nodeId == NNodeTrackerClient::OffshoreNodeId) {
+                auto mediumIndex = replica.GetMediumIndex();
+                const auto* medium = GetMediumByIndexOrThrow(mediumIndex);
+                if (!medium->IsOffshore()) {
+                    YT_TLOG_ALERT("Confirmed offshore replica references non-offshore medium")
+                        .With("ChunkId", chunk->GetId())
+                        .With("MediumName", medium->GetName())
+                        .With("MediumIndex", mediumIndex);
+                    continue;
+                }
+                TAugmentedStoredChunkReplicaPtr storedReplica(
+                    const_cast<TMedium*>(medium),
+                    replica.GetReplicaIndex());
+                chunk->AddReplica(storedReplica, medium, /*approved*/ true);
+                ScheduleChunkRefresh(chunk);
+                continue;
+            }
+
             auto* node = nodeTracker->FindNode(nodeId);
             if (!IsObjectAlive(node)) {
-                YT_LOG_DEBUG("Tried to confirm chunk at an unknown node (ChunkId: %v, NodeId: %v)",
-                    chunk->GetId(),
-                    replica.GetNodeId());
+                YT_TLOG_DEBUG("Tried to confirm chunk at an unknown node")
+                    .With("ChunkId", chunk->GetId())
+                    .With("NodeId", replica.GetNodeId());
                 continue;
             }
 
@@ -906,11 +956,10 @@ public:
             }
 
             if (!node->ReportedDataNodeHeartbeat()) {
-                YT_LOG_DEBUG("Tried to confirm chunk at node that did not report data node heartbeat yet "
-                    "(ChunkId: %v, Address: %v, State: %v)",
-                    chunk->GetId(),
-                    node->GetDefaultAddress(),
-                    node->GetLocalState());
+                YT_TLOG_DEBUG("Tried to confirm chunk at node that did not report data node heartbeat yet")
+                    .With("ChunkId", chunk->GetId())
+                    .With("Address", node->GetDefaultAddress())
+                    .With("State", node->GetLocalState());
                 continue;
             }
 
@@ -924,13 +973,11 @@ public:
                 int mediumIndex = location->GetEffectiveMediumIndex();
                 const auto* medium = GetMediumByIndexOrThrow(mediumIndex);
                 if (medium->IsOffshore()) {
-                    YT_LOG_ALERT(
-                        "Tried to confirm chunk replica with location on offshore medium "
-                        "(ChunkId: %v, MediumName: %v, MediumIndex: %v, MediumType: %v)",
-                        chunk->GetId(),
-                        medium->GetName(),
-                        medium->GetIndex(),
-                        medium->GetType());
+                    YT_TLOG_ALERT("Tried to confirm chunk replica with location on offshore medium")
+                        .With("ChunkId", chunk->GetId())
+                        .With("MediumName", medium->GetName())
+                        .With("MediumIndex", medium->GetIndex())
+                        .With("MediumType", medium->GetType());
                     continue;
                 }
 
@@ -953,7 +1000,7 @@ public:
         TMasterTableSchema* MasterTableSchema = nullptr;
     };
 
-    TConfirmChunkSuccessfulValidationResult ValidateConfirmChunk(
+    TErrorOr<TConfirmChunkSuccessfulValidationResult> ValidateConfirmChunk(
         TChunk* chunk,
         const TChunkMeta& chunkMeta,
         TMasterTableSchemaId schemaId,
@@ -961,8 +1008,8 @@ public:
     {
         auto id = chunk->GetId();
         if (chunk->IsConfirmed()) {
-            YT_LOG_DEBUG("Chunk is already confirmed (ChunkId: %v)",
-                id);
+            YT_TLOG_DEBUG("Chunk is already confirmed")
+                .With("ChunkId", id);
             // We won't need anything.
             return {};
         }
@@ -971,7 +1018,13 @@ public:
         const auto& tableManager = Bootstrap_->GetTableManager();
         // TODO(h0pless): Maybe think of a better exception here.
         if (GetDynamicConfig()->EnableChunkSchemas && schemaId != NullTableSchemaId) {
-            result.MasterTableSchema = tableManager->GetMasterTableSchemaOrThrow(schemaId);
+            auto tableSchema = tableManager->FindMasterTableSchema(schemaId);
+            if (!IsObjectAlive(tableSchema)) {
+                return TError(NYTree::EErrorCode::ResolveError,
+                    "No such schema %v",
+                    schemaId);
+            }
+            result.MasterTableSchema = tableSchema;
         }
 
         // NB: Figure out and validate all hunk chunks we are about to reference _before_ confirming
@@ -982,7 +1035,7 @@ public:
                 auto hunkChunkId = FromProto<TChunkId>(protoRef.chunk_id());
                 auto* hunkChunk = FindChunk(hunkChunkId);
                 if (!IsObjectAlive(hunkChunk)) {
-                    THROW_ERROR_EXCEPTION("Cannot confirm chunk %v since it references an unknown hunk chunk %v",
+                    return TError("Cannot confirm chunk %v since it references an unknown hunk chunk %v",
                         id,
                         hunkChunkId);
                 }
@@ -993,7 +1046,10 @@ public:
         }
 
         if (validateChunkMeta) {
-            ValidateChunkMetaOnConfirmation(chunkMeta);
+            auto error = CheckChunkMetaOnConfirmation(chunkMeta);
+            if (!error.IsOK()) {
+                return error;
+            }
         }
 
         return result;
@@ -1010,10 +1066,9 @@ public:
         try {
             GuardedConfirmChunk(chunk, replicas, chunkInfo, chunkMeta, validationResult);
         } catch (const std::exception& ex) {
-            YT_LOG_ALERT(
-                ex,
-                "An exception during chunk confirmation was thrown (ChunkId: %v)",
-                chunk->GetId());
+            YT_TLOG_ALERT("An exception during chunk confirmation was thrown")
+                .With("ChunkId", chunk->GetId())
+                .With(ex);
             throw; // For now.
         }
     }
@@ -1027,13 +1082,14 @@ public:
     {
         auto id = chunk->GetId();
         if (chunk->IsConfirmed()) {
-            YT_LOG_DEBUG("Chunk is already confirmed (ChunkId: %v)",
-                id);
+            YT_TLOG_DEBUG("Chunk is already confirmed")
+                .With("ChunkId", id);
             return;
         }
 
         const auto& tableManager = Bootstrap_->GetTableManager();
         const auto& objectManager = Bootstrap_->GetObjectManager();
+        const auto& securityManager = Bootstrap_->GetSecurityManager();
 
         YT_VERIFY(validationResult.ReferencedHunkChunks.size() == validationResult.ReferencedDataSizePerChunk.size());
         YT_VERIFY(validationResult.ReferencedDataWeightPerChunk.size() == validationResult.ReferencedDataSizePerChunk.size());
@@ -1044,7 +1100,17 @@ public:
             auto referencedDataSize = validationResult.ReferencedDataSizePerChunk[index];
 
             YT_VERIFY(IsObjectAlive(hunkChunk));
+
+            // NB: This may change the hunk chunk's own master memory usage by mutating
+            // its meta; recharge the accounts referencing it if it's already been charged.
+            auto oldHunkChunkMasterMemoryUsage = hunkChunk->GetMasterMemoryUsage();
             AccumulateNewlyReferencedHunkStatistics(hunkChunk, referencedDataWeight, referencedDataSize);
+            if (hunkChunk->IsNative() && hunkChunk->IsDiskSizeFinal()) {
+                securityManager->UpdateChunkMasterMemoryUsage(
+                    hunkChunk,
+                    hunkChunk->GetMasterMemoryUsage() - oldHunkChunkMasterMemoryUsage);
+            }
+
             objectManager->RefObject(hunkChunk);
         }
 
@@ -1077,10 +1143,10 @@ public:
 
         ScheduleChunkRefresh(chunk, refreshDelay);
 
-        YT_LOG_DEBUG("Chunk confirmed (ChunkId: %v, MasterReplicas: %v, ReferencedHunkChunkIds: %v)",
-            chunk->GetId(),
-            replicas,
-            MakeFormattableView(validationResult.ReferencedHunkChunks, TObjectIdFormatter()));
+        YT_TLOG_DEBUG("Chunk confirmed")
+            .With("ChunkId", chunk->GetId())
+            .With("MasterReplicas", replicas)
+            .With("ReferencedHunkChunkIds", MakeFormattableView(validationResult.ReferencedHunkChunks, TObjectIdFormatter()));
     }
 
     // Adds #chunk to its staging transaction resource usage.
@@ -1167,20 +1233,20 @@ public:
                 continue;
             }
             auto* rightSibling = children[index + 1]->AsChunk();
-            YT_LOG_DEBUG(
-                "Waiting for next unsealed journal chunk to become sealed (CurrentChunkId: %v, NextChunkId: %v)",
-                chunk->GetId(),
-                rightSibling->GetId());
+            YT_TLOG_DEBUG("Waiting for next unsealed journal chunk to become sealed")
+                .With("CurrentChunkId", chunk->GetId())
+                .With("NextChunkId", rightSibling->GetId());
             ScheduleChunkSeal(rightSibling);
         }
 
-        YT_LOG_DEBUG("Chunk sealed "
-            "(ChunkId: %v, FirstOverlayedRowIndex: %v, RowCount: %v, UncompressedDataSize: %v, CompressedDataSize: %v)",
-            chunk->GetId(),
-            info.has_first_overlayed_row_index() ? std::make_optional(info.first_overlayed_row_index()) : std::nullopt,
-            info.row_count(),
-            info.uncompressed_data_size(),
-            info.compressed_data_size());
+        YT_TLOG_DEBUG("Chunk sealed")
+            .With("ChunkId", chunk->GetId())
+            .With(
+                "FirstOverlayedRowIndex",
+                info.has_first_overlayed_row_index() ? std::make_optional(info.first_overlayed_row_index()) : std::nullopt)
+            .With("RowCount", info.row_count())
+            .With("UncompressedDataSize", info.uncompressed_data_size())
+            .With("CompressedDataSize", info.compressed_data_size());
     }
 
 
@@ -1234,6 +1300,13 @@ public:
         auto requisitionIndex = ChunkRequisitionRegistry_.GetOrCreate(requisition, objectManager);
         chunk->SetLocalRequisitionIndex(requisitionIndex, GetChunkRequisitionRegistry(), objectManager);
 
+        // COMPAT(danilalexeev)
+        if (GetDynamicConfig()->UpdateHistoricallyNonVitalOnChunkCreationAndExport &&
+            !IsDurabilityRequiredForChunk(chunk, requisitionIndex))
+        {
+            chunk->SetHistoricallyNonVital(true);
+        }
+
         StageChunk(chunk, transaction, account);
 
         const auto& transactionManager = Bootstrap_->GetTransactionManager();
@@ -1243,34 +1316,25 @@ public:
             AttachToChunkList(chunkList, {chunk});
         }
 
-        YT_LOG_DEBUG(
-            "Chunk created "
-            "(ChunkId: %v, ChunkListId: %v, TransactionId: %v, Account: %v, Medium: %v, "
-            "RequisitionIndex: %v, ReplicationFactor: %v, ErasureCodec: %v, Movable: %v, Vital: %v%v%v)",
-            chunk->GetId(),
-            GetObjectId(chunkList),
-            transaction->GetId(),
-            account->GetName(),
-            medium->GetName(),
-            requisitionIndex,
-            replicationFactor,
-            erasureCodecId,
-            movable,
-            vital,
-            MakeFormatterWrapper([&] (auto* builder) {
-                if (isJournal) {
-                    builder->AppendFormat(", ReadQuorum: %v, WriteQuorum: %v, Overlayed: %v",
-                        readQuorum,
-                        writeQuorum,
-                        overlayed);
-                }
-            }),
-            MakeFormatterWrapper([&] (auto* builder) {
-                if (consistentReplicaPlacementHash != NullConsistentReplicaPlacementHash) {
-                    builder->AppendFormat(", ConsistentReplicaPlacementHash: %x",
-                        consistentReplicaPlacementHash);
-                }
-            }));
+        YT_TLOG_DEBUG("Chunk created")
+            .With("ChunkId", chunk->GetId())
+            .With("ChunkListId", GetObjectId(chunkList))
+            .With("TransactionId", transaction->GetId())
+            .With("Account", account->GetName())
+            .With("Medium", medium->GetName())
+            .With("RequisitionIndex", requisitionIndex)
+            .With("ReplicationFactor", replicationFactor)
+            .With("ErasureCodec", erasureCodecId)
+            .With("Movable", movable)
+            .With("Vital", vital)
+            .WithIf(isJournal, "ReadQuorum", readQuorum)
+            .WithIf(isJournal, "WriteQuorum", writeQuorum)
+            .WithIf(isJournal, "Overlayed", overlayed)
+            .WithFormatIf(
+                consistentReplicaPlacementHash != NullConsistentReplicaPlacementHash,
+                "ConsistentReplicaPlacementHash",
+                "%x",
+                consistentReplicaPlacementHash);
 
         return chunk;
     }
@@ -1296,18 +1360,20 @@ public:
         YT_VERIFY(options.Persistent);
         YT_VERIFY(options.LatePrepare);
 
-        YT_LOG_DEBUG("Confirming multiple chunks (ChunkCount: %v, TransactionId: %v)",
-            request->chunk_confirmations_size(),
-            GetObjectId(transaction));
+        YT_TLOG_DEBUG("Confirming multiple chunks")
+            .With("ChunkCount", request->chunk_confirmations_size())
+            .With("TransactionId", GetObjectId(transaction));
 
         THashMap<TChunkId, TConfirmChunkSuccessfulValidationResult> chunkToConfirmationValidationResult;
+        THashMap<NRpc::TRequestId, TError> batchConfirmErrors;
         chunkToConfirmationValidationResult.reserve(request->chunk_confirmations_size());
         for (const auto& protoChunkInfo : request->chunk_confirmations()) {
             auto chunkId = FromProto<TChunkId>(protoChunkInfo.chunk_id());
-            YT_LOG_TRACE("Confirming chunk during multiple chunks confirmation (ChunkId: %v)",
-                chunkId);
+            YT_TLOG_TRACE("Confirming chunk during multiple chunks confirmation")
+                .With("ChunkId", chunkId);
 
             auto schemaId = FromProto<TMasterTableSchemaId>(protoChunkInfo.schema_id());
+            auto requestId = FromProto<TGuid>(protoChunkInfo.request_id());
             auto* chunk = FindChunk(chunkId);
             if (!IsObjectAlive(chunk)) {
                 // Chunk is dead, but we consider it a "success" here, so that we don't fail
@@ -1323,10 +1389,40 @@ public:
                 schemaId,
                 /*validateChunkMeta*/ false);
 
-            if (!chunkToConfirmationValidationResult.emplace(chunkId, result).second) {
-                YT_LOG_ALERT_AND_THROW("A chunk was found in confirmation batch multiple times (ChunkId: %v)",
-                    chunkId);
+            if (!result.IsOK()) {
+                YT_TLOG_DEBUG("Chunk validation failed")
+                    .With("ChunkId", chunkId)
+                    .With(result);
+                auto error = TError("Chunk %v validation failed", chunkId)
+                    .With(result);
+                batchConfirmErrors.emplace(requestId, error);
+                continue;
             }
+
+            if (!chunkToConfirmationValidationResult.emplace(chunkId, result.Value()).second) {
+                YT_TLOG_ALERT("A chunk was found in confirmation batch multiple times")
+                    .With("ChunkId", chunkId);
+                batchConfirmErrors.emplace(
+                    requestId,
+                    TError(NRpc::EErrorCode::TransientFailure, "Chunk %v confirmation failed", chunkId));
+                continue;
+            }
+        }
+
+        if (!batchConfirmErrors.empty()) {
+            TError batchError(NRpc::EErrorCode::TransientFailure, "Chunk confirm batch failed");
+            for (const auto& [requestId, confirmError] : batchConfirmErrors) {
+                batchError.MutableInnerErrors()->push_back(confirmError);
+
+                if (!requestId.IsEmpty()) {
+                    if (IsLeader()) {
+                        ChunkConfirmErrors_.emplace(requestId, confirmError);
+                    }
+                } else {
+                    YT_TLOG_ALERT("Chunk without request ID found in confirmation batch");
+                }
+            }
+            batchError.ThrowOnError();
         }
 
        for (const auto& protoChunkInfo : request->chunk_confirmations()) {
@@ -1341,8 +1437,8 @@ public:
 
             auto it = chunkToConfirmationValidationResult.find(chunkId);
             if (it == chunkToConfirmationValidationResult.end()) {
-                YT_LOG_ALERT_AND_THROW("Chunk is not present in confirmation validation result list (ChunkId: %v)",
-                    chunkId);
+                YT_TLOG_ALERT_AND_THROW("Chunk is not present in confirmation validation result list")
+                    .With("ChunkId", chunkId);
             }
 
             const auto& confirmationResult = it->second;
@@ -1360,15 +1456,13 @@ public:
         NProto::TReqPromoteLastCommitTimestamp* /*request*/,
         const NTransactionSupervisor::TTransactionCommitOptions& options)
     {
-        YT_LOG_DEBUG("Promoting Sequoia replicas commit timestamp (CommitTimestamp: %v)",
-            options.CommitTimestamp);
+        YT_TLOG_DEBUG("Promoting Sequoia replicas commit timestamp")
+            .With("CommitTimestamp", options.CommitTimestamp);
 
         if (LastSequoiaReplicasCommitTimestamp_ >= options.CommitTimestamp) {
-            YT_LOG_ALERT(
-                "Last Sequoia replicas commit timestamp is greater than the current one "
-                "(PreviousCommitTimestamp: %v, CurrentCommitTimestamp: %v)",
-                LastSequoiaReplicasCommitTimestamp_,
-                options.CommitTimestamp);
+            YT_TLOG_ALERT("Last Sequoia replicas commit timestamp is greater than the current one")
+                .With("PreviousCommitTimestamp", LastSequoiaReplicasCommitTimestamp_)
+                .With("CurrentCommitTimestamp", options.CommitTimestamp);
         }
 
         LastSequoiaReplicasCommitTimestamp_ = options.CommitTimestamp;
@@ -1382,20 +1476,29 @@ public:
 
         if (auto hunkChunkRefsExt = chunk->ChunkMeta()->FindExtension<NTableClient::NProto::THunkChunkRefsExt>()) {
             const auto& objectManager = Bootstrap_->GetObjectManager();
+            const auto& securityManager = Bootstrap_->GetSecurityManager();
             for (const auto& protoRef : hunkChunkRefsExt->refs()) {
                 auto hunkChunkId = FromProto<TChunkId>(protoRef.chunk_id());
                 auto* hunkChunk = FindChunk(hunkChunkId);
                 if (!IsObjectAlive(hunkChunk)) {
-                    YT_LOG_ALERT("Chunk being destroyed references an unknown hunk chunk (ChunkId: %v, HunkChunkId: %v)",
-                        chunk->GetId(),
-                        hunkChunkId);
+                    YT_TLOG_ALERT("Chunk being destroyed references an unknown hunk chunk")
+                        .With("ChunkId", chunk->GetId())
+                        .With("HunkChunkId", hunkChunkId);
                     continue;
                 }
 
+                // NB: Recharge before unreffing: UnrefObject may destroy hunkChunk
+                // immediately, and we need to read its master memory usage beforehand.
+                auto oldHunkChunkMasterMemoryUsage = hunkChunk->GetMasterMemoryUsage();
                 AccumulateNewlyReferencedHunkStatistics(
                     hunkChunk,
                     -1 * protoRef.total_hunk_length(),
                     -1 * ComputeHunkDataSize(protoRef));
+                if (hunkChunk->IsNative() && hunkChunk->IsDiskSizeFinal()) {
+                    securityManager->UpdateChunkMasterMemoryUsage(
+                        hunkChunk,
+                        hunkChunk->GetMasterMemoryUsage() - oldHunkChunkMasterMemoryUsage);
+                }
 
                 objectManager->UnrefObject(hunkChunk);
             }
@@ -1428,9 +1531,9 @@ public:
             UpdateChunkSchemaMasterMemoryUsage(chunk, -1);
         } else if (chunk->Schema()) {
             // This can be safely removed after 24.1 rolls around if this alert is not triggered.
-            YT_LOG_ALERT("Destroying an unconfirmed chunk with a valid chunk schema (ChunkId: %v, SchemaId: %v)",
-                chunk->GetId(),
-                chunk->Schema()->GetId());
+            YT_TLOG_ALERT("Destroying an unconfirmed chunk with a valid chunk schema")
+                .With("ChunkId", chunk->GetId())
+                .With("SchemaId", chunk->Schema()->GetId());
         }
 
         if (chunk->IsNative() && chunk->IsDiskSizeFinal()) {
@@ -1439,6 +1542,10 @@ public:
         }
 
         UpdateChunkWeightStatisticsHistogram(chunk, /*add*/ false);
+
+        // Good enough.
+        auto replicaCount = std::ssize(chunk->GetStoredReplicaList(/*includeNonOnlineReplicas*/ true));
+        UpdateNonSequoiaChunkReplicaCount(chunk, -replicaCount);
 
         // Unregister chunk replicas from all known locations including non-online nodes.
         // Schedule removal jobs.
@@ -1471,6 +1578,7 @@ public:
             Bootstrap_->GetObjectManager());
 
         UnregisterChunk(chunk);
+        VerboselyLoggedChunks_.erase(chunk->GetId());
 
         if (auto* location = chunk->GetLocationWithEndorsement()) {
             RemoveEndorsement(chunk, location);
@@ -1495,17 +1603,23 @@ public:
 
     void ExportChunk(TChunk* chunk, TCellTag destinationCellTag) override
     {
+        // COMPAT(danilalexeev): Covers chunks created before this flag was enabled.
+        if (GetDynamicConfig()->UpdateHistoricallyNonVitalOnChunkCreationAndExport &&
+            !IsDurabilityRequiredForChunk(chunk, chunk->GetAggregatedRequisitionIndex()))
+        {
+            chunk->SetHistoricallyNonVital(true);
+        }
+
         chunk->Export(destinationCellTag, GetChunkRequisitionRegistry());
     }
 
     void UnexportChunk(TChunk* chunk, TCellTag destinationCellTag, int importRefCounter) override
     {
         if (!chunk->IsExportedToCell(destinationCellTag)) {
-            YT_LOG_ALERT("Chunk is not exported and cannot be unexported "
-                "(ChunkId: %v, CellTag: %v, ImportRefCounter: %v)",
-                chunk->GetId(),
-                destinationCellTag,
-                importRefCounter);
+            YT_TLOG_ALERT("Chunk is not exported and cannot be unexported")
+                .With("ChunkId", chunk->GetId())
+                .With("CellTag", destinationCellTag)
+                .With("ImportRefCounter", importRefCounter);
             return;
         }
 
@@ -1570,10 +1684,10 @@ public:
                 auto* underlyingChunk = underlyingTree->AsChunk();
                 auto transactionId = modifier.GetTransactionId();
                 auto* chunkView = DoCreateChunkView(underlyingChunk, std::move(modifier));
-                YT_LOG_DEBUG("Chunk view created (ChunkViewId: %v, ChunkId: %v, TransactionId: %v)",
-                    chunkView->GetId(),
-                    underlyingChunk->GetId(),
-                    transactionId);
+                YT_TLOG_DEBUG("Chunk view created")
+                    .With("ChunkViewId", chunkView->GetId())
+                    .With("ChunkId", underlyingChunk->GetId())
+                    .With("TransactionId", transactionId);
                 return chunkView;
             }
 
@@ -1582,10 +1696,10 @@ public:
                 auto* underlyingStore = underlyingTree->AsDynamicStore();
                 auto transactionId = modifier.GetTransactionId();
                 auto* chunkView = DoCreateChunkView(underlyingStore, std::move(modifier));
-                YT_LOG_DEBUG("Chunk view created (ChunkViewId: %v, DynamicStoreId: %v, TransactionId: %v)",
-                    chunkView->GetId(),
-                    underlyingStore->GetId(),
-                    transactionId);
+                YT_TLOG_DEBUG("Chunk view created")
+                    .With("ChunkViewId", chunkView->GetId())
+                    .With("DynamicStoreId", underlyingStore->GetId())
+                    .With("TransactionId", transactionId);
                 return chunkView;
             }
 
@@ -1596,10 +1710,10 @@ public:
                 auto underlyingTree = baseChunkView->GetUnderlyingTree();
                 auto adjustedModifier = baseChunkView->Modifier().RestrictedWith(modifier);
                 auto* chunkView = DoCreateChunkView(underlyingTree, std::move(adjustedModifier));
-                YT_LOG_DEBUG("Chunk view created (ChunkViewId: %v, ChunkId: %v, BaseChunkViewId: %v)",
-                    chunkView->GetId(),
-                    underlyingTree->GetId(),
-                    baseChunkView->GetId());
+                YT_TLOG_DEBUG("Chunk view created")
+                    .With("ChunkViewId", chunkView->GetId())
+                    .With("ChunkId", underlyingTree->GetId())
+                    .With("BaseChunkViewId", baseChunkView->GetId());
                 return chunkView;
             }
 
@@ -1626,9 +1740,9 @@ public:
     TDynamicStore* CreateDynamicStore(TDynamicStoreId storeId, TTablet* tablet) override
     {
         auto* dynamicStore = DoCreateDynamicStore(storeId, tablet);
-        YT_LOG_DEBUG("Dynamic store created (StoreId: %v, TabletId: %v)",
-            dynamicStore->GetId(),
-            tablet->GetId());
+        YT_TLOG_DEBUG("Dynamic store created")
+            .With("StoreId", dynamicStore->GetId())
+            .With("TabletId", tablet->GetId());
         return dynamicStore;
     }
 
@@ -1641,9 +1755,9 @@ public:
     TChunkList* CreateChunkList(EChunkListKind kind) override
     {
         auto* chunkList = DoCreateChunkList(kind);
-        YT_LOG_DEBUG("Chunk list created (Id: %v, Kind: %v)",
-            chunkList->GetId(),
-            chunkList->GetKind());
+        YT_TLOG_DEBUG("Chunk list created")
+            .With("Id", chunkList->GetId())
+            .With("Kind", chunkList->GetKind());
         return chunkList;
     }
 
@@ -1681,7 +1795,8 @@ public:
         chunkList->Children().clear();
         ResetChunkListStatistics(chunkList);
 
-        YT_LOG_DEBUG("Chunk list cleared (ChunkListId: %v)", chunkList->GetId());
+        YT_TLOG_DEBUG("Chunk list cleared")
+            .With("ChunkListId", chunkList->GetId());
     }
 
     TChunkList* CloneTabletChunkList(TChunkList* chunkList) override
@@ -1695,6 +1810,7 @@ public:
             // Restoring statistics.
             newChunkList->Statistics().LogicalRowCount = chunkList->Statistics().LogicalRowCount;
             newChunkList->Statistics().LogicalDataWeight = chunkList->Statistics().LogicalDataWeight;
+            newChunkList->Statistics().LogicalHunkDataWeight = chunkList->Statistics().LogicalHunkDataWeight;
             newChunkList->CumulativeStatistics() = chunkList->CumulativeStatistics();
             newChunkList->CumulativeStatistics().TrimFront(chunkList->GetTrimmedChildCount());
         } else if (chunkList->GetKind() == EChunkListKind::SortedDynamicTablet) {
@@ -1763,16 +1879,16 @@ public:
 
         YT_PROFILE_TIMING("/chunk_server/chunk_tree_rebalance_time") {
             auto chunklistId = chunkList->GetId();
-            YT_LOG_DEBUG("Chunk tree rebalancing started (RootId: %v, Mode: %v)",
-                chunklistId,
-                settingsMode);
+            YT_TLOG_DEBUG("Chunk tree rebalancing started")
+                .With("RootId", chunklistId)
+                .With("Mode", settingsMode);
 
             auto rebalanceStatistics = ChunkTreeBalancer_.Rebalance(chunkList);
             ChunkMerger_->TweakTraversalInfoAfterRebalance(chunkList, rebalanceStatistics);
 
-            YT_LOG_DEBUG("Chunk tree rebalancing completed (RootId: %v, Mode: %v)",
-                chunklistId,
-                settingsMode);
+            YT_TLOG_DEBUG("Chunk tree rebalancing completed")
+                .With("RootId", chunklistId)
+                .With("Mode", settingsMode);
         }
     }
 
@@ -1924,33 +2040,36 @@ public:
 
                 switch (state) {
                     case EJobState::Completed:
-                        YT_LOG_DEBUG(SanitizeError(std::move(jobError)), "Job completed (JobId: %v, JobType: %v, Address: %v, ChunkId: %v)",
-                            jobId,
-                            jobType,
-                            address,
-                            job->GetChunkIdWithIndexes());
+                        YT_TLOG_DEBUG("Job completed")
+                            .With("JobId", jobId)
+                            .With("JobType", jobType)
+                            .With("Address", address)
+                            .With("ChunkId", job->GetChunkIdWithIndexes())
+                            .With(SanitizeError(std::move(jobError)));
 
                         JobController_->OnJobCompleted(job);
                         removeJob(jobId);
                         break;
 
                     case EJobState::Failed:
-                        YT_LOG_WARNING(SanitizeError(std::move(jobError)), "Job failed (JobId: %v, JobType: %v, Address: %v, ChunkId: %v)",
-                            jobId,
-                            jobType,
-                            address,
-                            job->GetChunkIdWithIndexes());
+                        YT_TLOG_WARNING("Job failed")
+                            .With("JobId", jobId)
+                            .With("JobType", jobType)
+                            .With("Address", address)
+                            .With("ChunkId", job->GetChunkIdWithIndexes())
+                            .With(SanitizeError(std::move(jobError)));
 
                         JobController_->OnJobFailed(job);
                         removeJob(jobId);
                         break;
 
                     case EJobState::Aborted:
-                        YT_LOG_WARNING(SanitizeError(std::move(jobError)), "Job aborted (JobId: %v, JobType: %v, Address: %v, ChunkId: %v)",
-                            jobId,
-                            jobType,
-                            address,
-                            job->GetChunkIdWithIndexes());
+                        YT_TLOG_WARNING("Job aborted")
+                            .With("JobId", jobId)
+                            .With("JobType", jobType)
+                            .With("Address", address)
+                            .With("ChunkId", job->GetChunkIdWithIndexes())
+                            .With(SanitizeError(std::move(jobError)));
 
                         JobController_->OnJobAborted(job);
                         removeJob(jobId);
@@ -1973,37 +2092,40 @@ public:
                 // Unknown jobs are aborted and removed.
                 switch (state) {
                     case EJobState::Completed:
-                        YT_LOG_DEBUG(SanitizeError(std::move(jobError)), "Unknown job has completed, removal scheduled (JobId: %v, Address: %v)",
-                            jobId,
-                            address);
+                        YT_TLOG_DEBUG("Unknown job has completed, removal scheduled")
+                            .With("JobId", jobId)
+                            .With("Address", address)
+                            .With(SanitizeError(std::move(jobError)));
                         removeJob(jobId);
                         break;
 
                     case EJobState::Failed:
-                        YT_LOG_DEBUG(SanitizeError(std::move(jobError)), "Unknown job has failed, removal scheduled (JobId: %v, Address: %v)",
-                            jobId,
-                            address);
+                        YT_TLOG_DEBUG("Unknown job has failed, removal scheduled")
+                            .With("JobId", jobId)
+                            .With("Address", address)
+                            .With(SanitizeError(std::move(jobError)));
                         removeJob(jobId);
                         break;
 
                     case EJobState::Aborted:
-                        YT_LOG_DEBUG(SanitizeError(std::move(jobError)), "Job aborted, removal scheduled (JobId: %v, Address: %v)",
-                            jobId,
-                            address);
+                        YT_TLOG_DEBUG("Job aborted, removal scheduled")
+                            .With("JobId", jobId)
+                            .With("Address", address)
+                            .With(SanitizeError(std::move(jobError)));
                         removeJob(jobId);
                         break;
 
                     case EJobState::Running:
-                        YT_LOG_DEBUG("Unknown job is running, abort scheduled (JobId: %v, Address: %v)",
-                            jobId,
-                            address);
+                        YT_TLOG_DEBUG("Unknown job is running, abort scheduled")
+                            .With("JobId", jobId)
+                            .With("Address", address);
                         abortJob(jobId);
                         break;
 
                     case EJobState::Waiting:
-                        YT_LOG_DEBUG("Unknown job is waiting, abort scheduled (JobId: %v, Address: %v)",
-                            jobId,
-                            address);
+                        YT_TLOG_DEBUG("Unknown job is waiting, abort scheduled")
+                            .With("JobId", jobId)
+                            .With("Address", address);
                         abortJob(jobId);
                         break;
 
@@ -2013,35 +2135,31 @@ public:
             }
         }
 
-        YT_LOG_DEBUG_UNLESS(
-            runningJobIds.empty(),
-            "Jobs are running (JobIds: %v, Address: %v)",
-            runningJobIds,
-            address);
+        YT_TLOG_DEBUG_UNLESS(runningJobIds.empty(), "Jobs are running")
+            .With("JobIds", runningJobIds)
+            .With("Address", address);
 
-        YT_LOG_DEBUG_UNLESS(
-            waitingJobIds.empty(),
-            "Jobs are waiting (JobIds: %v, Address: %v)",
-            waitingJobIds,
-            address);
+        YT_TLOG_DEBUG_UNLESS(waitingJobIds.empty(), "Jobs are waiting")
+            .With("JobIds", waitingJobIds)
+            .With("Address", address);
 
         for (const auto& jobToAbort : jobControllerCallbacks.GetJobsToAbort()) {
-            YT_LOG_DEBUG("Aborting job (JobId: %v, JobType: %v, Address: %v, ChunkId: %v)",
-                jobToAbort->GetJobId(),
-                jobToAbort->GetType(),
-                address,
-                jobToAbort->GetChunkIdWithIndexes());
+            YT_TLOG_DEBUG("Aborting job")
+                .With("JobId", jobToAbort->GetJobId())
+                .With("JobType", jobToAbort->GetType())
+                .With("Address", address)
+                .With("ChunkId", jobToAbort->GetChunkIdWithIndexes());
             abortJob(jobToAbort->GetJobId());
         }
 
         auto nodeJobs = JobRegistry_->GetNodeJobs(node->GetDefaultAddress());
         for (const auto& job : nodeJobs) {
             if (!processedJobs.contains(job)) {
-                YT_LOG_WARNING("Job is missing, aborting (JobId: %v, JobType: %v, Address: %v, ChunkId: %v)",
-                    job->GetJobId(),
-                    job->GetType(),
-                    address,
-                    job->GetChunkIdWithIndexes());
+                YT_TLOG_WARNING("Job is missing, aborting")
+                    .With("JobId", job->GetJobId())
+                    .With("JobType", job->GetType())
+                    .With("Address", address)
+                    .With("ChunkId", job->GetChunkIdWithIndexes());
                 AbortAndRemoveJob(job);
             }
         }
@@ -2055,8 +2173,8 @@ public:
             JobRegistry_);
 
         if (JobRegistry_->IsOverdraft()) {
-            YT_LOG_ERROR("Job throttler is overdrafted, skipping job scheduling (Address: %v)",
-                node->GetDefaultAddress());
+            YT_TLOG_ERROR("Job throttler is overdrafted, skipping job scheduling")
+                .With("Address", node->GetDefaultAddress());
         } else {
             for (auto jobType : TEnumTraits<EJobType>::GetDomainValues()) {
                 if (!IsMasterJobType(jobType)) {
@@ -2064,9 +2182,9 @@ public:
                 }
 
                 if (JobRegistry_->IsOverdraft(jobType)) {
-                    YT_LOG_ERROR("Job throttler is overdrafted for job type, skipping job scheduling (Address: %v, JobType: %v)",
-                        node->GetDefaultAddress(),
-                        jobType);
+                    YT_TLOG_ERROR("Job throttler is overdrafted for job type, skipping job scheduling")
+                        .With("Address", node->GetDefaultAddress())
+                        .With("JobType", jobType);
                     continue;
                 }
 
@@ -2199,8 +2317,8 @@ public:
 
         ChunkListsAwaitingRequisitionTraverse_.emplace(chunkList);
 
-        YT_LOG_DEBUG("Chunk list is awaiting requisition traverse (ChunkListId: %v)",
-            chunkList->GetId());
+        YT_TLOG_DEBUG("Chunk list is awaiting requisition traverse")
+            .With("ChunkListId", chunkList->GetId());
 
         ChunkReplicator_->ScheduleRequisitionUpdate(chunkList);
     }
@@ -2337,6 +2455,10 @@ public:
         std::optional<int> hintIndex,
         TObjectId hintId) override
     {
+        if (!GetDynamicConfig()->AllowOffshoreMedia) {
+            THROW_ERROR_EXCEPTION("S3 media creation is not allowed");
+        }
+
         CreateMediumPrologue(name);
 
         auto objectManager = Bootstrap_->GetObjectManager();
@@ -2416,7 +2538,7 @@ public:
                 if (!IsMediumType(specifiedType)) {
                     if (throwOnInvalidId) {
                         THROW_ERROR_EXCEPTION("Invalid medium id")
-                            << TErrorAttribute("medium_id", mediumId);
+                            .With("medium_id", mediumId);
                     }
                     return nullptr;
                 }
@@ -2633,19 +2755,15 @@ public:
     // Chunks needs special care.
     TChunk* FindChunk(const TChunkId& id) const override
     {
-        YT_LOG_ALERT_IF(
-            IsErasureChunkPartId(id),
-            "Erasure chunk part type passed to FindChunk (ChunkId: %v)",
-            id);
+        YT_TLOG_ALERT_IF(IsErasureChunkPartId(id), "Erasure chunk part type passed to FindChunk")
+            .With("ChunkId", id);
         return ChunkMap_.Find(id);
     }
 
     TChunk* GetChunk(const TChunkId& id) const override
     {
-        YT_LOG_ALERT_IF(
-            IsErasureChunkPartId(id),
-            "Erasure chunk part type passed to GetChunk (ChunkId: %v)",
-            id);
+        YT_TLOG_ALERT_IF(IsErasureChunkPartId(id), "Erasure chunk part type passed to GetChunk")
+            .With("ChunkId", id);
         return ChunkMap_.Get(id);
     }
 
@@ -2679,6 +2797,26 @@ public:
         return DynamicStoreMap_;
     }
 
+    void SetVerboselyLogged(const TChunk* chunk, bool enable) override
+    {
+        auto chunkId = chunk->GetId();
+        if (enable) {
+            if (std::ssize(VerboselyLoggedChunks_) >= GetDynamicConfig()->MaxVerboselyLoggedChunks) {
+                THROW_ERROR_EXCEPTION("Too many chunks with verbose logging enabled")
+                    .With("limit", GetDynamicConfig()->MaxVerboselyLoggedChunks);
+            }
+
+            VerboselyLoggedChunks_[chunkId] = GetCurrentMutationContext()->GetTimestamp();
+        } else {
+            VerboselyLoggedChunks_.erase(chunkId);
+        }
+    }
+
+    bool IsVerboselyLogged(const TChunk* chunk) const override
+    {
+        return VerboselyLoggedChunks_.contains(chunk->GetId());
+    }
+
 private:
     template <class T>
     class TEntityMapTypeTraits
@@ -2705,7 +2843,8 @@ private:
 
     TChunkTreeBalancer ChunkTreeBalancer_;
 
-    int TotalReplicaCount_ = 0;
+    int NonSequoiaBlobReplicaCount_ = 0;
+    int NonSequoiaJournalReplicaCount_ = 0;
 
     // COMPAT(h0pless)
     bool NeedRecomputeChunkWeightStatisticsHistogram_ = false;
@@ -2725,12 +2864,10 @@ private:
     TPeriodicExecutorPtr ProfilingExecutor_;
 
     TBufferedProducerPtr BufferedProducer_;
-    TBufferedProducerPtr CrpBufferedProducer_;
+    TBufferedProducerPtr DetailedBufferedProducer_;
 
     i64 ChunksCreated_ = 0;
     i64 ChunksDestroyed_ = 0;
-    i64 ChunkReplicasAdded_ = 0;
-    i64 ChunkReplicasRemoved_ = 0;
     i64 ChunkViewsCreated_ = 0;
     i64 ChunkViewsDestroyed_ = 0;
     i64 ChunkListsCreated_ = 0;
@@ -2763,14 +2900,18 @@ private:
 
     TPeriodicExecutorPtr SequoiaChunkBatchConfirmExecutor_;
 
-    std::vector<TReqConfirmChunk> WaitingConfirmRequests_;
+    std::vector<std::pair<TReqConfirmChunk, TGuid>> WaitingConfirmRequests_;
     TPromise<void> BatchConfirmTransactionCommitPromise_;
+    THashMap<NRpc::TRequestId, TError> ChunkConfirmErrors_;
 
     TPeriodicExecutorPtr SequoiaBatchIncrementalHeartbeatExecutor_;
 
     THashMap<TNodeId, std::unique_ptr<TReqModifyReplicas>> WaitingSequoiaIncrementalHeartbeatRequests_;
     int ReplicasInWaitingSequoiaIncrementalHeartbeatRequests_ = 0;
     TPromise<void> BatchSequoiaIncrementalHeartbeatPromise_;
+
+    const TAsyncSemaphorePtr ModifySequoiaReplicasSemaphore_ = New<TAsyncSemaphore>(/*totalSlots*/ 0);
+    const TAsyncSemaphorePtr ModifySequoiaReplicasPerReplicaSemaphore_ = New<TAsyncSemaphore>(/*totalSlots*/ 0, /*enableOverdraft*/ true);
 
     // Unlike chunk replicator and sealer, this is maintained on all
     // peers and is not cleared on epoch change.
@@ -2798,6 +2939,11 @@ private:
 
     TPeriodicExecutorPtr SequoiaReplicaRemovalExecutor_;
     THashMap<TChunkId, int> SequoiaChunkPurgatory_;
+
+    // Chunks with detailed logging enabled, mapped to the (deterministic)
+    // mutation timestamp at which logging was enabled.
+    THashMap<TChunkId, TInstant> VerboselyLoggedChunks_;
+
     // Transient.
     bool ChunksBeingPurged_ = false;
     bool IsFirstSequoiaReplicaRemovalIteration_ = true;
@@ -2856,32 +3002,28 @@ private:
             if (locationIndex != InvalidChunkLocationIndex) {
                 locationByIndex = dataNodeTracker->FindChunkLocationByIndex(locationIndex);
             } else {
-                YT_LOG_ALERT(
-                    "Chunk confirmation request does not have location index (ChunkId: %v, NodeId: %v, NodeAddress: %v, LocationUuid: %v)",
-                    chunkId,
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    locationUuid);
+                YT_TLOG_ALERT("Chunk confirmation request does not have location index")
+                    .With("ChunkId", chunkId)
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationUuid", locationUuid);
             }
         }
         // Fallback: will find location via uuid if location by index was not found or if flag to use location indices is disabled.
         if (!shouldUseLocationIndicies || !locationByIndex.has_value()) {
             if (locationUuid == InvalidChunkLocationUuid || locationUuid == EmptyChunkLocationUuid) {
-                YT_LOG_ALERT(
-                    "Chunk confirmation request does not have location UUID (ChunkId: %v, NodeId: %v, NodeAddress: %v)",
-                    chunkId,
-                    node->GetId(),
-                    node->GetDefaultAddress());
+                YT_TLOG_ALERT("Chunk confirmation request does not have location UUID")
+                    .With("ChunkId", chunkId)
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress());
             } else {
                 locationByUuid = dataNodeTracker->FindChunkLocationByUuid(locationUuid);
                 if (IsObjectAlive(locationByUuid.value())) {
-                    YT_LOG_ALERT_IF(shouldUseLocationIndicies,
-                        "Failed to find location via index, but succeeded to find via UUID "
-                        "(LocationIndex: %v, LocationUuid: %v, NodeId: %v, NodeAddress: %v)",
-                        replica.GetChunkLocationIndex(),
-                        locationUuid,
-                        node->GetId(),
-                        node->GetDefaultAddress());
+                    YT_TLOG_ALERT_IF(shouldUseLocationIndicies, "Failed to find location via index, but succeeded to find via UUID")
+                        .With("LocationIndex", replica.GetChunkLocationIndex())
+                        .With("LocationUuid", locationUuid)
+                        .With("NodeId", node->GetId())
+                        .With("NodeAddress", node->GetDefaultAddress());
                 }
             }
         }
@@ -2895,25 +3037,24 @@ private:
             }
 
             if (locationIndex != InvalidChunkLocationIndex && locationUuid != InvalidChunkLocationUuid && locationUuid != EmptyChunkLocationUuid && locationByIndex.value() != locationByUuid.value()) {
-                YT_LOG_ALERT("UUID and index for the same location points to different locations "
-                    "(ChunkId: %v, NodeId: %v, NodeAddress: %v, LocationByIndexId: %v, LocationIndex: %v, LocationByUuidId: %v, LocationUuid: %v)",
-                    chunkId,
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    locationByIndex.value() ? locationByIndex.value()->GetId() : NullObjectId,
-                    locationIndex,
-                    locationByUuid.value() ? locationByUuid.value()->GetId() : NullObjectId,
-                    locationUuid);
+                YT_TLOG_ALERT("UUID and index for the same location points to different locations")
+                    .With("ChunkId", chunkId)
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationByIndexId", locationByIndex.value() ? locationByIndex.value()->GetId() : NullObjectId)
+                    .With("LocationIndex", locationIndex)
+                    .With("LocationByUuidId", locationByUuid.value() ? locationByUuid.value()->GetId() : NullObjectId)
+                    .With("LocationUuid", locationUuid);
 
                 if (failOnLocationByIndexAndUuidMismatch) {
                     THROW_ERROR_EXCEPTION("UUID and index for the same location points to different locations")
-                        << TErrorAttribute("chunk_id", chunkId)
-                        << TErrorAttribute("node_id", node->GetId())
-                        << TErrorAttribute("node_address", node->GetDefaultAddress())
-                        << TErrorAttribute("location_index", locationIndex)
-                        << TErrorAttribute("location_uuid", locationUuid)
-                        << TErrorAttribute("location_by_index_id", locationByIndex.value() ? locationByIndex.value()->GetId() : NullObjectId)
-                        << TErrorAttribute("location_by_uuid_id", locationByUuid.value() ? locationByUuid.value()->GetId() : NullObjectId);
+                        .With("chunk_id", chunkId)
+                        .With("node_id", node->GetId())
+                        .With("node_address", node->GetDefaultAddress())
+                        .With("location_index", locationIndex)
+                        .With("location_uuid", locationUuid)
+                        .With("location_by_index_id", locationByIndex.value() ? locationByIndex.value()->GetId() : NullObjectId)
+                        .With("location_by_uuid_id", locationByUuid.value() ? locationByUuid.value()->GetId() : NullObjectId);
                 } else {
                     // NB: If locations mismatch and we cannot throw, better to return nullptr.
                     return nullptr;
@@ -2932,27 +3073,23 @@ private:
 
         if (IsObjectAlive(location)) {
             if (location->GetNode() == nullptr) {
-                YT_LOG_ALERT(
-                    "Chunk location without a node encountered "
-                    "(LocationIndex: %v, LocationUuid: %v, NodeId: %v, NodeAddress: %v)",
-                    locationIndex,
-                    locationUuid,
-                    node->GetId(),
-                    node->GetDefaultAddress());
+                YT_TLOG_ALERT("Chunk location without a node encountered")
+                    .With("LocationIndex", locationIndex)
+                    .With("LocationUuid", locationUuid)
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress());
                 return nullptr;
             }
 
             return location;
         }
 
-        YT_LOG_DEBUG(
-            "Chunk confirmation request has invalid location index or UUID "
-            "(ChunkId: %v, NodeId: %v, NodeAddress: %v, LocationIndex: %v, LocationUuid: %v)",
-            chunkId,
-            node->GetId(),
-            node->GetDefaultAddress(),
-            locationIndex,
-            locationUuid);
+        YT_TLOG_DEBUG("Chunk confirmation request has invalid location index or UUID")
+            .With("ChunkId", chunkId)
+            .With("NodeId", node->GetId())
+            .With("NodeAddress", node->GetDefaultAddress())
+            .With("LocationIndex", locationIndex)
+            .With("LocationUuid", locationUuid);
 
         return nullptr;
     }
@@ -2990,6 +3127,9 @@ private:
                 .Item("endorsement_count").Value(EndorsementCount_)
                 .Item("chunk_replicator_enabled").Value(ChunkReplicator_->IsReplicatorEnabled())
                 .Item("sequoia_chunk_refresher_status").Value(ChunkReplicator_->GetSequoiaChunkRefresher()->GetStatus())
+                .Item("verbosely_logged_chunks").DoListFor(VerboselyLoggedChunks_, [&] (auto fluent, const auto& pair) {
+                    fluent.Item().Value(pair.first);
+                })
             .EndMap();
     }
 
@@ -3058,18 +3198,18 @@ private:
             auto isRemoteCopyResult = transaction && transaction->FindAttribute("operation_id");
 
             auto doAlert = [&] {
-                YT_LOG_ALERT("Encountered hunk chunk in unexpected state upon updating chunk weight statistics histogram "
-                    "(Add: %v, ChunkId: %v, IsDictionary: %v, TransactionId: %v, IsRemoteCopyResult: %v, "
-                    "DataWeight: %v, UncompressedDataSize: %v, CompressedDataSize: %v, RefCount: %v)",
-                    add,
-                    chunk->GetId(),
-                    isCompressionDictionary,
-                    (transaction ? transaction->GetId() : NullTransactionId),
-                    isRemoteCopyResult,
-                    chunk->GetDataWeight(),
-                    chunk->GetUncompressedDataSize(),
-                    chunk->GetCompressedDataSize(),
-                    chunk->GetObjectRefCounter());
+                YT_TLOG_ALERT_UNLESS(
+                    FixHunkChunkWeightStatisticsHistogram_ && Bootstrap_->GetHydraFacade()->GetHydraManager()->IsRecovery(),
+                    "Encountered hunk chunk in unexpected state upon updating chunk weight statistics histogram")
+                    .With("Add", add)
+                    .With("ChunkId", chunk->GetId())
+                    .With("IsDictionary", isCompressionDictionary)
+                    .With("TransactionId", (transaction ? transaction->GetId() : NullTransactionId))
+                    .With("IsRemoteCopyResult", isRemoteCopyResult)
+                    .With("DataWeight", chunk->GetDataWeight())
+                    .With("UncompressedDataSize", chunk->GetUncompressedDataSize())
+                    .With("CompressedDataSize", chunk->GetCompressedDataSize())
+                    .With("RefCount", chunk->GetObjectRefCounter());
             };
 
             // Drop after resolving YT-28522.
@@ -3272,27 +3412,27 @@ private:
 
             // TODO(aleksandra-zh): maybe all of this is normal for some reason and we should just dispose it, idk
             if (!location->Replicas().empty()) {
-                YT_LOG_ALERT("Cleared location still has replicas (NodeId: %v, NodeAddress: %v, LocationMediumIndex: %v, ReplicasCount: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    location->GetEffectiveMediumIndex(),
-                    location->Replicas().size());
+                YT_TLOG_ALERT("Cleared location still has replicas")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationMediumIndex", location->GetEffectiveMediumIndex())
+                    .With("ReplicasCount", location->Replicas().size());
                 DisposeLocation(location);
             }
             if (!location->UnapprovedReplicas().empty()) {
-                YT_LOG_ALERT("Cleared location still has unapproved replicas (NodeId: %v, NodeAddress: %v, LocationMediumIndex: %v, UnapprovedReplicasCount: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    location->GetEffectiveMediumIndex(),
-                    location->UnapprovedReplicas().size());
+                YT_TLOG_ALERT("Cleared location still has unapproved replicas")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationMediumIndex", location->GetEffectiveMediumIndex())
+                    .With("UnapprovedReplicasCount", location->UnapprovedReplicas().size());
                 DisposeLocation(location);
             }
             if (auto count = location->GetDestroyedReplicasCount()) {
-                YT_LOG_ALERT("Cleared location still has destroyed replicas (NodeId: %v, NodeAddress: %v, LocationMediumIndex: %v, DestroyedReplicasCount: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    location->GetEffectiveMediumIndex(),
-                    count);
+                YT_TLOG_ALERT("Cleared location still has destroyed replicas")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationMediumIndex", location->GetEffectiveMediumIndex())
+                    .With("DestroyedReplicasCount", count);
                 DisposeLocation(location);
             }
         }
@@ -3325,10 +3465,10 @@ private:
 
             auto chunkId = chunk->GetId();
             if (approved && ShouldStoreChunkInSequoia(chunkId)) {
-                YT_LOG_ALERT("Removing Sequoia replica in a non-Sequoia way (ChunkId: %v, LocationUuid: %v, LocationIndex: %v)",
-                    chunkId,
-                    location->GetUuid(),
-                    location->GetIndex());
+                YT_TLOG_ALERT("Removing Sequoia replica in a non-Sequoia way")
+                    .With("ChunkId", chunkId)
+                    .With("LocationUuid", location->GetUuid())
+                    .With("LocationIndex", location->GetIndex());
             }
 
             if (chunk->IsBlob()) {
@@ -3340,12 +3480,10 @@ private:
             for (auto replica : destroyedReplicasSet) {
                 auto chunkId = replica.Id;
                 if (ShouldStoreChunkInSequoia(chunkId)) {
-                    YT_LOG_INFO(
-                        "Removing destroyed Sequoia replica in a non-Sequoia way "
-                        "(ChunkId: %v, LocationUuid: %v, LocationIndex: %v)",
-                        chunkId,
-                        location->GetUuid(),
-                        location->GetIndex());
+                    YT_TLOG_INFO("Removing destroyed Sequoia replica in a non-Sequoia way")
+                        .With("ChunkId", chunkId)
+                        .With("LocationUuid", location->GetUuid())
+                        .With("LocationIndex", location->GetIndex());
                 }
             }
         }
@@ -3613,12 +3751,11 @@ private:
         for (const auto& location : node->ChunkLocations()) {
             // The node may turn online at this point, so all locations should have been checked before.
             if (location->GetState() != EChunkLocationState::Online) {
-                YT_LOG_ALERT(
-                    "Data node has location with non online state (NodeId: %v, NodeAddress: %v, LocationId: %v, LocationState: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    location->GetId(),
-                    location->GetState());
+                YT_TLOG_ALERT("Data node has location with non online state")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationId", location->GetId())
+                    .With("LocationState", location->GetState());
             }
         }
 
@@ -3702,12 +3839,11 @@ private:
         ++EndorsementsAdded_;
         ++EndorsementCount_;
 
-        YT_LOG_TRACE(
-            "Chunk replica endorsement added (ChunkId: %v, NodeAddress: %v, LocationUuid: %v, LocationIndex: %v)",
-            chunk->GetId(),
-            locationWithMaxId->GetNode()->GetDefaultAddress(),
-            locationWithMaxId->GetUuid(),
-            locationWithMaxId->GetIndex());
+        YT_TLOG_TRACE("Chunk replica endorsement added")
+            .With("ChunkId", chunk->GetId())
+            .With("NodeAddress", locationWithMaxId->GetNode()->GetDefaultAddress())
+            .With("LocationUuid", locationWithMaxId->GetUuid())
+            .With("LocationIndex", locationWithMaxId->GetIndex());
     }
 
     void RemoveEndorsement(TChunk* chunk, TChunkLocation* location)
@@ -3728,6 +3864,11 @@ private:
 
     void DoValidatePrepareModifyReplicas(const TReqModifyReplicas& request)
     {
+        const auto& sequoiaReplicasConfig = GetDynamicConfig()->SequoiaChunkReplicas;
+        if (!sequoiaReplicasConfig->Enable) {
+            YT_TLOG_ALERT_AND_THROW("Sequoia replicas modification is called while Sequoia chunk replicas are disabled");
+        }
+
         auto nodeId = FromProto<TNodeId>(request.node_id());
 
         const auto& nodeTracker = Bootstrap_->GetNodeTracker();
@@ -3735,6 +3876,17 @@ private:
 
         if (!request.caused_by_node_disposal()) {
             node->ValidateRegistered();
+        }
+
+        if (request.is_incremental_heartbeat() || request.caused_by_validation()) {
+            if (!node->ReportedDataNodeHeartbeat()) {
+                THROW_ERROR_EXCEPTION(
+                    NNodeTrackerClient::EErrorCode::InvalidState,
+                    "Cannot process an incremental data node heartbeat or validation heartbeat until full data node heartbeat is sent "
+                    "(IsIncremental: %v, IsValidation: %v)",
+                    request.is_incremental_heartbeat(),
+                    request.caused_by_validation());
+            }
         }
     }
 
@@ -3797,16 +3949,14 @@ private:
         }
 
         auto promise = std::exchange(BatchConfirmTransactionCommitPromise_, NewPromise<void>());
-        YT_LOG_ALERT_IF(
-            promise.IsSet(),
-            "Chunk confirmation promise is already set (Result: %v)",
-            promise.TryGet());
-        auto requests = std::exchange(WaitingConfirmRequests_, std::vector<TReqConfirmChunk>());
+        YT_TLOG_ALERT_IF(promise.IsSet(), "Chunk confirmation promise is already set")
+            .With("Result", promise.TryGet());
+        auto requests = std::exchange(WaitingConfirmRequests_, std::vector<std::pair<TReqConfirmChunk, TGuid>>());
 
         const auto& nodeTracker = Bootstrap_->GetNodeTracker();
         // COMPAT(cherepashka): remove this after 25.4.
         THashMap<TChunkId, std::vector<TChunkReplicaWithLocationIndexAndState>> sequoiaChunkReplicas;
-        for (const auto& request : requests) {
+        for (const auto& [request, id] : requests) {
             auto chunkId = FromProto<TChunkId>(request.chunk_id());
 
             for (const auto& protoReplica : request.replicas()) {
@@ -3815,12 +3965,10 @@ private:
                 auto locationIndex = replica.GetChunkLocationIndex();
                 auto useLocationIndexesInSequoiaChunkConfirmation = GetDynamicConfig()->DataNodeTracker->UseLocationIndexesInSequoiaChunkConfirmation;
                 if (!useLocationIndexesInSequoiaChunkConfirmation || locationIndex == InvalidChunkLocationIndex) {
-                    YT_LOG_ALERT_IF(useLocationIndexesInSequoiaChunkConfirmation,
-                        "Sequoia chunk replica confirmation is missing location index "
-                        "(ChunkId: %v, LocationUuid: %v, NodeId: %v)",
-                        chunkId,
-                        replica.GetChunkLocationUuid(),
-                        nodeId);
+                    YT_TLOG_ALERT_IF(useLocationIndexesInSequoiaChunkConfirmation, "Sequoia chunk replica confirmation is missing location index")
+                        .With("ChunkId", chunkId)
+                        .With("LocationUuid", replica.GetChunkLocationUuid())
+                        .With("NodeId", nodeId);
                     auto* node = nodeTracker->FindNode(nodeId);
                     if (!IsObjectAlive(node)) {
                         continue;
@@ -3859,11 +4007,11 @@ private:
                 // sequoiaChunkReplicas might actually contain replicas from separate confirm requests,
                 // I hope they are the same and I am okay with this for now.
                 SortUniqueBy(requests, [] (const auto& request) {
-                    return FromProto<TChunkId>(request.chunk_id());
+                    return FromProto<TChunkId>(request.first.chunk_id());
                 });
 
                 NProto::TReqConfirmMultipleChunks confirmChunksRequest;
-                for (const auto& request : requests) {
+                for (const auto& [request, id] : requests) {
                     auto* chunkConfirmation = confirmChunksRequest.add_chunk_confirmations();
                     *chunkConfirmation->mutable_chunk_id() = request.chunk_id();
 
@@ -3875,6 +4023,7 @@ private:
                     *chunkConfirmation->mutable_chunk_meta() = std::move(request.chunk_meta());
                     *chunkConfirmation->mutable_chunk_info() = std::move(request.chunk_info());
                     *chunkConfirmation->mutable_schema_id() = request.schema_id();
+                    ToProto(chunkConfirmation->mutable_request_id(), id);
 
                     auto it = sequoiaChunkReplicas.find(chunkId);
                     const auto& replicas = it == sequoiaChunkReplicas.end() ? std::vector<TChunkReplicaWithLocationIndexAndState>() : it->second;
@@ -3913,18 +4062,18 @@ private:
         promise.SetFrom(std::move(future));
     }
 
-    TFuture<void> ConfirmSequoiaChunkBatched(TReqConfirmChunk request) override
+    TFuture<void> ConfirmSequoiaChunkBatched(TReqConfirmChunk request, NRpc::TRequestId requestId) override
     {
         const auto& config = GetDynamicConfig()->SequoiaChunkReplicas;
         if (std::ssize(WaitingConfirmRequests_) > config->ConfirmBatchSize) {
-            YT_LOG_DEBUG("Flushing Sequoia confirms due to batch size limit (ConfirmRequestCount: %v)",
-                std::ssize(WaitingConfirmRequests_));
+            YT_TLOG_DEBUG("Flushing Sequoia confirms due to batch size limit")
+                .With("ConfirmRequestCount", std::ssize(WaitingConfirmRequests_));
             OnSequoiaReplicaConfirm();
         }
 
-        WaitingConfirmRequests_.push_back(std::move(request));
+        WaitingConfirmRequests_.emplace_back(std::move(request), requestId);
         if (!BatchConfirmTransactionCommitPromise_) {
-            YT_LOG_ALERT("Confirm transaction promise was not created");
+            YT_TLOG_ALERT("Confirm transaction promise was not created");
             BatchConfirmTransactionCommitPromise_ = NewPromise<void>();
         }
 
@@ -3951,12 +4100,12 @@ private:
             auto locationIndex = replica.GetChunkLocationIndex();
             auto useLocationIndexesInSequoiaChunkConfirmation = GetDynamicConfig()->DataNodeTracker->UseLocationIndexesInSequoiaChunkConfirmation;
             if (!useLocationIndexesInSequoiaChunkConfirmation || locationIndex == InvalidChunkLocationIndex) {
-                YT_LOG_ALERT_IF(useLocationIndexesInSequoiaChunkConfirmation,
-                    "Received Sequoia chunk replica confirmation request without location index "
-                    "(ChunkId: %v, LocationUuid: %v, NodeId: %v)",
-                    chunkId,
-                    replica.GetChunkLocationUuid(),
-                    nodeId);
+                YT_TLOG_ALERT_IF(
+                    useLocationIndexesInSequoiaChunkConfirmation,
+                    "Received Sequoia chunk replica confirmation request without location index")
+                    .With("ChunkId", chunkId)
+                    .With("LocationUuid", replica.GetChunkLocationUuid())
+                    .With("NodeId", nodeId);
                 auto* node = nodeTracker->FindNode(nodeId);
                 if (!IsObjectAlive(node)) {
                     continue;
@@ -4017,13 +4166,23 @@ private:
                     .CoordinatorPrepareMode = ETransactionCoordinatorPrepareMode::Late,
                 };
 
-                YT_LOG_DEBUG("Confirming Sequoia chunk (ChunkId: %v, SequoiaReplicas: %v)",
-                    chunkId,
-                    MakeFormattableView(sequoiaReplicas, TChunkReplicaWithLocationIndexAndStateFormatter()));
+                YT_TLOG_DEBUG("Confirming Sequoia chunk")
+                    .With("ChunkId", chunkId)
+                    .With("SequoiaReplicas", MakeFormattableView(sequoiaReplicas, TChunkReplicaWithLocationIndexAndStateFormatter()));
 
                 auto result = WaitFor(transaction->Commit(std::move(commitOptions)));
                 ThrowOnSequoiaReplicasError(result, retriableErrorCodes);
             }).AsyncVia(NRpc::TDispatcher::Get()->GetHeavyInvoker()));
+    }
+
+    TError ExtractConfirmSequoiaChunkError(NRpc::TRequestId requestId) override
+    {
+        if (auto errorIt = ChunkConfirmErrors_.find(requestId); errorIt != ChunkConfirmErrors_.end()) {
+            auto chunkConfirmError = errorIt->second;
+            ChunkConfirmErrors_.erase(errorIt);
+            return chunkConfirmError;
+        }
+        return {};
     }
 
     void RemoveOutdatedRecentlyConfirmedChunks()
@@ -4031,8 +4190,7 @@ private:
         const auto& config = GetDynamicConfig();
         auto oldestConfirmTime = GetCpuInstant() - DurationToCpuDuration(config->ReplicaApproveTimeout);
 
-        while (!RecentlyConfirmedChunksByConfirmTime_.empty())
-        {
+        while (!RecentlyConfirmedChunksByConfirmTime_.empty()) {
             auto [chunkId, confirmTime] = RecentlyConfirmedChunksByConfirmTime_.front();
             if (confirmTime >= oldestConfirmTime) {
                 break;
@@ -4061,7 +4219,7 @@ private:
         }
     }
 
-    void FlushWaitingSequoiaIncrementalHeartbeatRequests()
+    void FlushWaitingSequoiaIncrementalHeartbeatRequests() override
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
@@ -4070,10 +4228,8 @@ private:
         }
 
         auto promise = std::exchange(BatchSequoiaIncrementalHeartbeatPromise_, NewPromise<void>());
-        YT_LOG_ALERT_IF(
-            promise.IsSet(),
-            "Incremental heartbeat transaction promise is already set (Result: %v)",
-            promise.TryGet());
+        YT_TLOG_ALERT_IF(promise.IsSet(), "Incremental heartbeat transaction promise is already set")
+            .With("Result", promise.TryGet());
         auto requests = std::exchange(
             WaitingSequoiaIncrementalHeartbeatRequests_,
             THashMap<TNodeId, std::unique_ptr<TReqModifyReplicas>>());
@@ -4088,8 +4244,8 @@ private:
 
             for (auto& [nodeId, request] : requests) {
                 replicasModifier->AddRequest(std::move(request));
-                YT_LOG_DEBUG("Starting execution of Sequoia replicas modifier for incremental heartbeat (NodeId: %v)",
-                    nodeId);
+                YT_TLOG_DEBUG("Starting execution of Sequoia replicas modifier for incremental heartbeat")
+                    .With("NodeId", nodeId);
             }
 
             promise.SetFrom(replicasModifier->ModifyReplicas());
@@ -4107,14 +4263,18 @@ private:
 
         auto nodeId = FromProto<TNodeId>(request->node_id());
 
+        auto isBatchFull = [&] {
+            const auto& config = GetDynamicConfig()->SequoiaChunkReplicas;
+            return ssize(WaitingSequoiaIncrementalHeartbeatRequests_) >= config->MaxRequestsInIncrementalHeartbeatBatch ||
+                ReplicasInWaitingSequoiaIncrementalHeartbeatRequests_ >= config->MaxReplicasInIncrementalHeartbeatBatch;
+        };
+
         auto tryAddRequestToCurrentBatch = [&] () mutable {
             if (WaitingSequoiaIncrementalHeartbeatRequests_.contains(nodeId)) {
                 return false;
             }
 
-            const auto& config = GetDynamicConfig()->SequoiaChunkReplicas;
-            if (ssize(WaitingSequoiaIncrementalHeartbeatRequests_) >= config->MaxRequestsInIncrementalHeartbeatBatch ||
-                ReplicasInWaitingSequoiaIncrementalHeartbeatRequests_ >= config->MaxReplicasInIncrementalHeartbeatBatch)
+            if (isBatchFull())
             {
                 return false;
             }
@@ -4122,7 +4282,7 @@ private:
             ReplicasInWaitingSequoiaIncrementalHeartbeatRequests_ += request->added_chunks_size() + request->removed_chunks_size();
             EmplaceOrCrash(WaitingSequoiaIncrementalHeartbeatRequests_, nodeId, std::move(request));
             if (!BatchSequoiaIncrementalHeartbeatPromise_) {
-                YT_LOG_ALERT("Incremental heartbeat transaction promise was not created");
+                YT_TLOG_ALERT("Incremental heartbeat transaction promise was not created");
                 BatchSequoiaIncrementalHeartbeatPromise_ = NewPromise<void>();
             }
 
@@ -4130,9 +4290,13 @@ private:
         };
 
         int retryCount = 0;
-        while (!tryAddRequestToCurrentBatch() && retryCount < MaxTryAddRequestToCurrentBatchRetries) {
+        while (IsActiveLeader() && !tryAddRequestToCurrentBatch() && retryCount < MaxTryAddRequestToCurrentBatchRetries) {
             FlushWaitingSequoiaIncrementalHeartbeatRequests();
             retryCount++;
+        }
+
+        if (!IsActiveLeader()) {
+            THROW_ERROR_EXCEPTION(NRpc::EErrorCode::Unavailable, "Peer is not leading");
         }
 
         // There should not be more than one retry.
@@ -4142,16 +4306,24 @@ private:
                 nodeId);
         }
 
-        YT_LOG_DEBUG("Added request to waiting Sequoia incremental heartbeat requests (NodeId: %v)", nodeId);
+        YT_TLOG_DEBUG("Added request to waiting Sequoia incremental heartbeat requests")
+            .With("NodeId", nodeId);
 
-        return BatchSequoiaIncrementalHeartbeatPromise_
+        auto result = BatchSequoiaIncrementalHeartbeatPromise_
             .ToFuture()
             .ToUncancelable();
+
+        if (isBatchFull()) {
+            FlushWaitingSequoiaIncrementalHeartbeatRequests();
+        }
+
+        return result;
     }
 
     TFuture<void> ModifySequoiaReplicas(
         ESequoiaTransactionType transactionType,
-        std::unique_ptr<TReqModifyReplicas> request) override
+        std::unique_ptr<TReqModifyReplicas> request,
+        bool allowBatching) override
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
@@ -4159,23 +4331,23 @@ private:
 
         auto nodeId = FromProto<TNodeId>(request->node_id());
 
-        YT_LOG_DEBUG("Modifying Sequoia replicas (NodeId: %v, AddedChunkCount: %v, RemovedChunkCount: %v, TransactionType: %v)",
-            nodeId,
-            request->added_chunks_size(),
-            request->removed_chunks_size(),
-            transactionType);
+        YT_TLOG_DEBUG("Modifying Sequoia replicas")
+            .With("NodeId", nodeId)
+            .With("AddedChunkCount", request->added_chunks_size())
+            .With("RemovedChunkCount", request->removed_chunks_size())
+            .With("TransactionType", transactionType);
 
         const auto& config = GetDynamicConfig();
-        if (transactionType == ESequoiaTransactionType::IncrementalHeartbeat &&
+        if (allowBatching &&
+            transactionType == ESequoiaTransactionType::IncrementalHeartbeat &&
             config->SequoiaChunkReplicas->BatchIncrementalHeartbeat)
         {
             try {
                 return ModifySequoiaReplicasForIncrementalHeartbeatBatched(std::move(request));
             } catch (const std::exception& ex) {
-                YT_LOG_ALERT(
-                    ex,
-                    "Failed to modify Sequoia replicas for incremental heartbeat batched, will fall back to single request processing (NodeId: %v)",
-                    nodeId);
+                YT_TLOG_ALERT("Failed to modify Sequoia replicas for incremental heartbeat batched, will fall back to single request processing")
+                    .With("NodeId", nodeId)
+                    .With(ex);
             }
         }
 
@@ -4195,9 +4367,9 @@ private:
     {
         YT_VERIFY(request->has_location_index());
 
-        YT_LOG_TRACE("Replacing Sequoia location replicas (LocationIndex: %v, TransactionType: %v)",
-            request->location_index(),
-            transactionType);
+        YT_TLOG_TRACE("Replacing Sequoia location replicas")
+            .With("LocationIndex", request->location_index())
+            .With("TransactionType", transactionType);
 
         auto replicasModifier = CreateSequoiaReplicasModifier(
             SequoiaReplicaModificationProfiles_[transactionType],
@@ -4207,6 +4379,41 @@ private:
         replicasModifier->AddRequest(std::move(request));
 
         return replicasModifier->ModifyReplicas();
+    }
+
+    TAsyncSemaphoreGuard AcquireModifySequoiaReplicasSemaphoreGuard(
+        ESequoiaTransactionType transactionType,
+        int replicaCount) override
+    {
+        YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
+
+        const auto& sequoiaReplicasConfig = GetDynamicConfig()->SequoiaChunkReplicas;
+        if (!sequoiaReplicasConfig->ThrottleSequoiaReplicaModifications) {
+            return {};
+        }
+
+        if (transactionType == ESequoiaTransactionType::IncrementalHeartbeat &&
+            !sequoiaReplicasConfig->ThrottleIncrementalHeartbeatSequoiaReplicaModifications)
+        {
+            return {};
+        }
+
+        auto& profile = SequoiaReplicaModificationProfiles_[transactionType];
+        profile.SemaphoreWaiting.Update(++profile.SemaphoreWaitingCount);
+        profile.SemaphoreWaitingReplicaCount += replicaCount;
+        profile.SemaphoreWaitingReplicas.Update(profile.SemaphoreWaitingReplicaCount);
+
+        auto semaphoreFuture = sequoiaReplicasConfig->EnablePerReplicaSequoiaModificationsThrottling
+            ? ModifySequoiaReplicasPerReplicaSemaphore_->AsyncAcquire(replicaCount)
+            : ModifySequoiaReplicasSemaphore_->AsyncAcquire(1);
+
+        auto guardOrError = WaitFor(semaphoreFuture.AsUnique());
+
+        profile.SemaphoreWaiting.Update(--profile.SemaphoreWaitingCount);
+        profile.SemaphoreWaitingReplicaCount -= replicaCount;
+        profile.SemaphoreWaitingReplicas.Update(profile.SemaphoreWaitingReplicaCount);
+
+        return std::move(guardOrError).ValueOrThrow();
     }
 
     void HandleMediumChange(TChunkId chunkId)
@@ -4272,28 +4479,24 @@ private:
                 GetAddedChunkReplicaState(chunkIdWithIndex.Id, chunkInfo));
 
             if (chunkInfo.caused_by_medium_change()) {
-                YT_LOG_ALERT(
-                    "Chunk caused by medium change is present in full heartbeat "
-                    "(NodeId: %v, NodeAddress: %v, ChunkId: %v, ReplicaIndex: %v, Validation: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    chunkIdWithIndex.Id,
-                    chunkIdWithIndex.ReplicaIndex,
-                    validation);
+                YT_TLOG_ALERT("Chunk caused by medium change is present in full heartbeat")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("ChunkId", chunkIdWithIndex.Id)
+                    .With("ReplicaIndex", chunkIdWithIndex.ReplicaIndex)
+                    .With("Validation", validation);
                 continue;
             }
 
             if (ShouldStoreChunkInSequoia(chunkIdWithIndex.Id)) {
-                YT_LOG_ALERT_AND_THROW(
-                    "Processing Sequoia replica in non-Sequoia way "
-                    "(NodeId: %v, NodeAddress: %v, LocationUuid: %v, LocationIndex: %v, ChunkId: %v, ReplicaIndex: %v, Validation: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    location->GetUuid(),
-                    location->GetIndex(),
-                    chunkIdWithIndex.Id,
-                    chunkIdWithIndex.ReplicaIndex,
-                    validation);
+                YT_TLOG_ALERT_AND_THROW("Processing Sequoia replica in non-Sequoia way")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationUuid", location->GetUuid())
+                    .With("LocationIndex", location->GetIndex())
+                    .With("ChunkId", chunkIdWithIndex.Id)
+                    .With("ReplicaIndex", chunkIdWithIndex.ReplicaIndex)
+                    .With("Validation", validation);
             }
 
             if (auto it = journalReplicaStates.find(chunkIdWithIndex); it != journalReplicaStates.end()) {
@@ -4357,13 +4560,12 @@ private:
                     // If there are some changed Sequoia replicas, they should be already processed and here we should ignore them.
                     continue;
                 } else {
-                    YT_LOG_ALERT(
-                        "Removing restarted location Sequoia chunk in non-Sequoia way (NodeAddress: %v, LocationUuid: %v, LocationIndex: %v, ChunkId: %v, ReplicaIndex: %v)",
-                        node->GetDefaultAddress(),
-                        location->GetUuid(),
-                        location->GetIndex(),
-                        chunk->GetId(),
-                        replica.GetReplicaIndex());
+                    YT_TLOG_ALERT("Removing restarted location Sequoia chunk in non-Sequoia way")
+                        .With("NodeAddress", node->GetDefaultAddress())
+                        .With("LocationUuid", location->GetUuid())
+                        .With("LocationIndex", location->GetIndex())
+                        .With("ChunkId", chunk->GetId())
+                        .With("ReplicaIndex", replica.GetReplicaIndex());
                 }
             }
 
@@ -4407,10 +4609,10 @@ private:
 
         auto chunkId = chunk->GetId();
         if (approved && ShouldStoreChunkInSequoia(chunkId)) {
-            YT_LOG_ALERT("Removing Sequoia replica in a non-Sequoia way (ChunkId: %v, LocationUuid: %v, LocationIndex: %v)",
-                chunkId,
-                location->GetUuid(),
-                location->GetIndex());
+            YT_TLOG_ALERT("Removing Sequoia replica in a non-Sequoia way")
+                .With("ChunkId", chunkId)
+                .With("LocationUuid", location->GetUuid())
+                .With("LocationIndex", location->GetIndex());
         }
 
         if (chunk->IsBlob()) {
@@ -4436,11 +4638,11 @@ private:
             auto locationIndex = FromProto<TChunkLocationIndex>(chunkInfo.location_index());
             auto* location = dataNodeTracker->FindChunkLocationByIndex(locationIndex);
             if (!IsObjectAlive(location)) {
-                YT_LOG_ALERT("Dead location found when adding chunk replica (NodeId: %v, NodeAddress: %v, LocationIndex: %v, ChunkId: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    locationIndex,
-                    chunkId);
+                YT_TLOG_ALERT("Dead location found when adding chunk replica")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationIndex", locationIndex)
+                    .With("ChunkId", chunkId);
                     continue;
             }
 
@@ -4474,11 +4676,11 @@ private:
             auto* location = dataNodeTracker->FindChunkLocationByIndex(locationIndex);
 
             if (!IsObjectAlive(location)) {
-                YT_LOG_ALERT("Dead location found when removing chunk replica (NodeId: %v, NodeAddress: %v, LocationIndex: %v, ChunkId: %v)",
-                    node->GetId(),
-                    node->GetDefaultAddress(),
-                    locationIndex,
-                    FromProto<TChunkId>(chunkInfo.chunk_id()));
+                YT_TLOG_ALERT("Dead location found when removing chunk replica")
+                    .With("NodeId", node->GetId())
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("LocationIndex", locationIndex)
+                    .With("ChunkId", FromProto<TChunkId>(chunkInfo.chunk_id()));
                     continue;
             }
 
@@ -4495,10 +4697,10 @@ private:
         TChunkLocation* location,
         const auto& chunks)
     {
-        YT_LOG_DEBUG("Validating non-Sequoia location replicas (NodeId: %v, NodeAddress: %v, LocationUuid: %v)",
-            node->GetId(),
-            node->GetDefaultAddress(),
-            location->GetUuid());
+        YT_TLOG_DEBUG("Validating non-Sequoia location replicas")
+            .With("NodeId", node->GetId())
+            .With("NodeAddress", node->GetDefaultAddress())
+            .With("LocationUuid", location->GetUuid());
 
         auto difference = ComputeLocationNonSequoiaReplicasDifference(
             node,
@@ -4536,21 +4738,18 @@ private:
             }
         }
 
-        YT_LOG_ALERT_AND_THROW_IF(
+        YT_TLOG_ALERT_AND_THROW_IF(
             !masterMissingReplicas.empty() || !masterRedundantReplicas.empty() || !replicasWithChangedState.empty(),
-            "Master state is inconsistent for data node location "
-            "(NodeId: %v, NodeAddress: %v, LocationUuid: %v, "
-            "MissingReplicaCount: %v, RedundantReplicaCount: %v, ChangedStateReplicaCount: %v, "
-            "MissingReplicasSample: %v, RedundantReplicasSample: %v, ChangedStateReplicasSample: %v)",
-            node->GetId(),
-            node->GetDefaultAddress(),
-            location->GetUuid(),
-            masterMissingReplicas.size(),
-            masterRedundantReplicas.size(),
-            replicasWithChangedState.size(),
-            MakeShrunkFormattableView(masterMissingReplicas, TDefaultFormatter(), /*limit*/ 10),
-            MakeShrunkFormattableView(masterRedundantReplicas, TDefaultFormatter(), /*limit*/ 10),
-            MakeShrunkFormattableView(replicasWithChangedState, TDefaultFormatter(), /*limit*/ 10));
+            "Master state is inconsistent for data node location")
+            .With("NodeId", node->GetId())
+            .With("NodeAddress", node->GetDefaultAddress())
+            .With("LocationUuid", location->GetUuid())
+            .With("MissingReplicaCount", masterMissingReplicas.size())
+            .With("RedundantReplicaCount", masterRedundantReplicas.size())
+            .With("ChangedStateReplicaCount", replicasWithChangedState.size())
+            .With("MissingReplicasSample", MakeShrunkFormattableView(masterMissingReplicas, TDefaultFormatter(), /*limit*/ 10))
+            .With("RedundantReplicasSample", MakeShrunkFormattableView(masterRedundantReplicas, TDefaultFormatter(), /*limit*/ 10))
+            .With("ChangedStateReplicasSample", MakeShrunkFormattableView(replicasWithChangedState, TDefaultFormatter(), /*limit*/ 10));
     }
 
     void UpdateChunkRemovalLockedMap(TNode* node, THeartbeatSequenceNumber heartbeatSequenceNumber)
@@ -4567,12 +4766,10 @@ private:
             awaitingChunkIds.erase(it);
 
             EraseOrCrash(lockedChunkIds, chunkId);
-            YT_LOG_DEBUG("Unlocked removing replicas for chunk"
-                " (ChunkId: %v, NodeAddress: %v, SequenceNumber: %v < %v)",
-                chunkId,
-                node->GetDefaultAddress(),
-                sequenceNumber,
-                heartbeatSequenceNumber);
+            YT_TLOG_DEBUG("Unlocked removing replicas for chunk")
+                .With("ChunkId", chunkId)
+                .With("NodeAddress", node->GetDefaultAddress())
+                .WithFormat("SequenceNumber", "%v < %v", sequenceNumber, heartbeatSequenceNumber);
 
             auto* chunk = FindChunk(chunkId);
             if (IsObjectAlive(chunk)) {
@@ -4700,12 +4897,12 @@ private:
                 node->ConsistentReplicaPlacementTokenCount()[mediumIndex] = newTokenCount;
             }
 
-            YT_LOG_DEBUG("Node CRP token count changed (NodeId: %v, Address: %v, MediumIndex: %v, OldTokenCount: %v, NewTokenCount: %v)",
-                node->GetId(),
-                node->GetDefaultAddress(),
-                mediumIndex,
-                oldTokenCount,
-                newTokenCount);
+            YT_TLOG_DEBUG("Node CRP token count changed")
+                .With("NodeId", node->GetId())
+                .With("Address", node->GetDefaultAddress())
+                .With("MediumIndex", mediumIndex)
+                .With("OldTokenCount", oldTokenCount)
+                .With("NewTokenCount", newTokenCount);
 
             onNodeTokensRedistributed(node, mediumIndex, oldTokenCount, newTokenCount);
         };
@@ -4793,8 +4990,8 @@ private:
             nodesByTotalSpace.clear();
         }
 
-        YT_LOG_DEBUG("CRP tokens redistributed (Distribution: {%v})",
-            MakeFormattableView(
+        YT_TLOG_DEBUG("CRP tokens redistributed")
+            .WithFormat("Distribution", "{%v}", MakeFormattableView(
                 ConsistentReplicaPlacementTokenDistribution_,
                 [&] (TStringBuilderBase* builder, const auto& pair) {
                     builder->AppendFormat("%v: %v", pair.first, pair.second);
@@ -4838,21 +5035,21 @@ private:
     {
         auto chunkListIds = FromProto<std::vector<TChunkListId>>(request->chunk_list_ids());
 
-        YT_LOG_DEBUG("Confirming finished chunk lists requisition traverse (ChunkListIds: %v)",
-            chunkListIds);
+        YT_TLOG_DEBUG("Confirming finished chunk lists requisition traverse")
+            .With("ChunkListIds", chunkListIds);
 
         for (auto chunkListId : chunkListIds) {
             auto* chunkList = FindChunkList(chunkListId);
             if (!IsObjectAlive(chunkList)) {
-                YT_LOG_DEBUG("Chunk list is missing during requisition traverse finish confirmation (ChunkListId: %v)",
-                    chunkListId);
+                YT_TLOG_DEBUG("Chunk list is missing during requisition traverse finish confirmation")
+                    .With("ChunkListId", chunkListId);
                 continue;
             }
 
             auto it = ChunkListsAwaitingRequisitionTraverse_.find(chunkList);
             if (it == ChunkListsAwaitingRequisitionTraverse_.end()) {
-                YT_LOG_DEBUG("Chunk list does not hold an additional strong ref during requisition traverse finish confirmation (ChunkListId: %v)",
-                    chunkListId);
+                YT_TLOG_DEBUG("Chunk list does not hold an additional strong ref during requisition traverse finish confirmation")
+                    .With("ChunkListId", chunkListId);
                 continue;
             }
 
@@ -4864,13 +5061,13 @@ private:
     {
         auto chunkListsIds = FromProto<std::vector<TChunkListId>>(request->chunk_list_ids());
 
-        YT_LOG_DEBUG("Rescheduling chunk lists requisition traversal (ChunkListIds: %v)",
-            MakeShrunkFormattableView(
-                chunkListsIds,
-                [] (TStringBuilderBase* builder, TChunkListId chunkListId) {
-                    builder->AppendFormat("%v", chunkListId);
-                },
-                /*limit*/ 10));
+        YT_TLOG_DEBUG("Rescheduling chunk lists requisition traversal")
+            .With("ChunkListIds", MakeShrunkFormattableView(
+                    chunkListsIds,
+                    [] (TStringBuilderBase* builder, TChunkListId chunkListId) {
+                        builder->AppendFormat("%v", chunkListId);
+                    },
+                    /*limit*/ 10));
 
         for (const auto& protoChunkListId : request->chunk_list_ids()) {
             auto chunkListId = FromProto<TChunkListId>(protoChunkListId);
@@ -5001,9 +5198,9 @@ private:
         for (auto& [cellTag, request] : crossCellRequestMap) {
             FillChunkRequisitionDict(&request, *requisitionRegistry);
             multicellManager->PostToMaster(request, cellTag);
-            YT_LOG_DEBUG("Requesting to update requisition of imported chunks (CellTag: %v, Count: %v)",
-                cellTag,
-                request.updates_size());
+            YT_TLOG_DEBUG("Requesting to update requisition of imported chunks")
+                .With("CellTag", cellTag)
+                .With("Count", request.updates_size());
         }
 
         for (const auto& update : updates) {
@@ -5031,9 +5228,8 @@ private:
         std::vector<TChunkId> logQueue;
         auto maybeFlushLogQueue = [&] (bool force) {
             if (force || ssize(logQueue) >= MaxChunkIdsPerLogMessage) {
-                YT_LOG_DEBUG(
-                    "Registered endorsements for chunks (ChunkIds: %v)",
-                    logQueue);
+                YT_TLOG_DEBUG("Registered endorsements for chunks")
+                    .With("ChunkIds", logQueue);
                 logQueue.clear();
             }
         };
@@ -5170,20 +5366,20 @@ private:
             importData->set_erasure_codec(ToProto(chunk->GetErasureCodec()));
         }
 
-        YT_LOG_DEBUG("Chunks exported (TransactionId: %v, ChunkCount: %v, ChunkIdToDestinationCellTag: %v)",
-            transaction->GetId(),
-            chunks.size(),
-            MakeShrunkFormattableView(
-                chunks,
-                [] (
-                    TStringBuilderBase* builder,
-                    std::pair<TChunk*, TCellTag> chunkWithCellTag)
-                {
-                    builder->AppendFormat("%v -> %v",
-                        chunkWithCellTag.first->GetId(),
-                        chunkWithCellTag.second);
-                },
-                /*limit*/ 10));
+        YT_TLOG_DEBUG("Chunks exported")
+            .With("TransactionId", transaction->GetId())
+            .With("ChunkCount", chunks.size())
+            .With("ChunkIdToDestinationCellTag", MakeShrunkFormattableView(
+                    chunks,
+                    [] (
+                        TStringBuilderBase* builder,
+                        std::pair<TChunk*, TCellTag> chunkWithCellTag)
+                    {
+                        builder->AppendFormat("%v -> %v",
+                            chunkWithCellTag.first->GetId(),
+                            chunkWithCellTag.second);
+                    },
+                    /*limit*/ 10));
     }
 
     void HydraExportChunks(const TCtxExportChunksPtr& /*context*/, TReqExportChunks* request, TRspExportChunks* response)
@@ -5286,6 +5482,12 @@ private:
                 chunk = DoCreateChunk(chunkId);
                 chunk->SetForeign();
 
+                // COMPAT(theevilbird)
+                if (GetDynamicConfig()->SetEmptyRequisitionIndexOnImport) {
+                    const auto& objectManager = Bootstrap_->GetObjectManager();
+                    chunk->SetLocalRequisitionIndex(EmptyChunkRequisitionIndex, GetChunkRequisitionRegistry(), objectManager, /*forceAggregatedRequisitionUpdate*/ true);
+                }
+
                 if (importData.has_chunk_schema_id()) {
                     auto chunkSchemaId = FromProto<TMasterTableSchemaId>(importData.chunk_schema_id());
                     auto* existingChunkSchema = tableManager->GetMasterTableSchema(chunkSchemaId);
@@ -5302,14 +5504,14 @@ private:
             transactionManager->ImportObject(transaction, chunk);
         }
 
-        YT_LOG_DEBUG("Chunks imported (TransactionId: %v, ChunkIds: %v)",
-            transaction->GetId(),
-            MakeShrunkFormattableView(
-                request,
-                [] (TStringBuilderBase* builder, const auto& importData) {
-                    builder->AppendFormat("%v", FromProto<TChunkId>(importData.id()));
-                },
-                /*limit*/ 10));
+        YT_TLOG_DEBUG("Chunks imported")
+            .With("TransactionId", transaction->GetId())
+            .With("ChunkIds", MakeShrunkFormattableView(
+                    request,
+                    [] (TStringBuilderBase* builder, const auto& importData) {
+                        builder->AppendFormat("%v", FromProto<TChunkId>(importData.id()));
+                    },
+                    /*limit*/ 10));
     }
 
     void HydraImportChunks(const TCtxImportChunksPtr& /*context*/, TReqImportChunks* request, TRspImportChunks* /*response*/)
@@ -5342,8 +5544,8 @@ private:
 
             transactionManager->UnstageObject(chunk->GetStagingTransaction(), chunk, false /*recursive*/);
 
-            YT_LOG_DEBUG("Unstaged expired chunk (ChunkId: %v)",
-                chunkId);
+            YT_TLOG_DEBUG("Unstaged expired chunk")
+                .With("ChunkId", chunkId);
         }
     }
 
@@ -5363,7 +5565,8 @@ private:
                 try {
                     (this->*handler)(&subrequest, subresponse);
                 } catch (const std::exception& ex) {
-                    YT_LOG_DEBUG(TError(errorMessage) << ex);
+                    YT_TLOG_DEBUG("Failed to execute subrequest")
+                        .With(TError(errorMessage).With(ex));
                     if (subresponse) {
                         ToProto(subresponse->mutable_error(), TError(ex));
                     }
@@ -5457,8 +5660,8 @@ private:
         chunk->SetSealable(true);
         ScheduleChunkSeal(chunk);
 
-        YT_LOG_DEBUG("Chunk marked as sealable and scheduled for sealing (ChunkId: %v)",
-            chunk->GetId());
+        YT_TLOG_DEBUG("Chunk marked as sealable and scheduled for sealing")
+            .With("ChunkId", chunk->GetId());
     }
 
     void HydraCreateChunkLists(
@@ -5483,6 +5686,32 @@ private:
         TRspAttachChunkTrees* response)
     {
         ExecuteAttachChunkTreesSubrequest(request, response);
+    }
+
+    void HydraDetachChunkTrees(
+        const TCtxDetachChunkTreesPtr& /*context*/,
+        TReqDetachChunkTrees* request,
+        TRspDetachChunkTrees* /*response*/)
+    {
+        YT_VERIFY(HasMutationContext());
+
+        auto parentId = FromProto<TChunkListId>(request->parent_id());
+        auto* parent = GetChunkListOrThrow(parentId);
+
+        auto policy = DeriveChunkTreeDetachPolicy(parent);
+
+        std::vector<TChunkTreeRawPtr> children;
+        children.reserve(request->child_ids_size());
+        for (const auto& protoChildId : request->child_ids()) {
+            children.push_back(GetChunkTreeOrThrow(FromProto<TChunkTreeId>(protoChildId)));
+        }
+
+        DetachFromChunkList(parent, children, policy);
+
+        YT_TLOG_DEBUG("Chunk trees detached")
+            .With("ParentId", parentId)
+            .With("ChildIds", MakeShrunkFormattableView(children, TObjectIdFormatter(), 500))
+            .With("Policy", policy);
     }
 
     void ExecuteCreateChunkSubrequest(
@@ -5610,12 +5839,13 @@ private:
             subrequest->chunk_meta(),
             schemaId,
             /*validateChunkMeta*/ true);
+        validationResult.ThrowOnError();
         ConfirmChunk(
             chunk,
             replicas,
             subrequest->chunk_info(),
             subrequest->chunk_meta(),
-            validationResult);
+            validationResult.Value());
 
         if (subresponse) {
             if (subrequest->request_statistics()) {
@@ -5658,10 +5888,16 @@ private:
 
         std::vector<TChunkListId> chunkListIds;
         chunkListIds.reserve(count);
-        for (int index = 0; index < count; ++index) {
-            auto kind = subrequest->is_hunk_chunk_list()
+        auto kind = [&] {
+            if (subrequest->has_kind()) {
+                return FromProto<EChunkListKind>(subrequest->kind());
+            }
+            // COMPAT(babenko): the bool flag predates the explicit "kind" field.
+            return subrequest->is_hunk_chunk_list()
                 ? EChunkListKind::Hunk
                 : EChunkListKind::Static;
+        }();
+        for (int index = 0; index < count; ++index) {
             auto* chunkList = DoCreateChunkList(kind);
             StageChunkList(chunkList, transaction, nullptr);
             transactionManager->StageObject(transaction, chunkList);
@@ -5669,10 +5905,9 @@ private:
             chunkListIds.push_back(chunkList->GetId());
         }
 
-        YT_LOG_DEBUG(
-            "Chunk lists created (ChunkListIds: %v, TransactionId: %v)",
-            MakeShrunkFormattableView(chunkListIds, TDefaultFormatter(), 500),
-            transaction->GetId());
+        YT_TLOG_DEBUG("Chunk lists created")
+            .With("ChunkListIds", MakeShrunkFormattableView(chunkListIds, TDefaultFormatter(), 500))
+            .With("TransactionId", transaction->GetId());
     }
 
     void ExecuteUnstageChunkTreeSubrequest(
@@ -5688,9 +5923,9 @@ private:
         const auto& transactionManager = Bootstrap_->GetTransactionManager();
         transactionManager->UnstageObject(chunkTree->GetStagingTransaction(), chunkTree, recursive);
 
-        YT_LOG_DEBUG("Chunk tree unstaged (ChunkTreeId: %v, Recursive: %v)",
-            chunkTreeId,
-            recursive);
+        YT_TLOG_DEBUG("Chunk tree unstaged")
+            .With("ChunkTreeId", chunkTreeId)
+            .With("Recursive", recursive);
     }
 
     void ExecuteAttachChunkTreesSubrequest(
@@ -5727,14 +5962,14 @@ private:
 
             if (IsJournalChunkType(child->GetType())) {
                 if (parent->GetKind() != EChunkListKind::Hunk &&
-                    parent->GetKind() != EChunkListKind::JournalRoot)
+                    parent->GetKind() != EChunkListKind::JournalRoot &&
+                    parent->GetKind() != EChunkListKind::Scratch)
                 {
-                    YT_LOG_ALERT("Attempted to attach journal chunk to chunk list of unexpected kind "
-                        "(ChunkTreeId: %v, Type: %v, ChunkListId: %v, ChunkListKind: %v)",
-                        childId,
-                        child->GetType(),
-                        parent->GetId(),
-                        parent->GetKind());
+                    YT_TLOG_ALERT("Attempted to attach journal chunk to chunk list of unexpected kind")
+                        .With("ChunkTreeId", childId)
+                        .With("Type", child->GetType())
+                        .With("ChunkListId", parent->GetId())
+                        .With("ChunkListKind", parent->GetKind());
                     THROW_ERROR_EXCEPTION("Attempted to attach journal chunk %v to chunk list %v of unexpected kind %Qlv",
                         childId,
                         parent->GetId(),
@@ -5755,12 +5990,11 @@ private:
                 parent->GetKind() == EChunkListKind::SortedDynamicTablet)
             {
                 if (!IsBlobChunkType(child->GetType())) {
-                    YT_LOG_ALERT("Attempted to attach chunk tree of unexpected type to a dynamic table "
-                        "(ChunkTreeId: %v, Type: %v, ChunkListId: %v, ChunkListKind: %v)",
-                        childId,
-                        child->GetType(),
-                        parent->GetId(),
-                        parent->GetKind());
+                    YT_TLOG_ALERT("Attempted to attach chunk tree of unexpected type to a dynamic table")
+                        .With("ChunkTreeId", childId)
+                        .With("Type", child->GetType())
+                        .With("ChunkListId", parent->GetId())
+                        .With("ChunkListKind", parent->GetKind());
                     continue;
                 }
 
@@ -5793,7 +6027,7 @@ private:
         AttachToChunkList(parent, children);
 
         if (subrequest->request_statistics()) {
-            if (IsHunkRelatedChunkList(parent)) {
+            if (parent->IsHunkRelated()) {
                 ToProto(subresponse->mutable_statistics(), parent->HunkStatistics().ToDataStatistics());
             } else {
                 // NB: Referenced hunk data statistics (if any) are included here and not in hunk data statistics.
@@ -5804,10 +6038,10 @@ private:
             }
         }
 
-        YT_LOG_DEBUG("Chunk trees attached (ParentId: %v, ChildIds: %v, TransactionId: %v)",
-            parentId,
-            MakeShrunkFormattableView(children, TObjectIdFormatter(), 500),
-            transactionId);
+        YT_TLOG_DEBUG("Chunk trees attached")
+            .With("ParentId", parentId)
+            .With("ChildIds", MakeShrunkFormattableView(children, TObjectIdFormatter(), 500))
+            .With("TransactionId", transactionId);
     }
 
     void SaveKeys(NCellMaster::TSaveContext& context) const
@@ -5847,6 +6081,7 @@ private:
         SaveHistogramValues(context, ChunkDataWeightHistogram_.GetSnapshot());
 
         Save(context, SequoiaChunkPurgatory_);
+        Save(context, VerboselyLoggedChunks_);
     }
 
     void LoadKeys(NCellMaster::TLoadContext& context)
@@ -5888,10 +6123,11 @@ private:
         // COMPAT(kvk1920): move to OnAfterSnapshotLoaded
         for (auto [mediumId, medium] : MediumMap_) {
             if (auto error = CheckObjectName(medium->GetName()); !error.IsOK()) {
-                YT_LOG_ALERT(error, "Medium with invalid name encountered (Id: %v, Index: %v, Name: %v)",
-                    mediumId,
-                    medium->GetIndex(),
-                    medium->GetName());
+                YT_TLOG_ALERT("Medium with invalid name encountered")
+                    .With("Id", mediumId)
+                    .With("Index", medium->GetIndex())
+                    .With("Name", medium->GetName())
+                    .With(error);
             }
 
             RegisterMedium(medium);
@@ -5923,6 +6159,10 @@ private:
             }
         } else {
             Load(context, SequoiaChunkPurgatory_);
+        }
+
+        if (context.GetVersion() >= EMasterReign::VerboseChunkLogging) {
+            Load(context, VerboselyLoggedChunks_);
         }
 
         RecomputeHistoricallyNonVital_ = context.GetVersion() < EMasterReign::IncreaseVitalReplicationFactor;
@@ -5964,6 +6204,15 @@ private:
         }
     }
 
+    void UpdateNonSequoiaChunkReplicaCount(TChunk* chunk, int delta)
+    {
+        if (chunk->IsJournal()) {
+            NonSequoiaJournalReplicaCount_ += delta;
+        } else {
+            NonSequoiaBlobReplicaCount_ += delta;
+        }
+    }
+
     void OnAfterSnapshotLoaded() override
     {
         TMasterAutomatonPart::OnAfterSnapshotLoaded();
@@ -5973,7 +6222,7 @@ private:
 
         std::vector<TChunk*> crpChunks;
         {
-            YT_LOG_INFO("Started initializing chunks");
+            YT_TLOG_INFO("Started initializing chunks");
 
             constexpr int ChunkBatchSize = 100'000;
             auto runner = CreateBackgroundParallelRunner<TChunk*>(ChunkBatchSize);
@@ -5995,15 +6244,17 @@ private:
                     EmplaceOrCrash(ForeignChunks_, chunk);
                 }
 
-                // TODO(aleksandra-zh): account for Sequoia replicas.
                 // We may have replicas from non-online nodes here.
-                TotalReplicaCount_ += std::ssize(chunk->GetStoredReplicaList(/*includeNonOnlineReplicas*/ true));
+                auto replicaCount = std::ssize(chunk->GetStoredReplicaList(/*includeNonOnlineReplicas*/ true));
+                UpdateNonSequoiaChunkReplicaCount(chunk, replicaCount);
 
                 runner.Add(chunk);
 
                 UpdateChunkCount(chunk, +1);
 
-                if (RecomputeHistoricallyNonVital_ && !IsDurabilityRequiredForChunk(chunk, chunk->GetAggregatedRequisitionIndex())) {
+                if (RecomputeHistoricallyNonVital_ &&
+                    !IsDurabilityRequiredForChunk(chunk, chunk->GetAggregatedRequisitionIndex()))
+                {
                     chunk->SetHistoricallyNonVital(true);
                 }
             }
@@ -6028,11 +6279,11 @@ private:
                 .BlockingGet()
                 .ThrowOnError();
 
-            YT_LOG_INFO("Finished initializing chunks");
+            YT_TLOG_INFO("Finished initializing chunks");
         }
 
         {
-            YT_LOG_INFO("Started initializing chunk locations");
+            YT_TLOG_INFO("Started initializing chunk locations");
 
             constexpr int LocationBatchSize = 100;
             auto runner = CreateBackgroundParallelRunner<TChunkLocation*>(LocationBatchSize);
@@ -6058,11 +6309,11 @@ private:
                 .BlockingGet()
                 .ThrowOnError();
 
-            YT_LOG_INFO("Finished initializing chunk locations");
+            YT_TLOG_INFO("Finished initializing chunk locations");
         }
 
         {
-            YT_LOG_INFO("Started initializing nodes");
+            YT_TLOG_INFO("Started initializing nodes");
 
             const auto& nodeTracker = Bootstrap_->GetNodeTracker();
             for (auto [_, node] : nodeTracker->Nodes()) {
@@ -6092,11 +6343,11 @@ private:
                 }
             }
 
-            YT_LOG_INFO("Finished initializing nodes");
+            YT_TLOG_INFO("Finished initializing nodes");
         }
 
         {
-            YT_LOG_INFO("Started initializing chunk placement");
+            YT_TLOG_INFO("Started initializing chunk placement");
 
             CrpChunkCount_ = std::ssize(crpChunks);
             for (auto* chunk : crpChunks) {
@@ -6106,7 +6357,7 @@ private:
 
             ChunkPlacement_->Initialize();
 
-            YT_LOG_INFO("Finished initializing chunk placement");
+            YT_TLOG_INFO("Finished initializing chunk placement");
         }
 
         if (RecomputeHunkRelatedChunkStatistics_) {
@@ -6137,7 +6388,7 @@ private:
     // COMPAT(akozhikhov)
     void RecomputeHunkRelatedChunkStatistics()
     {
-        YT_LOG_INFO("Started recomputing hunk related chunk statistics");
+        YT_TLOG_INFO("Started recomputing hunk related chunk statistics");
 
         for (auto [_, chunk] : ChunkMap_) {
             if (!chunk->IsConfirmed()) {
@@ -6152,10 +6403,9 @@ private:
                     auto hunkChunkId = FromProto<TChunkId>(protoRef.chunk_id());
                     auto* hunkChunk = FindChunk(hunkChunkId);
                     if (!IsObjectAlive(hunkChunk)) {
-                        YT_LOG_ALERT("Upon recomputation of hunk related chunk statistics encountered hunk reference "
-                            "leading to an unknown hunk chunk (ChunkId: %v, HunkChunkId: %v)",
-                            chunk->GetId(),
-                            hunkChunkId);
+                        YT_TLOG_ALERT("Upon recomputation of hunk related chunk statistics encountered hunk reference leading to an unknown hunk chunk")
+                            .With("ChunkId", chunk->GetId())
+                            .With("HunkChunkId", hunkChunkId);
                         continue;
                     }
 
@@ -6165,6 +6415,7 @@ private:
                     hunkChunk->AccumulateNewlyReferencedHunkStatistics(hunkDataWeight, hunkDataSize);
 
                     statisticsDelta.HunkDataWeight += hunkDataWeight;
+                    statisticsDelta.LogicalHunkDataWeight += hunkDataWeight;
                     statisticsDelta.HunkDataSize += hunkDataSize;
                     codecToDataSize[FromProto<NErasure::ECodec>(protoRef.erasure_codec())] += hunkDataSize;
                 }
@@ -6194,11 +6445,10 @@ private:
                             chunkListQueue.push(chunkViewParent->AsChunkList());
                         }
                     } else {
-                        YT_LOG_ALERT("Upon recomputation of hunk related chunk statistics encountered chunk parent "
-                            "of an unexpected type; skipping it (ChunkId: %v, ParentId: %v, ParentType: %v)",
-                            chunk->GetId(),
-                            parent->GetId(),
-                            parent->GetType());
+                        YT_TLOG_ALERT("Upon recomputation of hunk related chunk statistics encountered chunk parent of an unexpected type; skipping it")
+                            .With("ChunkId", chunk->GetId())
+                            .With("ParentId", parent->GetId())
+                            .With("ParentType", parent->GetType());
                         continue;
                     }
                 }
@@ -6225,20 +6475,20 @@ private:
                 continue;
             }
 
-            VisitAllAncestorsInHunkTree(chunk, [&] (TChunkList* chunkList, bool firstOccurrence) {
+            VisitHunkTreeAncestors(chunk, [&] (TChunkList* chunkList, bool firstOccurrence) {
                 if (firstOccurrence) {
                     chunkList->AccumulateHunkStatistics(chunk, /*force*/ true);
                 }
             });
         }
 
-        YT_LOG_INFO("Finished recomputing hunk related chunk statistics");
+        YT_TLOG_INFO("Finished recomputing hunk related chunk statistics");
     }
 
     // COMPAT(akozhikhov)
     void RecomputeHunkRelatedChunkStatisticsAgain()
     {
-        YT_LOG_INFO("Started recomputing hunk related chunk statistics again");
+        YT_TLOG_INFO("Started recomputing hunk related chunk statistics again");
 
         for (auto [_, chunk] : ChunkMap_) {
             if (!chunk->IsConfirmed()) {
@@ -6253,10 +6503,9 @@ private:
                     auto hunkChunkId = FromProto<TChunkId>(protoRef.chunk_id());
                     auto* hunkChunk = FindChunk(hunkChunkId);
                     if (!IsObjectAlive(hunkChunk)) {
-                        YT_LOG_ALERT("Upon recomputation of hunk related chunk statistics encountered hunk reference "
-                            "leading to an unknown hunk chunk (ChunkId: %v, HunkChunkId: %v)",
-                            chunk->GetId(),
-                            hunkChunkId);
+                        YT_TLOG_ALERT("Upon recomputation of hunk related chunk statistics encountered hunk reference leading to an unknown hunk chunk")
+                            .With("ChunkId", chunk->GetId())
+                            .With("HunkChunkId", hunkChunkId);
                         continue;
                     }
 
@@ -6285,11 +6534,10 @@ private:
                             chunkListQueue.push(chunkViewParent->AsChunkList());
                         }
                     } else {
-                        YT_LOG_ALERT("Upon recomputation of hunk related chunk statistics encountered chunk parent "
-                            "of an unexpected type; skipping it (ChunkId: %v, ParentId: %v, ParentType: %v)",
-                            chunk->GetId(),
-                            parent->GetId(),
-                            parent->GetType());
+                        YT_TLOG_ALERT("Upon recomputation of hunk related chunk statistics encountered chunk parent of an unexpected type; skipping it")
+                            .With("ChunkId", chunk->GetId())
+                            .With("ParentId", parent->GetId())
+                            .With("ParentType", parent->GetType());
                         continue;
                     }
                 }
@@ -6307,7 +6555,7 @@ private:
             }
         }
 
-        YT_LOG_INFO("Finished recomputing hunk related chunk statistics again");
+        YT_TLOG_INFO("Finished recomputing hunk related chunk statistics again");
     }
 
     void Clear() override
@@ -6326,7 +6574,9 @@ private:
         ChunkListMap_.Clear();
         ChunkViewMap_.Clear();
         ForeignChunks_.clear();
-        TotalReplicaCount_ = 0;
+
+        NonSequoiaJournalReplicaCount_ = 0;
+        NonSequoiaBlobReplicaCount_ = 0;
 
         ChunkRequisitionRegistry_.Clear();
 
@@ -6342,8 +6592,6 @@ private:
 
         ChunksCreated_ = 0;
         ChunksDestroyed_ = 0;
-        ChunkReplicasAdded_ = 0;
-        ChunkReplicasRemoved_ = 0;
         ChunkViewsCreated_ = 0;
         ChunkViewsDestroyed_ = 0;
         ChunkListsCreated_ = 0;
@@ -6371,6 +6619,8 @@ private:
         RecomputeHistoricallyNonVital_ = false;
 
         LastSequoiaReplicasCommitTimestamp_ = NullTimestamp;
+
+        VerboselyLoggedChunks_.clear();
 
         RecomputeHunkRelatedChunkStatistics_ = false;
         RecomputeHunkRelatedChunkStatisticsAgain_ = false;
@@ -6437,7 +6687,7 @@ private:
 
     void RecomputeStatistics(TChunkList* chunkList)
     {
-        YT_VERIFY(!IsHunkRelatedChunkList(chunkList));
+        YT_VERIFY(!chunkList->IsHunkRelated());
         YT_VERIFY(chunkList->GetKind() != EChunkListKind::OrderedDynamicTablet);
 
         auto& statistics = chunkList->Statistics();
@@ -6468,21 +6718,19 @@ private:
         ++statistics.ChunkListCount;
 
         if (statistics != oldStatistics) {
-            YT_LOG_DEBUG("Chunk list statistics changed (ChunkList: %v, OldStatistics: %v, NewStatistics: %v)",
-                chunkList->GetId(),
-                oldStatistics,
-                statistics);
+            YT_TLOG_DEBUG("Chunk list statistics changed")
+                .With("ChunkList", chunkList->GetId())
+                .With("OldStatistics", oldStatistics)
+                .With("NewStatistics", statistics);
         }
 
         if (!chunkList->Children().empty() && chunkList->HasCumulativeStatistics()) {
             auto ultimateCumulativeEntry = chunkList->CumulativeStatistics().Back();
             if (ultimateCumulativeEntry != TCumulativeStatisticsEntry{statistics}) {
-                YT_LOG_FATAL(
-                    "Chunk list cumulative statistics do not match statistics "
-                    "(ChunkListId: %v, Statistics: %v, UltimateCumulativeEntry: %v)",
-                    chunkList->GetId(),
-                    statistics,
-                    ultimateCumulativeEntry);
+                YT_TLOG_FATAL("Chunk list cumulative statistics do not match statistics")
+                    .With("ChunkListId", chunkList->GetId())
+                    .With("Statistics", statistics)
+                    .With("UltimateCumulativeEntry", ultimateCumulativeEntry);
             }
         }
     }
@@ -6521,12 +6769,10 @@ private:
             ? chunkList->CumulativeStatistics().GetPreviousSum(0)
             : chunkList->CumulativeStatistics().Back();
         if (ultimateCumulativeEntry != TCumulativeStatisticsEntry{chunkList->Statistics()}) {
-            YT_LOG_FATAL(
-                "Chunk list cumulative statistics do not match statistics "
-                "(ChunkListId: %v, Statistics: %v, UltimateCumulativeEntry: %v)",
-                chunkList->GetId(),
-                chunkList->Statistics(),
-                ultimateCumulativeEntry);
+            YT_TLOG_FATAL("Chunk list cumulative statistics do not match statistics")
+                .With("ChunkListId", chunkList->GetId())
+                .With("Statistics", chunkList->Statistics())
+                .With("UltimateCumulativeEntry", ultimateCumulativeEntry);
         }
     }
 
@@ -6534,7 +6780,7 @@ private:
     // be reused when cumulative stats for dyntables come.
     void RecomputeStatistics()
     {
-        YT_LOG_INFO("Started recomputing statistics");
+        YT_TLOG_INFO("Started recomputing statistics");
 
         auto visitMark = TChunkList::GenerateVisitMark();
 
@@ -6572,7 +6818,7 @@ private:
 
         // Recompute statistics
         for (auto* chunkList : chunkLists) {
-            YT_VERIFY(!IsHunkRelatedChunkList(chunkList));
+            YT_VERIFY(!chunkList->IsHunkRelated());
             RecomputeStatistics(chunkList);
             auto& statistics = chunkList->Statistics();
             auto oldStatistics = statistics;
@@ -6625,14 +6871,14 @@ private:
             ++statistics.ChunkListCount;
 
             if (statistics != oldStatistics) {
-                YT_LOG_DEBUG("Chunk list statistics changed (ChunkList: %v, OldStatistics: %v, NewStatistics: %v)",
-                    chunkList->GetId(),
-                    oldStatistics,
-                    statistics);
+                YT_TLOG_DEBUG("Chunk list statistics changed")
+                    .With("ChunkList", chunkList->GetId())
+                    .With("OldStatistics", oldStatistics)
+                    .With("NewStatistics", statistics);
             }
         }
 
-        YT_LOG_INFO("Finished recomputing statistics");
+        YT_TLOG_INFO("Finished recomputing statistics");
     }
 
     void OnRecoveryStarted() override
@@ -6640,7 +6886,7 @@ private:
         TMasterAutomatonPart::OnRecoveryStarted();
 
         BufferedProducer_->SetEnabled(false);
-        CrpBufferedProducer_->SetEnabled(false);
+        DetailedBufferedProducer_->SetEnabled(false);
     }
 
     void OnRecoveryComplete() override
@@ -6648,7 +6894,7 @@ private:
         TMasterAutomatonPart::OnRecoveryComplete();
 
         BufferedProducer_->SetEnabled(true);
-        CrpBufferedProducer_->SetEnabled(true);
+        DetailedBufferedProducer_->SetEnabled(true);
     }
 
     void OnLeaderActive() override
@@ -6666,25 +6912,27 @@ private:
                 ToProto(request.add_chunk_list_ids(), chunkList->GetId());
             }
 
-            YT_LOG_INFO("Scheduling chunk lists requisition traverse confirmation (Count: %v)",
-                request.chunk_list_ids_size());
+            YT_TLOG_INFO("Scheduling chunk lists requisition traverse confirmation")
+                .With("Count", request.chunk_list_ids_size());
 
             YT_UNUSED_FUTURE(CreateConfirmChunkListsRequisitionTraverseFinishedMutation(request)
                 ->CommitAndLog(Logger()));
         }
 
+        const auto& sequoiaReplicasConfig = GetDynamicConfig()->SequoiaChunkReplicas;
+
         IsFirstSequoiaReplicaRemovalIteration_ = true;
         SequoiaReplicaRemovalExecutor_ = New<TPeriodicExecutor>(
             Bootstrap_->GetHydraFacade()->GetEpochAutomatonInvoker(EAutomatonThreadQueue::ChunkManager),
             BIND(&TChunkManager::OnSequoiaReplicaRemoval, MakeWeak(this)),
-            GetDynamicConfig()->SequoiaChunkReplicas->RemovalPeriod);
+            sequoiaReplicasConfig->RemovalPeriod);
         SequoiaReplicaRemovalExecutor_->Start();
 
         BatchConfirmTransactionCommitPromise_ = NewPromise<void>();
         SequoiaChunkBatchConfirmExecutor_ = New<TPeriodicExecutor>(
             Bootstrap_->GetHydraFacade()->GetEpochAutomatonInvoker(EAutomatonThreadQueue::ChunkManager),
             BIND(&TChunkManager::OnSequoiaReplicaConfirm, MakeWeak(this)),
-            GetDynamicConfig()->SequoiaChunkReplicas->ConfirmPeriod);
+            sequoiaReplicasConfig->ConfirmPeriod);
         SequoiaChunkBatchConfirmExecutor_->Start();
 
         BatchSequoiaIncrementalHeartbeatPromise_ = NewPromise<void>();
@@ -6694,7 +6942,7 @@ private:
         SequoiaBatchIncrementalHeartbeatExecutor_ = New<TPeriodicExecutor>(
             Bootstrap_->GetHydraFacade()->GetEpochAutomatonInvoker(EAutomatonThreadQueue::ChunkManager),
             BIND(&TChunkManager::FlushWaitingSequoiaIncrementalHeartbeatRequests, MakeWeak(this)),
-            GetDynamicConfig()->SequoiaChunkReplicas->BatchIncrementalHeartbeatPeriod);
+            sequoiaReplicasConfig->BatchIncrementalHeartbeatPeriod);
         SequoiaBatchIncrementalHeartbeatExecutor_->Start();
     }
 
@@ -6727,6 +6975,8 @@ private:
             WaitingSequoiaIncrementalHeartbeatRequests_.clear();
             ReplicasInWaitingSequoiaIncrementalHeartbeatRequests_ = 0;
         }
+
+        ChunkConfirmErrors_.clear();
     }
 
     void OnFollowerRecoveryComplete() override
@@ -6786,7 +7036,7 @@ private:
         }
 
         if (ChunksBeingPurged_) {
-            YT_LOG_DEBUG("Chunks are still being purged");
+            YT_TLOG_DEBUG("Chunks are still being purged");
             return;
         }
 
@@ -6795,28 +7045,27 @@ private:
             auto barrierFuture = transactionManager->WaitUntilPreparedTransactionsFinished({NNative::SequoiaReplicasOrderingTag});
             auto transactionsFinishResult = WaitFor(barrierFuture);
             if (!transactionsFinishResult.IsOK()) {
-                YT_LOG_WARNING(
-                    transactionsFinishResult,
-                    "Error waiting for prepared transactions to finish during Sequoia replica removal");
+                YT_TLOG_WARNING("Error waiting for prepared transactions to finish during Sequoia replica removal")
+                    .With(transactionsFinishResult);
                 return;
             }
             IsFirstSequoiaReplicaRemovalIteration_ = false;
         }
 
         if (ChunksBeingPurged_) {
-            YT_LOG_DEBUG("Chunks are still being purged");
+            YT_TLOG_DEBUG("Chunks are still being purged");
             return;
         }
 
         auto config = GetDynamicConfig()->SequoiaChunkReplicas;
         if (!config->EnableChunkPurgatory) {
-            YT_LOG_DEBUG("Sequoia chunk purgatory is disabled (PurgatorySize: %v)",
-                SequoiaChunkPurgatory_.size());
+            YT_TLOG_DEBUG("Sequoia chunk purgatory is disabled")
+                .With("PurgatorySize", SequoiaChunkPurgatory_.size());
             return;
         }
 
-        YT_LOG_DEBUG("Starting Sequoia replica removal (PurgatorySize: %v)",
-            SequoiaChunkPurgatory_.size());
+        YT_TLOG_DEBUG("Starting Sequoia replica removal")
+            .With("PurgatorySize", SequoiaChunkPurgatory_.size());
 
         auto request = std::make_unique<NProto::TReqRemoveDeadSequoiaChunkReplicas>();
 
@@ -6835,13 +7084,14 @@ private:
 
         ChunksBeingPurged_ = true;
 
-        YT_LOG_DEBUG("Will start dead Sequoia replicas removal transaction (ChunksToProcess: %v)",
-            request->chunk_records_size());
+        YT_TLOG_DEBUG("Will start dead Sequoia replicas removal transaction")
+            .With("ChunksToProcess", request->chunk_records_size());
 
         auto result = WaitFor(RemoveDeadSequoiaChunkReplicas(std::move(request)));
 
         if (!result.IsOK()) {
-            YT_LOG_DEBUG(result, "Error purging dead Sequoia chunks");
+            YT_TLOG_DEBUG("Error purging dead Sequoia chunks")
+                .With(result);
             ChunksBeingPurged_ = false;
         }
     }
@@ -6854,6 +7104,17 @@ private:
         }
     }
 
+    void HydraScheduleMultipleChunkSeals(NProto::TReqScheduleMultipleChunkSeals* request)
+    {
+        for (const auto& protoChunkId : request->chunk_ids()) {
+            auto chunkId = FromProto<TChunkId>(protoChunkId);
+            auto* chunk = FindChunk(chunkId);
+            if (IsObjectAlive(chunk)) {
+                ScheduleChunkSeal(chunk);
+            }
+        }
+    }
+
     TFuture<void> RemoveDeadSequoiaChunkReplicas(std::unique_ptr<NProto::TReqRemoveDeadSequoiaChunkReplicas> request)
     {
         return Bootstrap_
@@ -6863,9 +7124,9 @@ private:
                 ESequoiaTransactionType::DeadChunkReplicaRemoval,
                 {.CellTag = Bootstrap_->GetCellTag()})
             .Apply(BIND([request = std::move(request), this, this_ = MakeStrong(this)] (const ISequoiaTransactionPtr& transaction) {
-                YT_LOG_DEBUG("Started dead Sequoia replicas removal transaction (ChunksToProcess: %v, TransactionId: %v)",
-                    request->chunk_records_size(),
-                    transaction->GetId());
+                YT_TLOG_DEBUG("Started dead Sequoia replicas removal transaction")
+                    .With("ChunksToProcess", request->chunk_records_size())
+                    .With("TransactionId", transaction->GetId());
 
                 std::vector<TChunkId> chunkIds;
                 chunkIds.reserve(request->chunk_records().size());
@@ -6882,12 +7143,11 @@ private:
                     chunksWithReplicas.insert(replica.ChunkId);
                 }
 
-                YT_LOG_DEBUG("Gathered dead Sequoia chunk data "
-                    "(DeadChunkCount: %v, ChunksToRemoveFromSequoia: %v, ChunksWithReplicas: %v, TransactionId: %v)",
-                    request->chunk_records_size(),
-                    request->replicas_size(),
-                    chunksWithReplicas.size(),
-                    transaction->GetId());
+                YT_TLOG_DEBUG("Gathered dead Sequoia chunk data")
+                    .With("DeadChunkCount", request->chunk_records_size())
+                    .With("ChunksToRemoveFromSequoia", request->replicas_size())
+                    .With("ChunksWithReplicas", chunksWithReplicas.size())
+                    .With("TransactionId", transaction->GetId());
 
                 for (const auto& chunkId : chunkIds) {
                     if (!chunksWithReplicas.contains(chunkId)) {
@@ -6927,9 +7187,9 @@ private:
         const auto& nodeTracker = Bootstrap_->GetNodeTracker();
         const auto& dataNodeTracker = Bootstrap_->GetDataNodeTracker();
 
-        YT_LOG_DEBUG("Starting dead Sequoia chunk replicas removal on master (ChunksToProcess: %v, ReplicasToRemove: %v)",
-            request->chunk_records_size(),
-            request->replicas_size());
+        YT_TLOG_DEBUG("Starting dead Sequoia chunk replicas removal on master")
+            .With("ChunksToProcess", request->chunk_records_size())
+            .With("ReplicasToRemove", request->replicas_size());
 
         const auto* mutationContext = GetCurrentMutationContext();
         if (request->removal_start_hydra_term() != mutationContext->GetTerm()) {
@@ -6943,23 +7203,22 @@ private:
 
             auto purgatoryRecordIt = SequoiaChunkPurgatory_.find(chunkId);
             if (purgatoryRecordIt == SequoiaChunkPurgatory_.end()) {
-                YT_LOG_ALERT("Chunk with dead replicas is not present in purgatory (ChunkId: %v)",
-                    chunkId);
+                YT_TLOG_ALERT("Chunk with dead replicas is not present in purgatory")
+                    .With("ChunkId", chunkId);
                 THROW_ERROR_EXCEPTION("Chunk %v is not present in purgatory", chunkId);
             }
             if (purgatoryRecordIt->second < chunkRecord.record_count()) {
-                YT_LOG_ALERT(
-                    "Chunk with dead replicas has less records in purgatory than in request (ChunkId: %v, PurgatoryRecords: %v, RequestRecords: %v)",
-                    chunkId,
-                    purgatoryRecordIt->second,
-                    chunkRecord.record_count());
+                YT_TLOG_ALERT("Chunk with dead replicas has less records in purgatory than in request")
+                    .With("ChunkId", chunkId)
+                    .With("PurgatoryRecords", purgatoryRecordIt->second)
+                    .With("RequestRecords", chunkRecord.record_count());
                 THROW_ERROR_EXCEPTION("Chunk %v has less records in purgatory than in request", chunkId);
             }
         }
 
-        YT_LOG_DEBUG("Prepared dead Sequoia chunk replicas removal on master (ChunksToProcess: %v, ReplicasToRemove: %v)",
-            request->chunk_records_size(),
-            request->replicas_size());
+        YT_TLOG_DEBUG("Prepared dead Sequoia chunk replicas removal on master")
+            .With("ChunksToProcess", request->chunk_records_size())
+            .With("ReplicasToRemove", request->replicas_size());
 
         for (const auto& protoReplica : request->replicas()) {
             auto replica = FromProto<TSequoiaChunkReplica>(protoReplica);
@@ -6969,18 +7228,18 @@ private:
 
             auto* node = nodeTracker->FindNode(replica.NodeId);
             if (!IsObjectAlive(node)) {
-                YT_LOG_WARNING("Trying to remove a replica from a non-existent node (NodeId: %v, ChunkId: %v)",
-                    replica.NodeId,
-                    replica.ChunkId);
+                YT_TLOG_WARNING("Trying to remove a replica from a non-existent node")
+                    .With("NodeId", replica.NodeId)
+                    .With("ChunkId", replica.ChunkId);
                 continue;
             }
 
             auto locationIndex = replica.LocationIndex;
             auto* location = dataNodeTracker->FindChunkLocationByIndex(locationIndex);
             if (!IsObjectAlive(location)) {
-                YT_LOG_WARNING("Trying to remove a replica from a non-existent location (LocationIndex: %v, ChunkId: %v)",
-                    locationIndex,
-                    replica.ChunkId);
+                YT_TLOG_WARNING("Trying to remove a replica from a non-existent location")
+                    .With("LocationIndex", locationIndex)
+                    .With("ChunkId", replica.ChunkId);
                 continue;
             }
 
@@ -6998,11 +7257,11 @@ private:
             // If node is offline or being disposed, we might have already cleared the corresponding location and
             // adding destroyed replica there again will just get it stuck there.
             if (!node->HasAliveLocalState()) {
-                YT_LOG_DEBUG("Skip adding replica to destroyed set as node is neither online nor registered (NodeId: %v, NodeAddress: %v, State: %v, ChunkId: %v)",
-                    replica.NodeId,
-                    node->GetDefaultAddress(),
-                    node->GetLocalState(),
-                    replica.ChunkId);
+                YT_TLOG_DEBUG("Skip adding replica to destroyed set as node is neither online nor registered")
+                    .With("NodeId", replica.NodeId)
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("State", node->GetLocalState())
+                    .With("ChunkId", replica.ChunkId);
                 continue;
             }
 
@@ -7010,9 +7269,9 @@ private:
             if (location->AddDestroyedReplica(chunkIdWithIndexes)) {
                 ++DestroyedReplicaCount_;
             } else {
-                YT_LOG_TRACE("Replica is already present in destroyed set (LocationIndex: %v, ChunkId: %v)",
-                    locationIndex,
-                    replica.ChunkId);
+                YT_TLOG_TRACE("Replica is already present in destroyed set")
+                    .With("LocationIndex", locationIndex)
+                    .With("ChunkId", replica.ChunkId);
             }
         }
 
@@ -7028,9 +7287,9 @@ private:
             }
         }
 
-        YT_LOG_DEBUG("Finished dead Sequoia chunk replicas removal on master (ChunksToProcess: %v, ReplicasToRemove: %v)",
-            request->chunk_records_size(),
-            request->replicas_size());
+        YT_TLOG_DEBUG("Finished dead Sequoia chunk replicas removal on master")
+            .With("ChunksToProcess", request->chunk_records_size())
+            .With("ReplicasToRemove", request->replicas_size());
 
         ChunksBeingPurged_ = false;
     }
@@ -7058,17 +7317,16 @@ private:
             reason == EAddReplicaReason::IncrementalHeartbeat;
         chunk->AddReplica(chunkLocationWithReplicaInfo, medium, approved);
 
-        YT_LOG_EVENT(
-            Logger(),
-            reason == EAddReplicaReason::FullHeartbeat ? NLogging::ELogLevel::Trace : NLogging::ELogLevel::Debug,
-            "Chunk replica added (ChunkId: %v, NodeId: %v, Address: %v, Reason: %v)",
-            TChunkIdWithIndex(chunk->GetId(), replica.GetReplicaIndex()),
-            nodeId,
-            node->GetDefaultAddress(),
-            reason);
+        YT_TLOG_EVENT(Logger(), reason == EAddReplicaReason::FullHeartbeat && !IsVerboselyLogged(chunk)
+                ? NLogging::ELogLevel::Trace
+                : NLogging::ELogLevel::Debug, "Chunk replica added")
+            .With("ChunkId", TChunkIdWithIndex(chunk->GetId(), replica.GetReplicaIndex()))
+            .With("NodeId", nodeId)
+            .With("Address", node->GetDefaultAddress())
+            .With("Reason", reason);
 
         if (reason == EAddReplicaReason::IncrementalHeartbeat || reason == EAddReplicaReason::Confirmation) {
-            ++ChunkReplicasAdded_;
+            UpdateNonSequoiaChunkReplicaCount(chunk, 1);
         }
 
         ScheduleChunkRefresh(chunk);
@@ -7086,10 +7344,10 @@ private:
             chunkWithIndexes.GetReplicaIndex(),
             chunkWithIndexes.GetReplicaState());
 
-        YT_LOG_DEBUG("Chunk approved (NodeId: %v, Address: %v, ChunkId: %v)",
-            node->GetId(),
-            node->GetDefaultAddress(),
-            chunkWithIndexes);
+        YT_TLOG_DEBUG("Chunk approved")
+            .With("NodeId", node->GetId())
+            .With("Address", node->GetDefaultAddress())
+            .With("ChunkId", chunkWithIndexes);
 
         location->ApproveReplica(chunkWithIndexes);
         chunk->ApproveReplica(locationWithIndexes);
@@ -7111,10 +7369,10 @@ private:
         TChunkLocationPtrWithReplicaIndex locationWithIndex(chunkLocation, replica.GetReplicaIndex());
 
         if (!chunkLocation->HasReplica(replica) && (
-                reason == ERemoveReplicaReason::IncrementalHeartbeat ||
-                reason == ERemoveReplicaReason::SequoiaModified ||
-                reason == ERemoveReplicaReason::NodeDisposed ||
-                reason == ERemoveReplicaReason::SequoiaNodeDisposed))
+            reason == ERemoveReplicaReason::IncrementalHeartbeat ||
+            reason == ERemoveReplicaReason::SequoiaModified ||
+            reason == ERemoveReplicaReason::NodeDisposed ||
+            reason == ERemoveReplicaReason::SequoiaNodeDisposed))
         {
             return;
         }
@@ -7141,24 +7399,21 @@ private:
                 YT_ABORT();
         }
 
-        YT_LOG_EVENT(
-            Logger(),
-            reason == ERemoveReplicaReason::NodeDisposed ||
+        YT_TLOG_EVENT(Logger(), reason == ERemoveReplicaReason::NodeDisposed ||
             reason == ERemoveReplicaReason::ChunkDestroyed ||
             reason == ERemoveReplicaReason::SequoiaNodeDisposed
-            ? NLogging::ELogLevel::Trace : NLogging::ELogLevel::Debug,
-            "Chunk replica removed "
-            "(ChunkId: %v, Reason: %v, NodeId: %v, Address: %v, Approved: %v, TemporarilyUnavailable: %v)",
-            TChunkIdWithIndex(chunk->GetId(), replica.GetReplicaIndex()),
-            reason,
-            nodeId,
-            node->GetDefaultAddress(),
-            approved,
-            node->IsPendingRestart());
+                ? GetChunkLogLevel(chunk, this)
+                : NLogging::ELogLevel::Debug, "Chunk replica removed")
+            .With("ChunkId", TChunkIdWithIndex(chunk->GetId(), replica.GetReplicaIndex()))
+            .With("Reason", reason)
+            .With("NodeId", nodeId)
+            .With("Address", node->GetDefaultAddress())
+            .With("Approved", approved)
+            .With("TemporarilyUnavailable", node->IsPendingRestart());
 
         ScheduleChunkRefresh(chunk);
 
-        ++ChunkReplicasRemoved_;
+        UpdateNonSequoiaChunkReplicaCount(chunk, -1);
     }
 
     std::pair<TChunkLocation*, TDomesticMedium*> FindLocationAndMediumOnProcessChunk(
@@ -7170,27 +7425,22 @@ private:
         int mediumIndex = realLocation->GetEffectiveMediumIndex();
         auto* medium = FindMediumByIndex(mediumIndex);
         if (!IsObjectAlive(medium)) {
-            YT_LOG_ALERT(
-                "Cannot process chunk event with unknown medium "
-                "(NodeId: %v, Address: %v, ChunkId: %v, MediumIndex: %v, ChunkEventType: %v)",
-                node->GetId(),
-                node->GetDefaultAddress(),
-                chunkIdWithIndexes.Id,
-                mediumIndex,
-                reason);
+            YT_TLOG_ALERT("Cannot process chunk event with unknown medium")
+                .With("NodeId", node->GetId())
+                .With("Address", node->GetDefaultAddress())
+                .With("ChunkId", chunkIdWithIndexes.Id)
+                .With("MediumIndex", mediumIndex)
+                .With("ChunkEventType", reason);
             return {nullptr, nullptr};
         }
         if (medium->IsOffshore()) {
-            YT_LOG_ALERT(
-                "Cannot process chunk event with offshore medium "
-                "(NodeId: %v, Address: %v, ChunkId: %v, MediumIndex: %v, "
-                "MediumType: %v, ChunkEventType: %v)",
-                node->GetId(),
-                node->GetDefaultAddress(),
-                chunkIdWithIndexes.Id,
-                chunkIdWithIndexes.MediumIndex,
-                medium->GetType(),
-                reason);
+            YT_TLOG_ALERT("Cannot process chunk event with offshore medium")
+                .With("NodeId", node->GetId())
+                .With("Address", node->GetDefaultAddress())
+                .With("ChunkId", chunkIdWithIndexes.Id)
+                .With("MediumIndex", chunkIdWithIndexes.MediumIndex)
+                .With("MediumType", medium->GetType())
+                .With("ChunkEventType", reason);
             return {nullptr, nullptr};
         }
 
@@ -7230,22 +7480,20 @@ private:
 
             if (ShouldStoreChunkInSequoia(chunkIdWithIndexes.Id)) {
                 ++SequoiaChunkPurgatory_[chunkIdWithIndexes.Id];
-                YT_LOG_DEBUG(
-                    "Sequoia chunk is added to purgatory (NodeId: %v, Address: %v, ChunkId: %v)",
-                    nodeId,
-                    node->GetDefaultAddress(),
-                    chunkIdWithIndexes);
+                YT_TLOG_DEBUG("Sequoia chunk is added to purgatory")
+                    .With("NodeId", nodeId)
+                    .With("Address", node->GetDefaultAddress())
+                    .With("ChunkId", chunkIdWithIndexes);
             } else {
                 auto isUnknown = location->AddDestroyedReplica(chunkIdWithIndexes);
                 if (isUnknown) {
                     ++DestroyedReplicaCount_;
                 }
-                YT_LOG_DEBUG(
-                    "%v removal scheduled (NodeId: %v, Address: %v, ChunkId: %v)",
-                    isUnknown ? "Unknown chunk added," : "Destroyed chunk",
-                    nodeId,
-                    node->GetDefaultAddress(),
-                    chunkIdWithIndexes);
+                YT_TLOG_DEBUG("Chunk removal scheduled")
+                    .With("ChunkUnknown", isUnknown)
+                    .With("NodeId", nodeId)
+                    .With("Address", node->GetDefaultAddress())
+                    .With("ChunkId", chunkIdWithIndexes);
             }
             return nullptr;
         }
@@ -7298,12 +7546,11 @@ private:
             --DestroyedReplicaCount_;
         }
         // NB: Chunk could already be a zombie but we still need to remove the replica.
-        YT_LOG_DEBUG(
-            "%v replica removed (ChunkId: %v, Address: %v, NodeId: %v)",
-            isDestroyed ? "Destroyed chunk" : "Chunk",
-            chunkIdWithIndex,
-            node->GetDefaultAddress(),
-            nodeId);
+        YT_TLOG_DEBUG("Chunk replica removed from location")
+            .With("Destroyed", isDestroyed)
+            .With("ChunkId", chunkIdWithIndex)
+            .With("Address", node->GetDefaultAddress())
+            .With("NodeId", nodeId);
 
         auto* chunk = FindChunk(chunkIdWithIndex.Id);
         if (!chunk) {
@@ -7352,11 +7599,10 @@ private:
                 return;
             }
 
-            YT_LOG_ALERT(
-                "Distributed journal chunk has parents or is overlayed while being sealed (ChunkId: %v, ParentCount: %v, Overlayed: %v)",
-                chunk->GetId(),
-                chunk->GetParentCount(),
-                chunk->GetOverlayed());
+            YT_TLOG_ALERT("Distributed journal chunk has parents or is overlayed while being sealed")
+                .With("ChunkId", chunk->GetId())
+                .With("ParentCount", chunk->GetParentCount())
+                .With("Overlayed", chunk->GetOverlayed());
         }
         // Journal hunk chunks require special treatment.
         if (chunk->GetSealable() && chunk->GetChunkFormat() != EChunkFormat::JournalDistributed) {
@@ -7370,12 +7616,18 @@ private:
             return;
         }
         if (parentCount > 1) {
-            YT_LOG_ALERT("Improper number of parents of a sealed chunk (ChunkId: %v, ParentCount: %v)",
-                chunk->GetId(),
-                parentCount);
+            YT_TLOG_ALERT("Improper number of parents of a sealed chunk")
+                .With("ChunkId", chunk->GetId())
+                .With("ParentCount", parentCount);
             return;
         }
+
         auto* chunkList = GetUniqueParent(chunk)->As<TChunkList>();
+        // A scratch chunk list keeps no statistics, so a sealed child requires no propagation (and
+        // calling GetStatistics on a hunk-format chunk would even alert).
+        if (!chunkList->HasStatistics()) {
+            return;
+        }
 
         // Go upwards and apply delta.
         auto statisticsDelta = chunk->GetStatistics();
@@ -7383,10 +7635,10 @@ private:
         // NB: Journal row count is not a sum of chunk row counts since chunks may overlap.
         if (chunk->IsJournal()) {
             if (!chunkList->Parents().empty()) {
-                YT_LOG_ALERT("Journal has a non-trivial chunk tree structure (ChunkId: %v, ChunkListId: %v, ParentCount: %v)",
-                    chunk->GetId(),
-                    chunkList->GetId(),
-                    chunkList->Parents().size());
+                YT_TLOG_ALERT("Journal has a non-trivial chunk tree structure")
+                    .With("ChunkId", chunk->GetId())
+                    .With("ChunkListId", chunkList->GetId())
+                    .With("ParentCount", chunkList->Parents().size());
             }
 
             auto firstOverlayedRowIndex = chunk->GetFirstOverlayedRowIndex();
@@ -7407,25 +7659,22 @@ private:
 
             if (firstOverlayedRowIndex) {
                 if (*firstOverlayedRowIndex > oldJournalRowCount) {
-                    YT_LOG_ALERT(
-                        "Chunk seal produced row gap in journal (ChunkId: %v, StartRowIndex: %v, FirstOverlayedRowIndex: %v)",
-                        chunk->GetId(),
-                        oldJournalRowCount,
-                        *firstOverlayedRowIndex);
+                    YT_TLOG_ALERT("Chunk seal produced row gap in journal")
+                        .With("ChunkId", chunk->GetId())
+                        .With("StartRowIndex", oldJournalRowCount)
+                        .With("FirstOverlayedRowIndex", *firstOverlayedRowIndex);
                 } else if (*firstOverlayedRowIndex < oldJournalRowCount) {
-                    YT_LOG_DEBUG(
-                        "Journal chunk has a non-trivial overlap with the previous one (ChunkId: %v, StartRowIndex: %v, FirstOverlayedRowIndex: %v)",
-                        chunk->GetId(),
-                        oldJournalRowCount,
-                        *firstOverlayedRowIndex);
+                    YT_TLOG_DEBUG("Journal chunk has a non-trivial overlap with the previous one")
+                        .With("ChunkId", chunk->GetId())
+                        .With("StartRowIndex", oldJournalRowCount)
+                        .With("FirstOverlayedRowIndex", *firstOverlayedRowIndex);
                 }
             }
 
-            YT_LOG_DEBUG(
-                "Updating journal statistics after chunk seal (ChunkId: %v, OldJournalRowCount: %v, NewJournalRowCount: %v)",
-                chunk->GetId(),
-                oldJournalRowCount,
-                newJournalRowCount);
+            YT_TLOG_DEBUG("Updating journal statistics after chunk seal")
+                .With("ChunkId", chunk->GetId())
+                .With("OldJournalRowCount", oldJournalRowCount)
+                .With("NewJournalRowCount", newJournalRowCount);
         }
 
         AccumulateUniqueAncestorsStatistics(chunk, statisticsDelta);
@@ -7451,8 +7700,8 @@ private:
 
             if (IsObjectAlive(trunkJournalNode)) {
                 if (journalNodeLocked) {
-                    YT_LOG_DEBUG("Journal node cannot be sealed since it is still locked (NodeId: %v)",
-                        trunkJournalNode->GetId());
+                    YT_TLOG_DEBUG("Journal node cannot be sealed since it is still locked")
+                        .With("NodeId", trunkJournalNode->GetId());
                 } else {
                     const auto& journalManager = Bootstrap_->GetJournalManager();
                     journalManager->SealJournal(trunkJournalNode);
@@ -7474,8 +7723,8 @@ private:
         }
 
         if (chunk->IsSealed()) {
-            YT_LOG_DEBUG("Chunk is already sealed (ChunkId: %v)",
-                chunk->GetId());
+            YT_TLOG_DEBUG("Chunk is already sealed")
+                .With("ChunkId", chunk->GetId());
             return false;
         }
 
@@ -7485,12 +7734,12 @@ private:
     void OnProfiling()
     {
         BufferedProducer_->SetEnabled(true);
-        CrpBufferedProducer_->SetEnabled(true);
+        DetailedBufferedProducer_->SetEnabled(true);
 
         TSensorBuffer buffer;
-        TSensorBuffer crpBuffer;
+        TSensorBuffer detailedBuffer;
 
-        ChunkReplicator_->OnProfiling(&buffer, &crpBuffer);
+        ChunkReplicator_->OnProfiling(&buffer, &detailedBuffer);
         JobRegistry_->OnProfiling(&buffer);
 
         if (IsLeader()) {
@@ -7506,9 +7755,10 @@ private:
             buffer.AddCounter("/erasure_chunk_count", ErasureChunkCount_);
             buffer.AddCounter("/regular_chunk_count", RegularChunkCount_);
 
-            buffer.AddGauge("/chunk_replica_count", TotalReplicaCount_);
-            buffer.AddCounter("/chunk_replicas_added", ChunkReplicasAdded_);
-            buffer.AddCounter("/chunk_replicas_removed", ChunkReplicasRemoved_);
+            // These are not actually non-Sequoia, but chunk replicas that are stored on master
+            // (they can be stored in Sequoia as well).
+            buffer.AddGauge("/non_sequoia_blob_chunk_replica_count", NonSequoiaBlobReplicaCount_);
+            buffer.AddGauge("/non_sequoia_journal_chunk_replica_count", NonSequoiaJournalReplicaCount_);
 
             buffer.AddGauge("/chunk_view_count", ChunkViewMap_.GetSize());
             buffer.AddCounter("/chunk_views_created", ChunkViewsCreated_);
@@ -7521,6 +7771,7 @@ private:
             buffer.AddGauge("/sequoia_chunks_awaiting_confirm", WaitingConfirmRequests_.size());
             buffer.AddGauge("/sequoia_waiting_incremental_heartbeats_count", WaitingSequoiaIncrementalHeartbeatRequests_.size());
             buffer.AddGauge("/sequoia_waiting_incremental_heartbeats_replica_count", ReplicasInWaitingSequoiaIncrementalHeartbeatRequests_);
+            buffer.AddGauge("/verbosely_logged_chunk_count", VerboselyLoggedChunks_.size());
 
             {
                 TWithTagGuard guard(&buffer, "mode", "immediate");
@@ -7543,7 +7794,7 @@ private:
         }
 
         BufferedProducer_->Update(std::move(buffer));
-        CrpBufferedProducer_->Update(std::move(crpBuffer));
+        DetailedBufferedProducer_->Update(std::move(detailedBuffer));
     }
 
 
@@ -7623,10 +7874,10 @@ private:
         YT_VERIFY(!IndexToMediumMap_[mediumIndex]);
         IndexToMediumMap_[mediumIndex] = medium;
 
-        YT_LOG_INFO("Medium created (Id: %v, Name: %v, Index: %v)",
-            medium->GetId(),
-            medium->GetName(),
-            medium->GetIndex());
+        YT_TLOG_INFO("Medium created")
+            .With("Id", medium->GetId())
+            .With("Name", medium->GetName())
+            .With("Index", medium->GetIndex());
     }
 
     void UnregisterMedium(TMedium* medium)
@@ -7696,7 +7947,7 @@ private:
             return channel;
         } else {
             THROW_ERROR_EXCEPTION("Chunk replicator for chunk %v is not alive", chunk->GetId())
-                << TErrorAttribute("shard_index", chunk->GetShardIndex());
+                .With("shard_index", chunk->GetShardIndex());
         }
     }
 
@@ -7771,7 +8022,7 @@ private:
                 cellStatistics.set_oldest_part_missing_chunk_count(0);
                 cellStatistics.set_quorum_missing_chunk_count(0);
                 cellStatistics.set_inconsistently_placed_chunk_count(0);
-                if (onlineNodeCount.has_value()) {
+                if (onlineNodeCount) {
                     cellStatistics.set_online_node_count(*onlineNodeCount);
                 }
 
@@ -7780,12 +8031,16 @@ private:
                 auto processResponse = [&] (const TIntrusivePtr<TObjectServiceProxy::TRspExecuteBatch>& rsp, int index, TStringBuf name) {
                     auto currentRspOrError = rsp->GetResponse<TYPathProxy::TRspGet>(index);
                     if (!currentRspOrError.IsOK()) {
-                        YT_LOG_WARNING(currentRspOrError, "Failed to get local cell statistics (StatiscicsName: %v)", name);
+                        YT_TLOG_WARNING("Failed to get local cell statistics")
+                            .With("StatisticsName", name)
+                            .With(currentRspOrError);
                         return;
                     }
                     auto response = ConvertTo<INodePtr>(TYsonString{currentRspOrError.Value()->value()});
                     if (response->GetType() != ENodeType::Int64) {
-                        YT_LOG_ALERT("Response type for local cell statistics is invalid (StatisticsName: %v, ResponseType: %v)", name, response->GetType());
+                        YT_TLOG_ALERT("Response type for local cell statistics is invalid")
+                            .With("StatisticsName", name)
+                            .With("ResponseType", response->GetType());
                         return;
                     }
                     responsesSum[index] += response->AsInt64()->GetValue();
@@ -7793,7 +8048,8 @@ private:
 
                 for (const auto& rspOrError : rspOrErrors) {
                     if (!rspOrError.IsOK()) {
-                        YT_LOG_WARNING(rspOrError, "Failed to get local cell statistics");
+                        YT_TLOG_WARNING("Failed to get local cell statistics")
+                            .With(rspOrError);
                         continue;
                     }
                     const auto& rsp = rspOrError.Value();
@@ -7822,6 +8078,17 @@ private:
         {
             auto chunkPlacementAlerts = ChunkPlacement_->GetAlerts();
             alerts.insert(alerts.end(), chunkPlacementAlerts.begin(), chunkPlacementAlerts.end());
+        }
+
+        auto now = TInstant::Now();
+        auto maxDuration = GetDynamicConfig()->MaxVerboseLoggingEnabledDuration;
+        for (const auto& [chunkId, enabledAt] : VerboselyLoggedChunks_) {
+            if (enabledAt + maxDuration < now) {
+                alerts.push_back(TError("Chunk stays in verbose logging set for too long")
+                    .With("chunk_id", chunkId)
+                    .With("enabled_at", enabledAt)
+                    .With("max_duration", maxDuration));
+            }
         }
 
         return alerts;
@@ -7874,7 +8141,7 @@ private:
         {
             if (newConfig->StoreSequoiaReplicasOnMasterPercentage != oldConfig->StoreSequoiaReplicasOnMasterPercentage &&
                 !newConfig->ProcessRemovedSequoiaReplicasOnMaster) {
-                YT_LOG_ALERT("StoreSequoiaReplicasOnMasterPercentage is changed in Sequoia replicas config, but ProcessRemovedSequoiaReplicasOnMaster is not set");
+                YT_TLOG_ALERT("StoreSequoiaReplicasOnMasterPercentage is changed in Sequoia replicas config, but ProcessRemovedSequoiaReplicasOnMaster is not set");
             }
         };
 
@@ -7902,6 +8169,11 @@ private:
         if (SequoiaBatchIncrementalHeartbeatExecutor_) {
             SequoiaBatchIncrementalHeartbeatExecutor_->SetPeriod(sequoiaReplicasConfig->BatchIncrementalHeartbeatPeriod);
         }
+
+        ModifySequoiaReplicasSemaphore_->SetTotal(
+            sequoiaReplicasConfig->MaxConcurrentSequoiaReplicaModifications);
+        ModifySequoiaReplicasPerReplicaSemaphore_->SetTotal(
+            sequoiaReplicasConfig->MaxConcurrentReplicasInSequoiaReplicaModifications);
     }
 };
 

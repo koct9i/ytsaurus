@@ -63,6 +63,7 @@
 #include <yt/yt/core/misc/fs.h>
 
 #include <yt/yt/core/compression/public.h>
+#include <yt/yt/core/misc/protobuf_helpers.h>
 
 #include <library/cpp/yt/assert/assert.h>
 
@@ -853,7 +854,7 @@ std::unique_ptr<IUniversalReader> CreateMergedVersionedUniversalReader(
         NTableClient::TColumnFilter(),
         New<TRetentionConfig>(),
         AllCommittedTimestamp,
-        0,
+        NYT::NTransactionClient::NullTimestamp,
         columnEvaluator,
         false,
         false);
@@ -1036,9 +1037,9 @@ void ExtractErasureBlocks(
         for (int blockIndex = 0; blockIndex < totalBlockCount; ++blockIndex) {
             if (ToString(groundTruth[blockIndex]) != ToString(repairedBlocks[blockIndex].Data)) {
                 THROW_ERROR_EXCEPTION("Block repair failed")
-                    << TErrorAttribute("repair_iteration", iter)
-                    << TErrorAttribute("block_index", blockIndex)
-                    << TErrorAttribute("erased_parts_indices", erasedIndicesStr);
+                    .With("repair_iteration", iter)
+                    .With("block_index", blockIndex)
+                    .With("erased_parts_indices", erasedIndicesStr);
             }
         }
     }
@@ -1184,11 +1185,11 @@ void GuardedMain(int argc, char** argv)
         .NoArgument()
         .SetFlag(&actionLoop);
     opts.AddLongOption("engine", "I/O Engine (ThreadPool)")
-        .StoreMappedResultT<TString>(&engineType, &TEnumTraits<EIOEngineType>::FromString);
+        .StoreMappedResultT<std::string>(&engineType, &TEnumTraits<EIOEngineType>::FromString);
     opts.AddLongOption("io-config", "I/O Engine config")
         .StoreResult(&ioConfigString);
     opts.AddLongOption("slice-by", "Slice chunk (keys|rows)")
-        .StoreMappedResultT<TString>(&sliceBy, &TEnumTraits<ESliceBy>::FromString);
+        .StoreMappedResultT<std::string>(&sliceBy, &TEnumTraits<ESliceBy>::FromString);
     opts.AddLongOption("slice-data-weight", "Slice data weight")
         .StoreResult(&sliceDataWeight);
     opts.AddLongOption("erasure-chunk", "In case of erasure chunks. Only one chunk processing is supported")

@@ -61,7 +61,7 @@ public:
         , Path_(std::move(path))
         , NamesAndTypesList_(std::move(namesAndTypesList))
         , RevisionTracker_(path.GetPath(), Client_)
-        , Logger(ClickHouseYtLogger().WithTag("Path: %v", Path_))
+        , Logger(ClickHouseYtLogger().WithTag("Path", Path_))
         , Context_(context)
         , QueryBuilder_(std::make_shared<DB::ExternalQueryBuilder>(
             DictionaryStructure_,
@@ -89,15 +89,15 @@ public:
     {
         RevisionTracker_.FixCurrentRevision();
 
-        YT_LOG_INFO("Reloading dictionary (Revision: %llx)", RevisionTracker_.GetRevision());
+        YT_TLOG_INFO("Reloading dictionary")
+            .WithFormat("Revision", "%llx", RevisionTracker_.GetRevision());
 
         auto table = FetchTable();
 
         auto readSchema = BuildReadSchema(*table->Schema);
 
-        auto tableReadSpec = FetchSingleTableReadSpec(TFetchSingleTableReadSpecOptions{
-            .RichPath = Path_,
-            .Client = Client_,
+        TUserObject userObject(Path_);
+        auto tableReadSpec = FetchSingleTableReadSpec(&userObject, Client_, TFetchSingleTableReadSpecOptions{
             .GetUserObjectBasicAttributesOptions = {
                 .OmitInaccessibleRows = true,
             },
@@ -148,7 +148,8 @@ public:
 
     bool isModified() const override
     {
-        YT_LOG_DEBUG("Checking dictionary revision (OldRevision: %llx)", RevisionTracker_.GetRevision());
+        YT_TLOG_DEBUG("Checking dictionary revision")
+            .WithFormat("OldRevision", "%llx", RevisionTracker_.GetRevision());
         return RevisionTracker_.HasRevisionChanged();
     }
 
@@ -206,11 +207,11 @@ private:
             if (!column) {
                 THROW_ERROR_EXCEPTION("Dictionary column %Qv is missing in the source table schema",
                     nameAndType.name)
-                    << TErrorAttribute("config_schema", NamesAndTypesList_.toString())
-                    << TErrorAttribute("actual_schema",
+                    .With("config_schema", NamesAndTypesList_.toString())
+                    .With("actual_schema",
                         ToNamesAndTypesList(tableSchema, New<TConversionSettings>()).toString());
             }
-            columns.emplace_back(*column);
+            columns.push_back(*column);
         }
 
         auto readSchema = New<TTableSchema>(std::move(columns));
@@ -218,8 +219,8 @@ private:
         auto namesAndTypesList = ToNamesAndTypesList(*readSchema, New<TConversionSettings>());
         if (namesAndTypesList != NamesAndTypesList_) {
             THROW_ERROR_EXCEPTION("Dictionary schema does not match the source table schema")
-                << TErrorAttribute("config_schema", NamesAndTypesList_.toString())
-                << TErrorAttribute("actual_schema", namesAndTypesList.toString());
+                .With("config_schema", NamesAndTypesList_.toString())
+                .With("actual_schema", namesAndTypesList.toString());
         }
 
         return readSchema;
@@ -265,11 +266,11 @@ void RegisterTableDictionarySource(THost* host)
         const std::string& /*default_database*/,
         bool /*checkConfig*/) -> DB::DictionarySourcePtr
     {
-        const auto& path = TRichYPath::Parse(TString(config.getString(dictSectionPath + ".yt.path")));
+        const auto path = config.getString(Format("%v.yt.path", dictSectionPath));
         return std::make_unique<TTableDictionarySource>(
             host,
             dictionaryStructure,
-            path,
+            TRichYPath::Parse(TStringBuf(path)),
             sampleBlock.getNamesAndTypesList(),
             context);
     };
@@ -279,13 +280,17 @@ void RegisterTableDictionarySource(THost* host)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-std::optional<NYPath::TYPath> TryGetTableDictionarySourcePath(DB::DictionarySourcePtr source)
+std::optional<NYPath::TYPath> TryGetTableDictionarySourcePath(
+    const DBPoco::Util::AbstractConfiguration& config,
+    const std::string& configPrefix)
 {
-    auto ytSource = std::dynamic_pointer_cast<TTableDictionarySource>(source);
-    if (!ytSource) {
+    const auto pathKey = Format("%v.source.yt.path", configPrefix);
+    if (!config.has(pathKey)) {
         return std::nullopt;
     }
-    return ytSource->Path();
+
+    const auto path = config.getString(pathKey);
+    return TRichYPath::Parse(TStringBuf(path)).GetPath();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

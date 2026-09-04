@@ -3,21 +3,37 @@
 #include <yt/yt/ytlib/api/native/client.h>
 
 #include <yt/yt/ytlib/chunk_client/chunk_reader_host.h>
+#include <yt/yt/ytlib/chunk_client/chunk_reader_options.h>
+#include <yt/yt/ytlib/chunk_client/data_slice_descriptor.h>
+#include <yt/yt/ytlib/chunk_client/data_source.h>
 
 #include <yt/yt/ytlib/distributed_chunk_session_client/config.h>
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_session_pool.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_pool.h>
 
 #include <yt/yt/ytlib/push_based_shuffle_client/config.h>
 #include <yt/yt/ytlib/push_based_shuffle_client/partition_reader.h>
 #include <yt/yt/ytlib/push_based_shuffle_client/session_provider.h>
 #include <yt/yt/ytlib/push_based_shuffle_client/shuffle_writer.h>
+#include <yt/yt/ytlib/push_based_shuffle_client/sort_reader.h>
+#include <yt/yt/ytlib/push_based_shuffle_client/sorted_merging_reader.h>
 
+#include <yt/yt/ytlib/table_client/config.h>
 #include <yt/yt/ytlib/table_client/partitioner.h>
+#include <yt/yt/ytlib/table_client/schemaless_chunk_writer.h>
+#include <yt/yt/ytlib/table_client/schemaless_multi_chunk_reader.h>
 
 #include <yt/yt/client/api/config.h>
+#include <yt/yt/client/api/row_batch_reader.h>
 #include <yt/yt/client/api/transaction.h>
 
+#include <yt/yt/client/object_client/helpers.h>
+
+#include <yt/yt/client/table_client/adapters.h>
+#include <yt/yt/client/table_client/key_bound.h>
+#include <yt/yt/client/table_client/name_table.h>
+#include <yt/yt/client/table_client/row_batch.h>
 #include <yt/yt/client/table_client/row_buffer.h>
+#include <yt/yt/client/table_client/schema.h>
 #include <yt/yt/client/table_client/unversioned_row.h>
 
 #include <yt/yt/core/test_framework/framework.h>
@@ -29,6 +45,9 @@
 #include <algorithm>
 #include <csignal>
 #include <iterator>
+#include <set>
+#include <utility>
+#include <vector>
 
 namespace NYT {
 namespace NCppTests {
@@ -87,10 +106,71 @@ static int GetPidByPort(int port)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+class TSortReaderRowBatchAdapter
+    : public IRowBatchReader
+{
+public:
+    TSortReaderRowBatchAdapter(
+        ISortReaderPtr reader,
+        TNameTablePtr nameTable)
+        : Reader_(std::move(reader))
+        , NameTable_(std::move(nameTable))
+    { }
+
+    IUnversionedRowBatchPtr Read(const TRowBatchReadOptions& /*options*/) override
+    {
+        if (Drained_) {
+            return nullptr;
+        }
+        if (!PendingRows_) {
+            PendingRows_ = Reader_->Read();
+        }
+        if (!PendingRows_.IsSet()) {
+            return CreateEmptyUnversionedRowBatch();
+        }
+
+        auto rows = PendingRows_.GetOrCrash()
+            .ValueOrThrow();
+        PendingRows_.Reset();
+        if (rows.empty()) {
+            Drained_ = true;
+            return nullptr;
+        }
+
+        return CreateBatchFromUnversionedRows(std::move(rows));
+    }
+
+    TFuture<void> GetReadyEvent() const override
+    {
+        return PendingRows_
+            ? PendingRows_.As<void>()
+            : OKFuture;
+    }
+
+    const TNameTablePtr& GetNameTable() const override
+    {
+        return NameTable_;
+    }
+
+private:
+    const ISortReaderPtr Reader_;
+    const TNameTablePtr NameTable_;
+
+    TFuture<TSharedRange<TUnversionedRow>> PendingRows_;
+    bool Drained_ = false;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TPartitionReaderTest
     : public TApiTestBase
 {
 protected:
+    static constexpr int KeyColumnId = 0;
+    static constexpr int WriterIdColumnId = 1;
+    static constexpr int RowIdColumnId = 2;
+    static constexpr int PayloadColumnId = 3;
+
     NNative::IClientPtr NativeClient_;
     NNative::IConnectionPtr NativeConnection_;
     ISuspendableActionQueuePtr ActionQueue_;
@@ -166,7 +246,7 @@ protected:
 
     struct TWrittenRecord
     {
-        i32 MapperId = 0;
+        i32 WriterId = 0;
         i64 RowId = 0;
         i64 Key = 0;
         i64 Value = 0;
@@ -183,7 +263,9 @@ protected:
         int Slot = 0;
     };
 
-    TWriterContext MakeWriter(i32 mapperId)
+    TWriterContext MakeWriter(
+        i32 writerId,
+        IPartitionerPtr partitioner = nullptr)
     {
         TWriterContext ctx;
         ctx.RowBuffer = New<TRowBuffer>();
@@ -194,7 +276,8 @@ protected:
             Transaction_->GetId(),
             WriterOptions_,
             WriterConfig_,
-            ActionQueue_->GetInvoker());
+            ActionQueue_->GetInvoker(),
+            /*sealMonitor*/ nullptr);
 
         auto provider = CreateDirectPartitionWriteSessionProvider(
             ctx.Pool,
@@ -204,22 +287,36 @@ protected:
         writerConfig->MemoryBudget = 16_MB;
         writerConfig->Codec = NCompression::ECodec::Lz4;
 
-        auto partitioner = CreateColumnBasedPartitioner(
-            /*partitionCount*/ 1,
-            /*columnId*/ 0);
+        if (!partitioner) {
+            partitioner = CreateColumnBasedPartitioner(
+                /*partitionCount*/ 1,
+                /*columnId*/ 0);
+        }
 
         ctx.Writer = CreatePushBasedShuffleWriter(
             writerConfig,
             provider,
-            partitioner,
+            std::move(partitioner),
             NativeConnection_,
-            mapperId,
+            writerId,
             ActionQueue_->GetInvoker());
 
         return ctx;
     }
 
-    TWriterContext MakeTightBudgetWriter(i32 mapperId)
+    TWriterContext MakeSinglePartitionSortPipelineWriter(i32 writerId)
+    {
+        std::vector<TOwningKeyBound> partitionLowerBounds{
+            TOwningKeyBound::MakeUniversal(/*isUpper*/ false),
+        };
+        return MakeWriter(
+            writerId,
+            CreateOrderedPartitioner(
+                std::move(partitionLowerBounds),
+                TComparator({ESortOrder::Ascending})));
+    }
+
+    TWriterContext MakeTightBudgetWriter(i32 writerId)
     {
         TWriterContext ctx;
         ctx.RowBuffer = New<TRowBuffer>();
@@ -230,7 +327,8 @@ protected:
             Transaction_->GetId(),
             WriterOptions_,
             WriterConfig_,
-            ActionQueue_->GetInvoker());
+            ActionQueue_->GetInvoker(),
+            /*sealMonitor*/ nullptr);
 
         auto provider = CreateDirectPartitionWriteSessionProvider(
             ctx.Pool,
@@ -248,12 +346,12 @@ protected:
             provider,
             partitioner,
             NativeConnection_,
-            mapperId,
+            writerId,
             ActionQueue_->GetInvoker());
         return ctx;
     }
 
-    void WriteRecords(TWriterContext& ctx, int count, i32 mapperIdToTrack)
+    void WriteRecords(TWriterContext& ctx, int count, i32 writerIdToTrack)
     {
         std::vector<TUnversionedRow> rows;
         for (int i = 0; i < count; ++i) {
@@ -263,13 +361,31 @@ protected:
             rb.AddValue(MakeUnversionedInt64Value(i * 1000, /*id*/ 2));
             rows.push_back(ctx.RowBuffer->CaptureRow(rb.GetRow()));
             ctx.WrittenRecords.push_back({
-                mapperIdToTrack,
+                writerIdToTrack,
                 static_cast<i64>(ctx.WrittenRecords.size()),
                 static_cast<i64>(i),
                 static_cast<i64>(i * 1000),
             });
         }
         WaitFor(ctx.Writer->Write(TRange<TUnversionedRow>(rows.data(), rows.size())))
+            .ThrowOnError();
+    }
+
+    void WriteSortPipelineRows(
+        TWriterContext* context,
+        const std::vector<std::pair<i64, i64>>& keyPayloadPairs)
+    {
+        YT_VERIFY(context);
+
+        std::vector<TUnversionedRow> rows;
+        rows.reserve(keyPayloadPairs.size());
+        for (const auto& [key, payload] : keyPayloadPairs) {
+            TUnversionedRowBuilder builder;
+            builder.AddValue(MakeUnversionedInt64Value(key, KeyColumnId));
+            builder.AddValue(MakeUnversionedInt64Value(payload, PayloadColumnId));
+            rows.push_back(context->RowBuffer->CaptureRow(builder.GetRow()));
+        }
+        WaitFor(context->Writer->Write(TRange(rows)))
             .ThrowOnError();
     }
 
@@ -301,7 +417,7 @@ protected:
         return GetChunkInfos(ctx);
     }
 
-    IPushBasedPartitionReaderPtr MakeReader()
+    TPartitionReaderConfigPtr MakePartitionReaderConfig()
     {
         auto config = New<TPartitionReaderConfig>();
         config->ChunkSessionReaderConfig = New<TDistributedChunkSessionReaderConfig>();
@@ -320,12 +436,137 @@ protected:
         config->RowBufferStartChunkSize = 64_KB;
         config->MaxBytesPerRead = 64_MB;
 
+        return config;
+    }
+
+    IPushBasedPartitionReaderPtr MakeReader()
+    {
         return CreatePushBasedPartitionReader(
-            config,
+            MakePartitionReaderConfig(),
             NativeClient_,
             New<TChunkReaderHost>(NativeClient_),
             /*readQuorum*/ 2,
             ActionQueue_->GetInvoker());
+    }
+
+    ISortReaderPtr MakeIdentityPreservingSortReader(
+        const std::vector<TSlotChunkInfo>& chunks,
+        TIdentityColumnIds identityColumnIds)
+    {
+        auto sortConfig = New<TSortReaderConfig>();
+        sortConfig->BucketRowCount = 2;
+        sortConfig->MaxRowsPerRead = 2;
+
+        auto reader = CreateSortReader(
+            sortConfig,
+            MakePartitionReaderConfig(),
+            NativeClient_,
+            New<TChunkReaderHost>(NativeClient_),
+            /*readQuorum*/ 2,
+            TComparator({ESortOrder::Ascending}),
+            identityColumnIds,
+            ActionQueue_->GetInvoker(),
+            ActionQueue_->GetInvoker());
+        for (const auto& chunk : chunks) {
+            reader->AddChunk(
+                chunk.ChunkId,
+                chunk.Replicas,
+                /*startRecordIndex*/ 0,
+                /*rangeEndRecordIndex*/ std::nullopt);
+        }
+        reader->SetNoMoreChunks();
+        return reader;
+    }
+
+    std::vector<NChunkClient::NProto::TChunkSpec> WriteIntermediateChunks(
+        const ISortReaderPtr& reader,
+        const TTableSchemaPtr& schema,
+        const TNameTablePtr& nameTable)
+    {
+        auto options = New<NTableClient::TTableWriterOptions>();
+        options->Account = "intermediate";
+
+        auto writer = CreateSchemalessMultiChunkWriter(
+            New<NTableClient::TTableWriterConfig>(),
+            options,
+            nameTable,
+            schema,
+            /*lastKey*/ {},
+            NativeClient_,
+            /*localHostName*/ {},
+            NObjectClient::CellTagFromId(Transaction_->GetId()),
+            Transaction_->GetId(),
+            NullTableSchemaId,
+            /*dataSink*/ {},
+            /*writeBlocksOptions*/ {});
+
+        PipeReaderToWriter(
+            New<TSortReaderRowBatchAdapter>(reader, nameTable),
+            writer,
+            /*options*/ {});
+
+        auto chunkSpecs = writer->GetWrittenChunkSpecs();
+        YT_VERIFY(std::ssize(chunkSpecs) == 1);
+        chunkSpecs[0].set_use_new_override_semantics(true);
+        chunkSpecs[0].set_row_count_override(
+            writer->GetDataStatistics().row_count());
+        return chunkSpecs;
+    }
+
+    ISchemalessMultiChunkReaderPtr MakeIntermediateReader(
+        const std::vector<NChunkClient::NProto::TChunkSpec>& chunkSpecs,
+        const TTableSchemaPtr& schema,
+        const TNameTablePtr& nameTable)
+    {
+        auto sourceDirectory = New<TDataSourceDirectory>();
+        auto& source = sourceDirectory->DataSources().emplace_back(New<TDataSource>());
+        source->Schema() = schema;
+
+        std::vector<TDataSliceDescriptor> dataSlices;
+        dataSlices.reserve(chunkSpecs.size());
+        for (const auto& chunkSpec : chunkSpecs) {
+            dataSlices.emplace_back(chunkSpec);
+        }
+
+        return CreateSchemalessSequentialMultiReader(
+            New<NTableClient::TTableReaderConfig>(),
+            New<NTableClient::TTableReaderOptions>(),
+            New<TMultiChunkReaderHost>(New<TChunkReaderHost>(NativeClient_)),
+            sourceDirectory,
+            dataSlices,
+            /*hintKeyPrefixes*/ std::nullopt,
+            nameTable,
+            /*chunkReadOptions*/ {},
+            TReaderInterruptionOptions::NonInterruptible());
+    }
+
+    std::vector<std::pair<i64, i64>> DrainMergedReader(
+        const ISchemalessMultiChunkReaderPtr& reader)
+    {
+        std::vector<std::pair<i64, i64>> keyPayloadPairs;
+        TRowBatchReadOptions readOptions{
+            .MaxRowsPerRead = 1,
+        };
+        while (auto batch = reader->Read(readOptions)) {
+            if (batch->IsEmpty()) {
+                WaitFor(reader->GetReadyEvent())
+                    .ThrowOnError();
+                continue;
+            }
+
+            for (const auto& row : batch->MaterializeRows()) {
+                EXPECT_EQ(row.GetCount(), 2u);
+                if (row.GetCount() != 2) {
+                    continue;
+                }
+                EXPECT_EQ(row[0].Id, KeyColumnId);
+                EXPECT_EQ(row[1].Id, PayloadColumnId);
+                keyPayloadPairs.emplace_back(
+                    row[0].Data.Int64,
+                    row[1].Data.Int64);
+            }
+        }
+        return keyPayloadPairs;
     }
 
     std::vector<TWrittenRecord> DrainReader(const IPushBasedPartitionReaderPtr& reader)
@@ -338,7 +579,7 @@ protected:
                 for (int i = 0; i < record.Header.RowCount; ++i) {
                     auto row = record.Rows[i];
                     out.push_back({
-                        record.Header.MapperId,
+                        record.Header.WriterId,
                         record.Header.StartRow + i,
                         row[1].Data.Int64,
                         row[2].Data.Int64,
@@ -357,9 +598,9 @@ protected:
 
 TEST_F(TPartitionReaderTest, RoundTripHappyPath)
 {
-    auto writerCtx = MakeWriter(/*mapperId*/ 42);
+    auto writerCtx = MakeWriter(/*writerId*/ 42);
     constexpr int M = 200;
-    WriteRecords(writerCtx, M, /*mapperIdToTrack*/ 42);
+    WriteRecords(writerCtx, M, /*writerIdToTrack*/ 42);
     CloseAndFinalize(writerCtx);
 
     auto chunks = GetChunkInfos(writerCtx);
@@ -393,8 +634,8 @@ TEST_F(TPartitionReaderTest, MultiChunkReader)
     constexpr int RecordsPerWriter = 100;
     std::vector<TWriterContext> writerCtxs;
     for (int i = 0; i < NumWriters; ++i) {
-        auto ctx = MakeWriter(/*mapperId*/ i);
-        WriteRecords(ctx, RecordsPerWriter, /*mapperIdToTrack*/ i);
+        auto ctx = MakeWriter(/*writerId*/ i);
+        WriteRecords(ctx, RecordsPerWriter, /*writerIdToTrack*/ i);
         CloseAndFinalize(ctx);
         writerCtxs.push_back(std::move(ctx));
     }
@@ -428,15 +669,117 @@ TEST_F(TPartitionReaderTest, MultiChunkReader)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+TEST_F(TPartitionReaderTest, MultipleIntermediateSortersRoundTripThroughSortedMerge)
+{
+    const std::vector<std::pair<i64, i64>> retriedRows{
+        {3, 103},
+        {1, 101},
+        {2, 102},
+    };
+
+    auto originalWriter = MakeSinglePartitionSortPipelineWriter(/*writerId*/ 1);
+    WriteSortPipelineRows(&originalWriter, retriedRows);
+    CloseAndFinalize(originalWriter);
+
+    auto retryWriter = MakeSinglePartitionSortPipelineWriter(/*writerId*/ 1);
+    WriteSortPipelineRows(&retryWriter, retriedRows);
+    CloseAndFinalize(retryWriter);
+
+    auto secondWriter = MakeSinglePartitionSortPipelineWriter(/*writerId*/ 2);
+    WriteSortPipelineRows(&secondWriter, {
+        {2, 202},
+        {0, 200},
+        {4, 204},
+    });
+    CloseAndFinalize(secondWriter);
+
+    auto invalidWriter = MakeSinglePartitionSortPipelineWriter(/*writerId*/ 99);
+    WriteSortPipelineRows(&invalidWriter, {
+        {0, 900},
+        {5, 905},
+    });
+    CloseAndFinalize(invalidWriter);
+
+    auto originalChunks = GetChunkInfos(originalWriter);
+    auto retryChunks = GetChunkInfos(retryWriter);
+    auto secondWriterChunks = GetChunkInfos(secondWriter);
+    auto invalidWriterChunks = GetChunkInfos(invalidWriter);
+    ASSERT_FALSE(originalChunks.empty());
+    ASSERT_FALSE(retryChunks.empty());
+    ASSERT_FALSE(secondWriterChunks.empty());
+    ASSERT_FALSE(invalidWriterChunks.empty());
+
+    std::vector<TSlotChunkInfo> firstSorterChunks = originalChunks;
+    firstSorterChunks.insert(
+        firstSorterChunks.end(),
+        invalidWriterChunks.begin(),
+        invalidWriterChunks.end());
+    std::vector<TSlotChunkInfo> secondSorterChunks = retryChunks;
+    secondSorterChunks.insert(
+        secondSorterChunks.end(),
+        secondWriterChunks.begin(),
+        secondWriterChunks.end());
+
+    const TIdentityColumnIds identityColumnIds{
+        .WriterId = WriterIdColumnId,
+        .RowId = RowIdColumnId,
+    };
+    auto intermediateSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("key", EValueType::Int64, ESortOrder::Ascending),
+        TColumnSchema("writer_id", EValueType::Int64, ESortOrder::Ascending),
+        TColumnSchema("row_id", EValueType::Int64, ESortOrder::Ascending),
+        TColumnSchema("payload", EValueType::Int64),
+    });
+    auto intermediateNameTable = TNameTable::FromSchema(*intermediateSchema);
+
+    auto firstIntermediateChunks = WriteIntermediateChunks(
+        MakeIdentityPreservingSortReader(firstSorterChunks, identityColumnIds),
+        intermediateSchema,
+        intermediateNameTable);
+    auto secondIntermediateChunks = WriteIntermediateChunks(
+        MakeIdentityPreservingSortReader(secondSorterChunks, identityColumnIds),
+        intermediateSchema,
+        intermediateNameTable);
+
+    std::vector<ISchemalessMultiChunkReaderPtr> intermediateReaders{
+        MakeIntermediateReader(
+            firstIntermediateChunks,
+            intermediateSchema,
+            intermediateNameTable),
+        MakeIntermediateReader(
+            secondIntermediateChunks,
+            intermediateSchema,
+            intermediateNameTable),
+    };
+    auto mergedReader = CreateIdentityAwareSortedMergingReader(
+        intermediateReaders,
+        intermediateSchema->ToComparator(),
+        identityColumnIds,
+        TValidWriterIds{1, 2});
+
+    EXPECT_EQ(
+        DrainMergedReader(mergedReader),
+        (std::vector<std::pair<i64, i64>>{
+            {0, 200},
+            {1, 101},
+            {2, 102},
+            {2, 202},
+            {3, 103},
+            {4, 204},
+        }));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 TEST_F(TPartitionReaderTest, DynamicAddChunk)
 {
-    auto ctx1 = MakeWriter(/*mapperId*/ 1);
+    auto ctx1 = MakeWriter(/*writerId*/ 1);
     WriteRecords(ctx1, /*count*/ 50, 1);
     CloseAndFinalize(ctx1);
     auto chunks1 = GetChunkInfos(ctx1);
     ASSERT_FALSE(chunks1.empty());
 
-    auto ctx2 = MakeWriter(/*mapperId*/ 2);
+    auto ctx2 = MakeWriter(/*writerId*/ 2);
     WriteRecords(ctx2, /*count*/ 50, 2);
     CloseAndFinalize(ctx2);
     auto chunks2 = GetChunkInfos(ctx2);
@@ -455,7 +798,7 @@ TEST_F(TPartitionReaderTest, DynamicAddChunk)
             for (int i = 0; i < record.Header.RowCount; ++i) {
                 auto row = record.Rows[i];
                 phase1Records.push_back({
-                    record.Header.MapperId,
+                    record.Header.WriterId,
                     record.Header.StartRow + i,
                     row[1].Data.Int64,
                     row[2].Data.Int64,
@@ -478,7 +821,7 @@ TEST_F(TPartitionReaderTest, DynamicAddChunk)
             for (int i = 0; i < record.Header.RowCount; ++i) {
                 auto row = record.Rows[i];
                 allRecords.push_back({
-                    record.Header.MapperId,
+                    record.Header.WriterId,
                     record.Header.StartRow + i,
                     row[1].Data.Int64,
                     row[2].Data.Int64,
@@ -507,8 +850,8 @@ TEST_F(TPartitionReaderTest, DynamicAddChunk)
 
 TEST_F(TPartitionReaderTest, ReadWhileWriting)
 {
-    auto ctx = MakeTightBudgetWriter(/*mapperId*/ 5);
-    WriteRecords(ctx, /*count*/ 30, /*mapperIdToTrack*/ 5);
+    auto ctx = MakeTightBudgetWriter(/*writerId*/ 5);
+    WriteRecords(ctx, /*count*/ 30, /*writerIdToTrack*/ 5);
 
     auto chunksMid = WaitForFirstChunk(ctx);
     ASSERT_FALSE(chunksMid.empty());
@@ -525,7 +868,7 @@ TEST_F(TPartitionReaderTest, ReadWhileWriting)
                 for (int i = 0; i < record.Header.RowCount; ++i) {
                     auto row = record.Rows[i];
                     out.push_back({
-                        record.Header.MapperId,
+                        record.Header.WriterId,
                         record.Header.StartRow + i,
                         row[1].Data.Int64,
                         row[2].Data.Int64,
@@ -541,7 +884,7 @@ TEST_F(TPartitionReaderTest, ReadWhileWriting)
         .AsyncVia(ActionQueue_->GetInvoker())
         .Run();
 
-    WriteRecords(ctx, /*count*/ 30, /*mapperIdToTrack*/ 5);
+    WriteRecords(ctx, /*count*/ 30, /*writerIdToTrack*/ 5);
     CloseAndFinalize(ctx);
     reader->SetNoMoreChunks();
 
@@ -565,7 +908,7 @@ TEST_F(TPartitionReaderTest, ReadWhileWriting)
 
 TEST_F(TPartitionReaderTest, DataNodeFailureDuringRead)
 {
-    auto ctx = MakeTightBudgetWriter(/*mapperId*/ 9);
+    auto ctx = MakeTightBudgetWriter(/*writerId*/ 9);
     WriteRecords(ctx, /*count*/ 30, 9);
 
     auto chunks = WaitForFirstChunk(ctx);
@@ -584,7 +927,7 @@ TEST_F(TPartitionReaderTest, DataNodeFailureDuringRead)
                 for (int i = 0; i < record.Header.RowCount; ++i) {
                     auto row = record.Rows[i];
                     out.push_back({
-                        record.Header.MapperId,
+                        record.Header.WriterId,
                         record.Header.StartRow + i,
                         row[1].Data.Int64,
                         row[2].Data.Int64,

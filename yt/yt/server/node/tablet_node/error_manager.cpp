@@ -107,10 +107,10 @@ void ResetErrorManagerContext()
 TError EnrichErrorForErrorManager(TError&& error, const TTabletSnapshotPtr& tabletSnapshot)
 {
     return std::move(error)
-        << TErrorAttribute("tablet_cell_bundle", tabletSnapshot->TabletCellBundle)
-        << TErrorAttribute("table_path", tabletSnapshot->TablePath)
-        << TErrorAttribute("table_id", tabletSnapshot->TableId)
-        << TErrorAttribute("tablet_id", tabletSnapshot->TabletId);
+        .With("tablet_cell_bundle", tabletSnapshot->TabletCellBundle)
+        .With("table_path", tabletSnapshot->TablePath)
+        .With("table_id", tabletSnapshot->TableId)
+        .With("tablet_id", tabletSnapshot->TabletId);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -168,9 +168,9 @@ public:
             if (now - logNoContextLastTime >= logNoContextInterval &&
                 LogNoContextLastTime_.compare_exchange_strong(logNoContextLastTime, now, std::memory_order::relaxed))
             {
-                YT_LOG_WARNING("No error manager context for error handling (Error: %v, Method: %v)",
-                    error,
-                    method);
+                YT_TLOG_WARNING("No error manager context for error handling")
+                    .With("Error", error)
+                    .With("Method", method);
             }
 
             return;

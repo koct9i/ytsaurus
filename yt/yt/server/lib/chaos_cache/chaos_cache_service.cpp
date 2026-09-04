@@ -61,42 +61,42 @@ public:
         const TReplicationCardPtr& replicationCard,
         TTimestamp timestamp) override
     {
-        YT_LOG_DEBUG("Replication card updated (ReplicationCardId: %v, Timestamp: %v)",
-            replicationCardId,
-            timestamp);
+        YT_TLOG_DEBUG("Replication card updated")
+            .With("ReplicationCardId", replicationCardId)
+            .With("Timestamp", timestamp);
 
-        ReplicationCardsWatcher_->OnReplicationCardUpdated(replicationCardId, replicationCard, timestamp);
+        ReplicationCardsWatcher_->OnObjectUpdated(replicationCardId, replicationCard, timestamp);
         ChaosCache_->TryRemove(GetKey(replicationCardId));
     }
 
     void OnReplicationCardDeleted(TReplicationCardId replicationCardId) override
     {
-        YT_LOG_DEBUG("Replication card deleted (ReplicationCardId: %v)",
-            replicationCardId);
+        YT_TLOG_DEBUG("Replication card deleted")
+            .With("ReplicationCardId", replicationCardId);
 
-        ReplicationCardsWatcher_->OnReplicationCardRemoved(replicationCardId);
+        ReplicationCardsWatcher_->OnObjectRemoved(replicationCardId);
         ChaosCache_->TryRemove(GetKey(replicationCardId));
     }
 
     void OnUnknownReplicationCard(TReplicationCardId replicationCardId) override
     {
-        YT_LOG_DEBUG("Unknown replication card (ReplicationCardId: %v)",
-            replicationCardId);
+        YT_TLOG_DEBUG("Unknown replication card")
+            .With("ReplicationCardId", replicationCardId);
 
         ChaosCache_->TryRemove(GetKey(replicationCardId));
     }
 
     void OnNothingChanged(TReplicationCardId replicationCardId) override
     {
-        if (ReplicationCardsWatcher_->GetLastSeenWatchers(replicationCardId) + ExpirationDelay_ < TInstant::Now() &&
-            ReplicationCardsWatcher_->TryUnregisterReplicationCard(replicationCardId))
+        if (ReplicationCardsWatcher_->GetLastSeenWatchersTime(replicationCardId) + ExpirationDelay_ < TInstant::Now() &&
+            ReplicationCardsWatcher_->TryUnregisterObject(replicationCardId))
         {
             if (auto owner = Owner_.Lock()) {
                 owner->StopWatchingReplicationCard(replicationCardId);
             }
 
-            YT_LOG_DEBUG("Watching request expired. Watcher expired and unregistered (ReplicationCardId: %v)",
-                replicationCardId);
+            YT_TLOG_DEBUG("Watching request expired; watcher expired and unregistered")
+                .With("ReplicationCardId", replicationCardId);
         }
     }
 
@@ -268,9 +268,9 @@ DEFINE_RPC_SERVICE_METHOD(TChaosCacheService, GetReplicationCard)
             .FetchOptions = extendedFetchOptions,
         };
 
-        YT_LOG_DEBUG("Serving request from cache (RequestId: %v, Key: %v)",
-            requestId,
-            key);
+        YT_TLOG_DEBUG("Serving request from cache")
+            .With("RequestId", requestId)
+            .With("Key", key);
 
         auto expireAfterSuccessfulUpdateTime = FromProto<TDuration>(cachingRequestHeaderExt.expire_after_successful_update_time());
         auto expireAfterFailedUpdateTime = FromProto<TDuration>(cachingRequestHeaderExt.expire_after_failed_update_time());
@@ -313,7 +313,8 @@ DEFINE_RPC_SERVICE_METHOD(TChaosCacheService, GetReplicationCard)
             replicationCardId,
             fetchOptions);
 
-        YT_LOG_DEBUG("Serving request directly (RequestId: %v)", requestId);
+        YT_TLOG_DEBUG("Serving request directly")
+            .With("RequestId", requestId);
 
         // TODO(osidorkin): Get rid of Client_ here: No need to call WaitFor and checking options again inside it.
         NApi::TGetReplicationCardOptions getCardOptions;
@@ -338,12 +339,12 @@ DEFINE_RPC_SERVICE_METHOD(TChaosCacheService, WatchReplicationCard)
         replicationCardId,
         cacheTimestamp);
 
-    auto state = ReplicationCardsWatcher_->WatchReplicationCard(
+    auto state = ReplicationCardsWatcher_->WatchObject(
         replicationCardId,
         cacheTimestamp,
         CreateReplicationCardWatcherCallbacks(context),
         /*allowUnregistered*/ true);
-    if (state != EReplicationCardWatherState::Deleted) {
+    if (state != EObjectWatcherState::Deleted) {
         ReplicationCardsWatcherClient_->WatchReplicationCard(replicationCardId);
     }
 }

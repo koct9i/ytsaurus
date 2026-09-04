@@ -167,9 +167,6 @@ public:
     //! Returns |true| if location is sick.
     bool IsSick() const;
 
-    //! Returns limit on the maximum memory used of probe put blocks.
-    i64 GetLegacyWriteMemoryLimit() const;
-
     //! Returns limit on the maximum memory used of location reads.
     i64 GetReadMemoryLimit() const;
 
@@ -205,10 +202,17 @@ public:
     //! Try changing location status to disabled. For this location disk must be active and test can run without I/O errors.
     bool OnDiskRepaired();
 
+    TFairShareHierarchicalSlotQueueSlotPtr<std::string> CreateFairShareQueueSlot(
+        i64 size,
+        std::vector<IFairShareHierarchicalSlotQueueResourcePtr> resources,
+        std::vector<TFairShareHierarchyLevel<std::string>> levels);
+
     TErrorOr<TLocationFairShareSlotPtr> AddFairShareQueueSlot(
         i64 size,
         std::vector<IFairShareHierarchicalSlotQueueResourcePtr> resources,
         std::vector<TFairShareHierarchyLevel<std::string>> levels);
+    TErrorOr<TLocationFairShareSlotPtr> AddFairShareQueueSlot(
+        TFairShareHierarchicalSlotQueueSlotPtr<std::string> slot);
 
     NIO::IIOEngineWorkloadModelPtr GetIOEngineModel() const;
 

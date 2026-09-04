@@ -34,6 +34,7 @@ try:
 except ImportError:
     HAS_IDM_CLI_HELPERS = False
 
+from yt.admin.bundle_controller import add_bundle_controller_parser
 from yt.admin.describe import add_describe_parser
 from yt.admin.logs_k8s import add_logs_parser
 from yt.admin.metrics.cli import add_metrics_parser
@@ -55,11 +56,16 @@ import signal
 import time
 from argparse import ArgumentParser, Action, RawDescriptionHelpFormatter
 from datetime import datetime
+from typing import Optional
 
 from .strawberry_parser import add_strawberry_ctl_parser
 from .command_explain_id import add_explain_id_parser
 
 HAS_SKY_SHARE = hasattr(yt, "sky_share")
+
+EXIT_STATUS_VALID = 0
+EXIT_STATUS_INVALID = 1
+EXIT_STATUS_ERROR = 126
 
 DESCRIPTION = '''Shell utility to work with YT system.\n
 Cypress (metainformation tree) commands:
@@ -300,6 +306,11 @@ def add_read_from_arguments(parser):
 def add_sort_order_argument(parser, name, help, required):
     DESCRIPTION = "In order to choose descending sort order, provide a map of form '{name=foo; sort_order=descending}'"
     add_argument(parser, name, help, DESCRIPTION, action=ParseAppendStructuredDataOrString, required=required)
+
+
+def add_quiet_argument(parser):
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="Do not write anything to standard output; exit with 0 if permission is granted, 1 otherwise")
 
 
 def add_boolean_argument(parser, name, negation_prefix="no", default=None, required=False, help=None):
@@ -994,6 +1005,7 @@ def add_reshard_table_parser(add_parser):
     parser.add_argument("--uniform", action="store_true")
     parser.add_argument("--slicing-accuracy", type=float)
     parser.add_argument("--trimmed-row-counts", type=int, nargs="+")
+    parser.add_argument("--cumulative-data-weights", type=int, nargs="+")
     enable_slicing_parser = parser.add_mutually_exclusive_group(required=False)
     enable_slicing_parser.add_argument(
         "--enable-slicing", dest="enable_slicing", default=None, action="store_true")
@@ -1100,6 +1112,7 @@ def add_select_rows_parser(add_parser):
     group.add_argument("--forbid-join-without-index", dest="allow_join_without_index",
                        default=None, action="store_false")
     parser.add_argument("--execution-pool", type=str)
+    parser.add_argument("--replica-consistency", type=str, choices=["none", "sync"])
     parser.add_argument("--format", action=ParseFormat)
     parser.add_argument("--print-statistics", default=None, action="store_true")
     parser.add_argument("--syntax-version", type=int)
@@ -1153,6 +1166,7 @@ def add_lookup_rows_parser(add_parser):
     add_format_argument(parser, help="input format")
     parser.add_argument("--timestamp", type=int)
     parser.add_argument("--versioned", action="store_true", help="return all versions of the requested rows")
+    parser.add_argument("--replica-consistency", type=str, choices=["none", "sync"])
     parser.add_argument("--column-name", action="append", help="column name to lookup", dest="column_names")
     parser.set_defaults(input_stream=get_binary_std_stream(sys.stdin))
 
@@ -1997,9 +2011,24 @@ def add_unlock_parser(add_parser):
     add_ypath_argument(parser, "path", hybrid=True)
 
 
+def print_to_output_or_quiet(result: str, quiet: Optional[bool] = None, is_valid: Optional[bool] = None):
+    if quiet:
+        yt.config._cleanup()
+        if is_valid is not None:
+            sys.exit(EXIT_STATUS_VALID if is_valid else EXIT_STATUS_INVALID)
+        sys.exit(EXIT_STATUS_ERROR)
+    else:
+        print_to_output(result, eoln=False)
+
+
 @copy_docstring_from(yt.check_permission)
-def check_permission(**kwargs):
-    print_to_output(yt.check_permission(**kwargs), eoln=False)
+def check_permission(quiet=False, **kwargs):
+    if quiet:
+        kwargs["format"] = None
+
+    result = yt.check_permission(**kwargs)
+
+    print_to_output_or_quiet(result, quiet, is_valid=quiet and (result["action"] == "allow"))
 
 
 def add_check_permission_parser(add_parser):
@@ -2010,6 +2039,7 @@ def add_check_permission_parser(add_parser):
     add_read_from_arguments(parser)
     add_structured_argument(parser, "--columns")
     add_structured_format_argument(parser, default=output_format)
+    add_quiet_argument(parser)
 
 
 def member_args(parser):
@@ -2616,6 +2646,9 @@ def add_admin_parser(root_subparsers):
     # remove unrecognized master options
     add_remove_master_unrecognized_options_parser(admin_subparsers)
 
+    # bundle controller
+    add_bundle_controller_parser(admin_subparsers)
+
 
 def add_dirtable_parser(root_subparsers):
     parser = populate_argument_help(root_subparsers.add_parser("dirtable", description="Upload/download to file system commands"))
@@ -2722,6 +2755,15 @@ def add_chyt_parser(root_subparsers):
         add_clickhouse_start_clique_parser(add_clickhouse_subparser)
         add_clickhouse_execute_parser(add_clickhouse_subparser)
         add_strawberry_ctl_parser(add_clickhouse_subparser, "chyt")
+
+
+def add_dq_parser(root_subparsers):
+    parser = populate_argument_help(root_subparsers.add_parser(
+        "dq", description="DQ clique commands"))
+
+    dq_subparsers = parser.add_subparsers(metavar="dq_command", **SUBPARSER_KWARGS)
+    add_dq_subparser = add_subparser(dq_subparsers, params_argument=False)
+    add_strawberry_ctl_parser(add_dq_subparser, "dq")
 
 
 def add_jupyt_parser(root_subparsers):
@@ -2942,7 +2984,10 @@ def show_flow_describe_result(**kwargs):
     """Execute YT Flow describe-pipeline command
 
     :param pipeline_path: path to pipeline.
+    :param status_only: describe only the pipeline status and its messages.
     """
+    if kwargs.pop("status_only"):
+        kwargs["flow_argument"] = {"status_only": True}
     result = yt.flow_execute(**kwargs, flow_command="describe-pipeline")
     if kwargs["output_format"] is None:
         result = dump_data(result)
@@ -2953,6 +2998,8 @@ def add_flow_describe_parser(add_parser):
     parser = add_parser("describe-pipeline", show_flow_describe_result,
                         help="Execute YT Flow describe command")
     add_ypath_argument(parser, "pipeline_path", hybrid=True)
+    parser.add_argument("--status-only", action="store_true",
+                        help="Describe only the pipeline status and its messages")
     add_structured_format_argument(parser, "--output-format")
 
 
@@ -3335,6 +3382,7 @@ def _prepare_parser():
     add_run_command_with_lock_parser(add_parser)
 
     add_chyt_parser(subparsers)
+    add_dq_parser(subparsers)
     add_jupyt_parser(subparsers)
     add_spark_parser(subparsers)
     add_flow_parser(subparsers)

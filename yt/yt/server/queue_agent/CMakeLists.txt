@@ -58,8 +58,10 @@ target_sources(yt-server-queue_agent PRIVATE
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/dynamic_config_manager.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/helpers.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/multi_consumer_controller.cpp
+  ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/multi_consumer_names_garbage_collector.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/multi_consumer_profile_manager.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/object.cpp
+  ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/ytree_helpers.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/pass_profiler.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/performance_counters.cpp
   ${PROJECT_SOURCE_DIR}/yt/yt/server/queue_agent/profile_manager.cpp

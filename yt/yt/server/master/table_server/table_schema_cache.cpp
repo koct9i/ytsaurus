@@ -31,7 +31,7 @@ TTableSchemaCache::TTableSchemaCache(TAsyncExpiringCacheConfigPtr config)
     : TAsyncExpiringCache<TCompactTableSchemaPtr, TTableSchemaPtr>(
         std::move(config),
         NRpc::TDispatcher::Get()->GetHeavyInvoker(),
-        TableServerLogger().WithTag("Cache: TableSchema"),
+        TableServerLogger().WithTag("Cache", "TableSchema"),
         TableServerProfiler().WithPrefix("/table_schema_cache"))
 { }
 
@@ -87,7 +87,7 @@ TErrorOr<TTableSchemaPtr> TTableSchemaCache::ConvertToHeavyTableSchema(const TCo
     } catch (const std::exception& ex) {
         auto result = TError(NCellServer::EErrorCode::CompactSchemaParseError,
             "Failed to parse table schema");
-        result <<= TError(ex);
+        result.Add(TError(ex));
         return result;
     }
 }
@@ -98,7 +98,7 @@ TYsonTableSchemaCache::TYsonTableSchemaCache(const TWeakPtr<ITableManager>& weak
     : TAsyncExpiringCache<TCompactTableSchemaPtr, TYsonString>(
         config,
         NRpc::TDispatcher::Get()->GetHeavyInvoker(),
-        TableServerLogger().WithTag("Cache: YsonTableSchema"),
+        TableServerLogger().WithTag("Cache", "YsonTableSchema"),
         TableServerProfiler().WithPrefix("/yson_table_schema_cache"))
     , WeakTableManager_(weakTableManager)
 { }
@@ -128,7 +128,7 @@ TFuture<TYsonString> TYsonTableSchemaCache::DoGet(
     } catch (const std::exception& ex) {
         auto result = TError(NCellServer::EErrorCode::CompactSchemaParseError,
             "Failed to convert table schema to yson string");
-        result <<= TError(ex);
+        result.Add(TError(ex));
         return result;
     }
 }

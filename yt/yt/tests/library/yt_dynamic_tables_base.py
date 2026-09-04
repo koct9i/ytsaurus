@@ -13,7 +13,9 @@ from yt_commands import ( # noqa
     remount_table, create
 )
 
-import yt_smooth_movement_helper_base
+from yt.yt.tests.library.smooth_movement_helper import (
+    SmoothMovementHelperBase, CommandProvider as SmoothMomentHelperCommandProvider
+)
 
 from yt.common import YtError
 
@@ -24,6 +26,7 @@ import yt_error_codes
 from concurrent.futures import ThreadPoolExecutor
 
 import builtins
+import time
 
 ##################################################################
 
@@ -477,6 +480,7 @@ class DynamicTablesBase(YTEnvSetup):
         return sensors[0]
 
     def _insert_rows_with_hunk_storage(self, path, rows, tx=None, retry_count=100):
+        last_error = None
         iteration = 0
         while iteration < retry_count:
             iteration += 1
@@ -490,8 +494,12 @@ class DynamicTablesBase(YTEnvSetup):
                 if not e.contains_code(yt_error_codes.HunkTabletStoreToggleConflict) and \
                    not e.contains_code(yt_error_codes.HunkStoreAllocationFailed):
                     raise e
+                last_error = e
+                time.sleep(0.1)
+        raise last_error
 
     def _write_hunks_with_retries(self, path, rows, tablet_index=0, retry_count=100):
+        last_error = None
         iteration = 0
         while iteration < retry_count:
             iteration += 1
@@ -502,6 +510,9 @@ class DynamicTablesBase(YTEnvSetup):
                 if not e.contains_code(yt_error_codes.HunkTabletStoreToggleConflict) and \
                    not e.contains_code(yt_error_codes.HunkStoreAllocationFailed):
                     raise e
+                last_error = e
+                time.sleep(0.1)
+        raise last_error
 
     def _restart_cell(self, cell_id, sync=True, with_snapshot=False):
         def _get_peer_address():
@@ -534,20 +545,32 @@ class DynamicTablesBase(YTEnvSetup):
 ##################################################################
 
 
-class IntegrationTestCommandProvider(yt_smooth_movement_helper_base.CommandProvider):
+class IntegrationTestCommandProvider(SmoothMomentHelperCommandProvider):
     _command_mapping = {
         "list": "ls",
         "wait": "wait",
         "print_debug": "print_debug",
     }
 
+    _driverless_commands = {
+        "wait",
+        "print_debug",
+    }
+
+    driver = None
+
     @classmethod
     def _make_command(cls, command_name):
-        return lambda self, *args, **kwargs: globals()[command_name](*args, **kwargs)
+        if command_name in cls._driverless_commands:
+            return lambda self, *args, **kwargs: globals()[command_name](*args, **kwargs)
+        else:
+            return lambda self, *args, **kwargs: globals()[command_name](*args, **(kwargs | {"driver": self.driver}))
 
 
 class SmoothMovementHelper(
-    yt_smooth_movement_helper_base.SmoothMovementHelperBase,
+    SmoothMovementHelperBase,
     IntegrationTestCommandProvider
 ):
-    pass
+    def __init__(self, *args, **kwargs):
+        self.driver = kwargs.pop("driver", None)
+        super().__init__(*args, **kwargs)

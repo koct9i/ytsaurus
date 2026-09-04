@@ -651,7 +651,7 @@ public:
         CollectAndTopologicallySortAllAncestors(std::move(transactions));
     }
 
-    template <CInvocable<void(TRange<std::optional<NRecords::TTransaction>>)> F>
+    template <NMpl::CInvocable<void(TRange<std::optional<NRecords::TTransaction>>)> F>
     void IterateOverInnermostTransactionGroupedByCoordinator(F&& callback)
     {
         YT_ASSERT_INVOKER_AFFINITY(Invoker_);
@@ -1022,6 +1022,9 @@ private:
                     // should be already visible thanks to transaction
                     // sequencer.
                     .SuppressStronglyOrderedTransactionBarrier = true,
+                    // All retries should be done on client's side. server/lib
+                    // is definitely not a client.
+                    .RetrySequoiaRetriableErrors = false,
                     .Features = std::move(features),
                 })
             .AsUnique().Apply(
@@ -1058,10 +1061,9 @@ private:
             // NB: Consider disabling Cypress tx mirroring by setting
             // //sys/@config/sequoia_manager/enable_cypress_transactions_in_sequoia to false.
             // Ensure that you actually know what are you doing.
-            YT_LOG_ALERT(
-                *error,
-                "Failed to %v Cypress transaction in Sequoia",
-                Description_);
+            YT_TLOG_ALERT("Failed to finish Cypress transaction in Sequoia")
+                .With("Description", Description_)
+                .With(*error);
         }
 
         THROW_ERROR result;
@@ -2174,7 +2176,7 @@ private:
         if (!replicas.empty()) {
             NTransactionServer::NProto::TReqCommitTransaction req;
             ToProto(req.mutable_transaction_id(), TransactionId_);
-            req.set_commit_timestamp(CommitTimestamp_);
+            req.set_commit_timestamp(ToProto(CommitTimestamp_));
             auto transactionActionData = MakeTransactionActionData(req);
 
             for (const auto& replica : replicas) {
@@ -2195,7 +2197,9 @@ private:
  *  1. Lock row in table "transactions";
  *  2. Modify "transaction_replicas" table;
  *  3. Modify Tx coordinator's state;
- *  4. Modify current cell's state.
+ *  4. Modify destination cells' state.
+ *  5. (optionally) Lock row in table "node_id_to_path" if boomerang request is
+ *     specified.
  */
 class TReplicateCypressTransactions
     : public TSequoiaMutation<void, ESequoiaTransactionType::CypressTransactionMirroring>
@@ -2210,6 +2214,7 @@ protected:
         TCellTagList destinationCellTags,
         std::vector<TTransactionId> transactionIds,
         std::unique_ptr<NTransactionServer::NProto::TReqReturnBoomerang> boomerang,
+        NCypressClient::TNodeId sequoiaNodeIdToLock,
         IInvokerPtr invoker,
         TLogger logger)
         : TSequoiaMutation(
@@ -2224,6 +2229,7 @@ protected:
         , TransactionIds_(std::move(transactionIds))
         , DestinationCellTags_(std::move(destinationCellTags))
         , Boomerang_(std::move(boomerang))
+        , SequoiaNodeIdToLock_(sequoiaNodeIdToLock)
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
@@ -2233,6 +2239,20 @@ protected:
     TFuture<void> ApplySequoiaTransaction() override
     {
         YT_ASSERT_INVOKER_AFFINITY(Invoker_);
+
+        if (SequoiaNodeIdToLock_) {
+            // Lock type rationale:
+            // Usually shared lock is taken for late prepare only and 2PC
+            // requires exclusive lock. But boomerangs are executed in commit
+            // actions only so they behaves similar to late prepare. For more
+            // details see TSequoiaSession::ProcessAcquiredCypressLocksInSequoia.
+            SequoiaTransaction_->LockRow(
+                NRecords::TNodeIdToPathKey{
+                    .NodeId = SequoiaNodeIdToLock_,
+                    .TransactionId = NullTransactionId,
+                },
+                ELockType::SharedStrong);
+        }
 
         return SequoiaTransaction_->LookupRows(ToTransactionKeys<NRecords::TTransactionKey>(TransactionIds_))
             .AsUnique().Apply(BIND(&TThis::ReplicateTransactions, MakeStrong(this))
@@ -2246,6 +2266,7 @@ private:
     const std::vector<TTransactionId> TransactionIds_;
     const TCellTagList DestinationCellTags_;
     const std::unique_ptr<NTransactionServer::NProto::TReqReturnBoomerang> Boomerang_;
+    const NCypressClient::TNodeId SequoiaNodeIdToLock_;
 
     TFuture<void> ReplicateTransactions(
         std::vector<std::optional<NRecords::TTransaction>>&& transactions)
@@ -2443,7 +2464,7 @@ TFuture<TSharedRefArray> FinishNonAliveCypressTransaction(
         mutationId,
         retry,
         logger)
-        .AsUnique().Apply(BIND([transactionId] (std::optional<TSharedRefArray>&& response) {
+        .Apply(BIND([transactionId] (const std::optional<TSharedRefArray>& response) {
             if (!response.has_value() || !*response) {
                 return CreateErrorResponseMessage(CreateNoSuchTransactionError(transactionId));
             }
@@ -2459,6 +2480,7 @@ TFuture<void> ReplicateCypressTransactionsToCell(
     std::vector<TTransactionId> transactionIds,
     TCellId destinationCellId,
     std::unique_ptr<NTransactionServer::NProto::TReqReturnBoomerang> boomerang,
+    NCypressClient::TNodeId sequoiaNodeIdToLock,
     TCellId cypressTransactionCoordinatorCellId,
     TSequoiaTransactionFeatures features,
     IInvokerPtr invoker,
@@ -2482,6 +2504,7 @@ TFuture<void> ReplicateCypressTransactionsToCell(
         TCellTagList{CellTagFromId(destinationCellId)},
         std::move(transactionIds),
         std::move(boomerang),
+        sequoiaNodeIdToLock,
         std::move(invoker),
         std::move(logger))
         ->Apply(std::move(features));
@@ -2509,6 +2532,7 @@ TFuture<void> ReplicateCypressTransactionToCells(
         std::move(destinationCellTags),
         std::vector{transactionId},
         /*boomerang*/ nullptr,
+        NullObjectId,
         std::move(invoker),
         std::move(logger))
         ->Apply(std::move(features));

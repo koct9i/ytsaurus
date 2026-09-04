@@ -22,9 +22,10 @@
 #include <yt/yt/client/table_client/public.h>
 
 #include <yt/yt/core/misc/aggregate_property.h>
-#include <yt/yt/core/misc/property.h>
 
 #include <library/cpp/yt/compact_containers/compact_vector.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NTableServer {
 
@@ -219,7 +220,8 @@ public:
         int lastTabletIndex,
         int newTabletCount,
         const std::vector<NTableClient::TLegacyOwningKey>& pivotKeys,
-        const std::vector<i64>& trimmedRowCounts) const override;
+        const std::vector<i64>& trimmedRowCounts,
+        const std::vector<i64>& cumulativeDataWeights) const override;
 
     void CheckInvariants(NCellMaster::TBootstrap* bootstrap) const override;
 
@@ -239,7 +241,7 @@ private:
 
 DEFINE_MASTER_OBJECT_TYPE(TTableNode)
 // Think twice before increasing this.
-YT_STATIC_ASSERT_SIZEOF_SANITY(TTableNode, 656);
+YT_STATIC_ASSERT_SIZEOF_SANITY(TTableNode, 648);
 
 ////////////////////////////////////////////////////////////////////////////////
 

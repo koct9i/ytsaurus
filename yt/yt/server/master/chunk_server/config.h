@@ -298,12 +298,33 @@ DEFINE_REFCOUNTED_TYPE(TDanglingLocationCleanerConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct TDynamicDataNodeTrackerTestingConfig
+    : public NYTree::TYsonStruct
+{
+    std::optional<TDuration> FullHeartbeatDelay;
+
+    REGISTER_YSON_STRUCT(TDynamicDataNodeTrackerTestingConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TDynamicDataNodeTrackerTestingConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct TDynamicDataNodeTrackerConfig
     : public NYTree::TYsonStruct
 {
     int MaxConcurrentChunkReplicasDuringFullHeartbeat;
 
     int MaxConcurrentChunkReplicasDuringIncrementalHeartbeat;
+
+    // COMPAT(danilalexeev): YT-23781.
+    int MaxConcurrentFullHeartbeats;
+
+    int MaxConcurrentLocationFullHeartbeats;
+
+    int MaxConcurrentIncrementalHeartbeats;
 
     TDanglingLocationCleanerConfigPtr DanglingLocationCleaner;
 
@@ -318,6 +339,9 @@ struct TDynamicDataNodeTrackerConfig
     // COMPAT(grphil)
     bool IgnoreReplicasWithChangedStateDuringValidation;
 
+    bool EnableChunkReplicasThrottlingInHeartbeats;
+    bool FlushBatchedIncrementalHeartbeatsOnThrottling;
+
     bool EnableLocationIndexesInDataNodeHeartbeats;
 
     // COMPAT(cherepashka)
@@ -330,6 +354,14 @@ struct TDynamicDataNodeTrackerConfig
     bool CheckLocationConvergenceByIndexAndUuidOnConfirmation;
 
     bool VerifyAllLocationsAreReportedInFullHeartbeats;
+
+    // COMPAT(aleksandra-zh): these are just in case.
+    bool RejectSimultaneousFullHeartbeats;
+    bool RejectSimultaneousIncrementalHeartbeats;
+
+    TDuration ExpectedDataNodeHeartbeatDuration;
+
+    TDynamicDataNodeTrackerTestingConfigPtr Testing;
 
     REGISTER_YSON_STRUCT(TDynamicDataNodeTrackerConfig);
 
@@ -566,6 +598,25 @@ struct TDynamicSequoiaChunkReplicasConfig
     int MaxConcurrentLocationsToRefresh;
     int MaxLocationsAwaitingRefresh;
     int MaxUnsuccessfulLocationRefreshAttempts;
+
+    bool ScheduleChunkSealInSequoiaChunkRefresh;
+
+    // If sequoia replicas are enabled in ghost mode, all data node heartbeats will trigger sequoia replicas modifications.
+    // These modifications will be run in background and will not affect master state.
+    // All actions with chunks will use master stored replicas, and the state of sequoia replicas will have no effect on master.
+    bool EnableInGhostMode;
+    bool GhostFullHeartbeats;
+    bool GhostIncrementalHeartbeats;
+    bool GhostValidationHeartbeats;
+    bool GhostEmptyValidationHeartbeats;
+
+    bool ThrottleSequoiaReplicaModifications;
+    bool EnablePerReplicaSequoiaModificationsThrottling;
+    bool ThrottleIncrementalHeartbeatSequoiaReplicaModifications;
+    int MaxConcurrentSequoiaReplicaModifications;
+    int MaxConcurrentReplicasInSequoiaReplicaModifications;
+
+    std::optional<TDuration> SleepDurationBeforeSequoiaReplicaModifications;
 
     REGISTER_YSON_STRUCT(TDynamicSequoiaChunkReplicasConfig);
 
@@ -821,6 +872,13 @@ struct TDynamicChunkManagerConfig
     //! Set of storage data centers on which replica placement is forbidden.
     THashSet<std::string> BannedStorageDataCenters;
 
+    //! Set of storage data centers that are temporarily unavailable due to planned maintenance.
+    //! Must be disjoint from |BannedStorageDataCenters|.
+    THashSet<std::string> TemporarilyUnavailableStorageDataCenters;
+
+    //! Number of additional rack failures a chunk must tolerate while some replicas are temporarily unavailable.
+    int TemporarilyUnavailableExtraFailureDomainTolerance;
+
     TDynamicDataCenterFailureDetectorConfigPtr DataCenterFailureDetector;
 
     TDuration ProfilingPeriod;
@@ -865,6 +923,18 @@ struct TDynamicChunkManagerConfig
 
     // COMPAT(koloshmet)
     bool UpdateHistoricallyNonVitalInUnexport;
+
+    // COMPAT(danilalexeev)
+    bool UpdateHistoricallyNonVitalOnChunkCreationAndExport;
+
+    bool AllowOffshoreMedia;
+
+    int MaxVerboselyLoggedChunks;
+    TDuration MaxVerboseLoggingEnabledDuration;
+
+    // COMPAT(theevilbird): Get rid of it. Remove requisitions for chunk_wise_accounting_migration
+    // account and set |AggregatedRequisitionIndex_| to |EmptyChunkRequisitionIndex| in TChunk constructor.
+    bool SetEmptyRequisitionIndexOnImport;
 
     REGISTER_YSON_STRUCT(TDynamicChunkManagerConfig);
 

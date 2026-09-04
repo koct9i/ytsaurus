@@ -9,11 +9,12 @@
 
 #include <yt/yt/client/table_client/key_bound.h>
 
-#include <yt/yt/core/misc/property.h>
 #include <yt/yt/core/misc/indexed_vector.h>
 
 #include <library/cpp/yt/memory/range.h>
 #include <library/cpp/yt/memory/ref_tracked.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NChunkServer {
 
@@ -96,6 +97,14 @@ public:
     void SetKind(EChunkListKind kind);
 
     bool IsSealed() const;
+
+    //! Whether the chunk list maintains and propagates tree statistics. False only for a scratch chunk
+    //! list, which is a mere holder of chunks.
+    bool HasStatistics() const;
+
+    bool IsHunkRoot() const;
+
+    bool IsHunkRelated() const;
 
     bool HasCumulativeStatistics() const;
     bool HasAppendableCumulativeStatistics() const;

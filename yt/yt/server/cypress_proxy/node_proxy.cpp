@@ -12,6 +12,8 @@
 #include "sequoia_session.h"
 #include "sequoia_tree_visitor.h"
 
+#include <yt/yt/server/lib/security_server/access_log.h>
+
 #include <yt/yt/server/lib/misc/interned_attributes.h>
 
 #include <yt/yt/server/lib/object_server/helpers.h>
@@ -61,6 +63,7 @@
 
 #include <yt/yt/core/ypath/token.h>
 
+#include <yt/yt/core/misc/protobuf_helpers.h>
 #include <yt/yt/core/ytree/exception_helpers.h>
 #include <yt/yt/core/ytree/fluent.h>
 #include <yt/yt/core/ytree/ypath_detail.h>
@@ -79,6 +82,7 @@ using namespace NCypressClient;
 using namespace NObjectClient;
 using namespace NRpc;
 using namespace NSecurityClient;
+using namespace NSecurityServer;
 using namespace NSequoiaClient;
 using namespace NSequoiaServer;
 using namespace NServer;
@@ -98,6 +102,25 @@ namespace {
 ////////////////////////////////////////////////////////////////////////////////
 
 constinit const auto Logger = CypressProxyLogger;
+
+////////////////////////////////////////////////////////////////////////////////
+
+bool IsAccessLogEnabled(IBootstrap* bootstrap)
+{
+    return bootstrap->GetDynamicConfigManager()->GetConfig()->EnableAccessLog;
+}
+
+#define YT_LOG_ACCESS(context, id, path, ...) \
+    do { \
+        if (IsAccessLogEnabled(Bootstrap_)) { \
+            NSecurityServer::LogAccess((context), (id), (path), SequoiaSession_->GetAccessLogTransactionInfo(), NullMutationId, ##__VA_ARGS__); \
+        } \
+    } while (false)
+
+#define YT_LOG_ACCESS_IF(predicate, ...) \
+    if (predicate) { \
+        YT_LOG_ACCESS(__VA_ARGS__); \
+    }
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -264,37 +287,50 @@ protected:
     {
         SetBasicRequestInfo(context);
 
-        DISPATCH_YPATH_SERVICE_METHOD(Exists);
-        DISPATCH_YPATH_SERVICE_METHOD(Get);
-        DISPATCH_YPATH_SERVICE_METHOD(Set);
-        DISPATCH_YPATH_SERVICE_METHOD(Remove);
-        DISPATCH_YPATH_SERVICE_METHOD(List);
-        DISPATCH_YPATH_SERVICE_METHOD(MultisetAttributes);
-        DISPATCH_YPATH_SERVICE_METHOD(GetBasicAttributes);
-        DISPATCH_YPATH_SERVICE_METHOD(CheckPermission);
-        DISPATCH_YPATH_SERVICE_METHOD(Fetch);
-        DISPATCH_YPATH_SERVICE_METHOD(Create);
-        DISPATCH_YPATH_SERVICE_METHOD(Copy);
-        DISPATCH_YPATH_SERVICE_METHOD(Lock);
-        DISPATCH_YPATH_SERVICE_METHOD(Unlock);
-        DISPATCH_YPATH_SERVICE_METHOD(Alter);
-        DISPATCH_YPATH_SERVICE_METHOD(LockCopyDestination);
-        DISPATCH_YPATH_SERVICE_METHOD(LockCopySource);
-        DISPATCH_YPATH_SERVICE_METHOD(CalculateInheritedAttributes);
-        DISPATCH_YPATH_SERVICE_METHOD(AssembleTreeCopy);
-        DISPATCH_YPATH_SERVICE_METHOD(BeginUpload);
-        DISPATCH_YPATH_SERVICE_METHOD(GetUploadParams);
-        DISPATCH_YPATH_SERVICE_METHOD(EndUpload);
-        DISPATCH_YPATH_SERVICE_METHOD(GetMountInfo);
-        DISPATCH_YPATH_SERVICE_METHOD(ReshardAutomatic);
+        auto doInvoke = [&] (const IYPathServiceContextPtr& context) {
+            DISPATCH_YPATH_SERVICE_METHOD(Exists);
+            DISPATCH_YPATH_SERVICE_METHOD(Get);
+            DISPATCH_YPATH_SERVICE_METHOD(Set);
+            DISPATCH_YPATH_SERVICE_METHOD(Remove);
+            DISPATCH_YPATH_SERVICE_METHOD(List);
+            DISPATCH_YPATH_SERVICE_METHOD(MultisetAttributes);
+            DISPATCH_YPATH_SERVICE_METHOD(GetBasicAttributes);
+            DISPATCH_YPATH_SERVICE_METHOD(CheckPermission);
+            DISPATCH_YPATH_SERVICE_METHOD(Fetch);
+            DISPATCH_YPATH_SERVICE_METHOD(Create);
+            DISPATCH_YPATH_SERVICE_METHOD(Copy);
+            DISPATCH_YPATH_SERVICE_METHOD(Lock);
+            DISPATCH_YPATH_SERVICE_METHOD(Unlock);
+            DISPATCH_YPATH_SERVICE_METHOD(Alter);
+            DISPATCH_YPATH_SERVICE_METHOD(LockCopyDestination);
+            DISPATCH_YPATH_SERVICE_METHOD(LockCopySource);
+            DISPATCH_YPATH_SERVICE_METHOD(CalculateInheritedAttributes);
+            DISPATCH_YPATH_SERVICE_METHOD(AssembleTreeCopy);
+            DISPATCH_YPATH_SERVICE_METHOD(BeginUpload);
+            DISPATCH_YPATH_SERVICE_METHOD(GetUploadParams);
+            DISPATCH_YPATH_SERVICE_METHOD(EndUpload);
+            DISPATCH_YPATH_SERVICE_METHOD(GetMountInfo);
+            DISPATCH_YPATH_SERVICE_METHOD(ReshardAutomatic);
 
-        DISPATCH_YPATH_SERVICE_METHOD(UpdateStatistics);
-        DISPATCH_YPATH_SERVICE_METHOD(Seal);
-        DISPATCH_YPATH_SERVICE_METHOD(Truncate);
+            DISPATCH_YPATH_SERVICE_METHOD(UpdateStatistics);
+            DISPATCH_YPATH_SERVICE_METHOD(Seal);
+            DISPATCH_YPATH_SERVICE_METHOD(Truncate);
 
-        DISPATCH_YPATH_SERVICE_METHOD(BeginCopy);
+            DISPATCH_YPATH_SERVICE_METHOD(BeginCopy);
 
-        return false;
+            return false;
+        };
+
+        auto result = doInvoke(context);
+
+        YT_LOG_ACCESS_IF(
+            (std::holds_alternative<TRequestExecutedPayload>(InvokeResult_) &&
+             IsAccessLoggedMethod(context->GetMethod())),
+            context,
+            Id_,
+            Path_.Underlying());
+
+        return result;
     }
 
     TVersionedNodeId MakeVersionedNodeId(TNodeId id) const
@@ -327,9 +363,8 @@ protected:
         auto parentAncestry = TRange(nodeAncestry).Slice(0, std::ssize(nodeAncestry) - 1);
 
         if (parentAncestry.empty()) {
-            YT_LOG_ALERT(
-                "Missing parent for node during permission validation (NodeId: %v)",
-                MakeVersionedNodeId(Id_));
+            YT_TLOG_ALERT("Missing parent for node during permission validation")
+                .With("NodeId", MakeVersionedNodeId(Id_));
             THROW_ERROR_EXCEPTION(
                 "Permission validation failed: missing parent for node %v",
                 MakeVersionedNodeId(Id_));
@@ -482,7 +517,9 @@ protected:
             .Execute(std::move(req))
             .Apply(BIND([id = Id_] (const TErrorOr<TResponsePtr>& rspOrError) {
                 if (!rspOrError.IsOK()) {
-                    YT_LOG_ERROR(rspOrError, "Node touch failed (NodeId: %v)", id);
+                    YT_TLOG_ERROR("Node touch failed")
+                        .With("NodeId", id)
+                        .With(rspOrError);
                 }
             })));
     }
@@ -558,8 +595,8 @@ protected:
 
         if (SequoiaSession_->GetCurrentCypressTransactionId()) {
             THROW_ERROR_EXCEPTION("Rootstock cannot be removed under transaction")
-                << TErrorAttribute("scion_id", Id_)
-                << TErrorAttribute("cypress_transaction_id", SequoiaSession_->GetCurrentCypressTransactionId());
+                .With("scion_id", Id_)
+                .With("cypress_transaction_id", SequoiaSession_->GetCurrentCypressTransactionId());
         }
 
         // Scion removal causes rootstock removal.
@@ -761,6 +798,14 @@ protected:
 
         // Detaching child for subtree root should be done in late prepare.
         FinishSequoiaSessionAndReply(context, CellIdFromCellTag(subtreeRootCell), /*commitSession*/ true);
+
+        YT_LOG_ACCESS_IF(
+            GetCausedByNodeExpiration(context->RequestHeader()),
+            context,
+            Id_,
+            Path_.Underlying(),
+            {},
+            "TtlRemove");
     }
 
     void ExistsSelf(
@@ -887,10 +932,7 @@ protected:
         } else {
             TAsyncYsonWriter writer;
             writer.OnBeginMap();
-            // TODO(danilalexeev): YT-26172. Do not copy attributes.
-            auto node = CreateEphemeralNodeFactory()->CreateEntity();
-            node->MutableAttributes()->MergeFrom(*attributes);
-            node->WriteAttributesFragment(&writer, attributeFilter, /*stable*/ true);
+            WriteAttributeDictionaryFragment(&writer, *attributes, attributeFilter, /*stable*/ true);
             writer.OnEndMap();
             result = WaitForFast(writer.Finish())
                 .ValueOrThrow();
@@ -1239,7 +1281,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Create)
     ValidateCreateOptions(request);
 
     // This alert can be safely removed since hintId is not used in this function.
-    YT_LOG_ALERT_IF(hintId, "Hint ID was received on Cypress proxy (HintId: %v)", hintId);
+    YT_TLOG_ALERT_IF(hintId, "Hint ID was received on Cypress proxy")
+        .With("HintId", hintId);
 
     if (type == EObjectType::MapNode) {
         type = EObjectType::SequoiaMapNode;
@@ -1249,9 +1292,11 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Create)
         ? NYTree::FromProto(request->node_attributes())
         : CreateEphemeralAttributes();
 
+    std::optional<TYPath> linkTargetPath;
     if (type == EObjectType::Link) {
         auto targetPath = ValidateAndMakeYPath(
             explicitAttributes->Get<TRawYPath>(EInternedAttributeKey::TargetPath.Unintern()));
+        linkTargetPath = targetPath;
         ValidateLinkNodeCreation(
             SequoiaSession_,
             std::move(targetPath),
@@ -1307,6 +1352,13 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Create)
         }
 
         FinishSequoiaSessionAndReply(context, CellIdFromObjectId(Id_), lockExisting);
+
+        YT_LOG_ACCESS_IF(
+            IsAccessLoggedType(thisType),
+            context,
+            Id_,
+            Path_.Underlying(),
+            {{"existing", "true"}});
         return;
     }
 
@@ -1344,6 +1396,21 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Create)
         accountName);
 
     FinishSequoiaSessionAndReply(context, CellIdFromObjectId(attachmentPointNodeId), /*commitSession*/ true);
+
+    if (linkTargetPath) {
+        YT_LOG_ACCESS(
+            context,
+            createdNodeId,
+            Path_.Underlying(),
+            {{"destination_path", *linkTargetPath}},
+            "Link");
+    } else {
+        YT_LOG_ACCESS_IF(
+            IsAccessLoggedType(type),
+            context,
+            createdNodeId,
+            Path_.Underlying());
+    }
 }
 
 DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Copy)
@@ -1465,8 +1532,17 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Copy)
         ToProto(response->mutable_node_id(), Id_);
 
         context->SetResponseInfo("ExistingNodeId: %v", Id_);
+
         // TODO(danilalexeev): Lock the source node's row in Sequoia tables to ensure correct access tracking.
         FinishSequoiaSessionAndReply(context, CellIdFromObjectId(Id_), lockExisting);
+
+        YT_LOG_ACCESS(
+            context,
+            resolvedSource->Id,
+            sourceRootPath.Underlying(),
+            {{"destination_id", ToString(Id_)},
+             {"destination_path", Path_.Underlying()}},
+            options.Mode == ENodeCloneMode::Move ? "Move" : "Copy");
         return;
     }
 
@@ -1529,6 +1605,14 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Copy)
     context->SetResponseInfo("NodeId: %v", destinationId);
 
     FinishSequoiaSessionAndReply(context, CellIdFromObjectId(attachmentPointNodeId), /*commitSession*/ true);
+
+    YT_LOG_ACCESS(
+        context,
+        resolvedSource->Id,
+        sourceRootPath.Underlying(),
+        {{"destination_id", ToString(destinationId)},
+         {"destination_path", Path_.Underlying()}},
+        options.Mode == ENodeCloneMode::Move ? "Move" : "Copy");
 }
 
 DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Unlock)
@@ -1576,7 +1660,7 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Lock)
     auto mode = FromProto<ELockMode>(request->mode());
     auto childKey = YT_OPTIONAL_FROM_PROTO(*request, child_key);
     auto attributeKey = YT_OPTIONAL_FROM_PROTO(*request, attribute_key);
-    auto timestamp = request->timestamp();
+    auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
     auto waitable = request->waitable();
 
     context->SetRequestInfo("Mode: %v, Key: %v, Waitable: %v",
@@ -1607,15 +1691,12 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Lock)
     // TODO(cherepashka): add response for `Lock` into sequoia response keeper via dataless write rows.
     SequoiaSession_->Commit(CellIdFromObjectId(Id_));
 
-    const auto& client = SequoiaSession_->GetNativeAuthenticatedClient();
-
     const auto& stateAttribute = EInternedAttributeKey::State.Unintern();
     auto asyncLockAcquired = waitable
-        ? FetchSingleObjectAttributes(
-            client,
-            TVersionedObjectId{lockId},
+        ? SequoiaSession_->FetchSingleObjectAttributes(
+            lockId,
             TAttributeFilter({stateAttribute}))
-            .Apply(BIND([&] (const IAttributeDictionaryPtr& attributes) {
+            .Apply(BIND([&] (const IConstAttributeDictionaryPtr& attributes) {
                 return attributes->Get<ELockState>(stateAttribute) == ELockState::Acquired;
             }))
         : MakeFuture(true);
@@ -1623,9 +1704,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, Lock)
     const auto& externalCellTagAttribute = EInternedAttributeKey::ExternalCellTag.Unintern();
     const auto& revisionAttribute = EInternedAttributeKey::Revision.Unintern();
 
-    auto asyncNodeAttributes = FetchSingleObjectAttributes(
-        client,
-        MakeVersionedNodeId(Id_),
+    auto asyncNodeAttributes = SequoiaSession_->FetchSingleObjectAttributes(
+        Id_,
         TAttributeFilter({externalCellTagAttribute, revisionAttribute}));
 
     auto nodeLocked = WaitForFast(asyncLockAcquired)
@@ -1755,14 +1835,12 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, LockCopyDestination)
             nodeAncestry,
             /*duringCopy*/ true));
 
-    const auto& client = SequoiaSession_->GetNativeAuthenticatedClient();
     const auto& accountIdAttribute = EInternedAttributeKey::AccountId.Unintern();
 
-    auto asyncAccoundId = FetchSingleObjectAttributes(
-        client,
-        MakeVersionedNodeId(parentNodeId),
+    auto asyncAccoundId = SequoiaSession_->FetchSingleObjectAttributes(
+        parentNodeId,
         TAttributeFilter({accountIdAttribute}))
-        .Apply(BIND([&] (const IAttributeDictionaryPtr& attributes) {
+        .Apply(BIND([&] (const IConstAttributeDictionaryPtr& attributes) {
             return attributes->Get<TAccountId>(accountIdAttribute);
         }));
 
@@ -1779,7 +1857,7 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, LockCopyDestination)
         inheritedAttributes->ListPairs());
 
     response->set_sequoia_destination(true);
-    response->set_native_cell_tag(nativeCellTag.Underlying());
+    response->set_native_cell_tag(ToProto(nativeCellTag));
     ToProto(response->mutable_account_id(), accountId);
     ToProto(response->mutable_effective_inheritable_attributes(), *inheritedAttributes);
 
@@ -1803,8 +1881,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, LockCopySource)
     auto nodesToCopy = SequoiaSession_->FetchSubtree(Path_);
     if (std::ssize(nodesToCopy.Nodes) > maxSubtreeSize) {
         THROW_ERROR_EXCEPTION("Subtree is too large for cross-cell copy")
-            << TErrorAttribute("subtree_size", subtreeSize)
-            << TErrorAttribute("max_subtree_size", maxSubtreeSize);
+            .With("subtree_size", subtreeSize)
+            .With("max_subtree_size", maxSubtreeSize);
     }
 
     ValidateCopyFromSourcePermissions(
@@ -1958,14 +2036,12 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, AssembleTreeCopy)
         force);
 
     // Sanity checks.
-    YT_LOG_ALERT_AND_THROW_IF(
-        request->node_id_to_children_size() == 0,
-        "Empty list received when attempting to assemble tree copy");
-    YT_LOG_ALERT_AND_THROW_IF(
+    YT_TLOG_ALERT_AND_THROW_IF(request->node_id_to_children_size() == 0, "Empty list received when attempting to assemble tree copy");
+    YT_TLOG_ALERT_AND_THROW_IF(
         rootNodeId != FromProto<TNodeId>(request->node_id_to_children()[0].node_id()),
-        "Received malformed request to assemble tree copy (RootNodeId: %v, FirstElementInMapping: %v)",
-        rootNodeId,
-        FromProto<TNodeId>(request->node_id_to_children()[0].node_id()));
+        "Received malformed request to assemble tree copy")
+        .With("RootNodeId", rootNodeId)
+        .With("FirstElementInMapping", FromProto<TNodeId>(request->node_id_to_children()[0].node_id()));
 
     TNodeIdToChildDescriptors nodeIdToChildren;
     for (const auto& nodeIdToChild : request->node_id_to_children()) {
@@ -2012,6 +2088,12 @@ DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, AssembleTreeCopy)
     ToProto(response->mutable_node_id(), rootNodeId);
 
     FinishSequoiaSessionAndReply(context, CellIdFromObjectId(attachmentPointNodeId), /*commitSession*/ true);
+
+    YT_LOG_ACCESS_IF(
+        IsAccessLoggedType(TypeFromId(rootNodeId)),
+        context,
+        rootNodeId,
+        destinationRootPath.Underlying());
 }
 
 DEFINE_YPATH_SERVICE_METHOD(TNodeProxy, BeginCopy)
@@ -2483,16 +2565,13 @@ private:
                     !children.empty() &&
                     std::ssize(nodeIdToChildren) + layerChildrenCount + std::ssize(children) > responseSizeLimit)
                 {
-                    YT_LOG_TRACE(
-                        "Node subtree exceeds size limit, marking as opaque "
-                        "(RootId: %v, ResponseSubtreeSize: %v, NodeId: %v, NodeChildrenCount: %v, "
-                        "CurrentLayerSize: %v, ResponseSizeLimit: %v)",
-                        Id_,
-                        std::ssize(nodeIdToChildren),
-                        parent.Id,
-                        std::ssize(children),
-                        layerChildrenCount,
-                        responseSizeLimit);
+                    YT_TLOG_TRACE("Node subtree exceeds size limit, marking as opaque")
+                        .With("RootId", Id_)
+                        .With("ResponseSubtreeSize", std::ssize(nodeIdToChildren))
+                        .With("NodeId", parent.Id)
+                        .With("NodeChildrenCount", std::ssize(children))
+                        .With("CurrentLayerSize", layerChildrenCount)
+                        .With("ResponseSizeLimit", responseSizeLimit);
                     opaqueNodeIds.insert(parent.Id);
                     continue;
                 }
@@ -2528,12 +2607,10 @@ private:
             std::swap(layerToFetch, nextLayerToFetch);
         }
 
-        YT_LOG_DEBUG(
-            "Finished collecting nodes to fetch "
-            "(ResponseSubtreeSize: %v, ScalarNodeCount: %v, MasterAttribueFilter: %v)",
-            std::ssize(nodeIdToChildren),
-            std::ssize(scalarNodeIdsToFetchFromMaster),
-            masterAttributeFilter);
+        YT_TLOG_DEBUG("Finished collecting nodes to fetch")
+            .With("ResponseSubtreeSize", std::ssize(nodeIdToChildren))
+            .With("ScalarNodeCount", std::ssize(scalarNodeIdsToFetchFromMaster))
+            .With("MasterAttribueFilter", masterAttributeFilter);
 
         auto attributesFuture = FetchAttributesForGetRequest(
             SequoiaSession_,
@@ -2710,7 +2787,7 @@ private:
 
         if (limit && limit < 0) {
             THROW_ERROR_EXCEPTION("Limit is negative")
-                << TErrorAttribute("limit", limit);
+                .With("limit", limit);
         }
 
         ValidatePermissionForThis(EPermission::Read);
@@ -2767,10 +2844,11 @@ private:
                 writer.OnListItem();
 
                 if (accessGranted) {
-                    // TODO(danilalexeev): YT-26172. Do not copy attributes.
-                    auto node = CreateEphemeralNodeFactory()->CreateEntity();
-                    node->MutableAttributes()->MergeFrom(*std::get<IAttributeDictionaryPtr>(attributes));
-                    node->WriteAttributes(&writer, attributeFilter, /*stable*/ true);
+                    WriteAttributeDictionary(
+                        &writer,
+                        *std::get<IAttributeDictionaryPtr>(attributes),
+                        attributeFilter,
+                        /*stable*/ true);
                 }
             } else {
                 writer.OnListItem();

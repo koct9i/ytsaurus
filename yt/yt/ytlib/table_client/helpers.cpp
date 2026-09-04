@@ -291,10 +291,10 @@ void ValidateDynamicTableTimestamp(
             THROW_ERROR_EXCEPTION(NTableClient::EErrorCode::TimestampOutOfRange,
                 "Requested timestamp is out of range for table %v",
                 path.GetPath())
-                << TErrorAttribute("requested_timestamp", requested)
-                << TErrorAttribute("retained_timestamp", retained)
-                << TErrorAttribute("unflushed_timestamp", unflushed)
-                << TErrorAttribute("enable_dynamic_store_read", enableDynamicStoreRead);
+                .With("requested_timestamp", requested)
+                .With("retained_timestamp", retained)
+                .With("unflushed_timestamp", unflushed)
+                .With("enable_dynamic_store_read", enableDynamicStoreRead);
         }
     }
 
@@ -303,8 +303,8 @@ void ValidateDynamicTableTimestamp(
         if (retention > requested) {
             THROW_ERROR_EXCEPTION("Retention timestamp for table %v should not be greater than read timestamp",
                 path.GetPath())
-                << TErrorAttribute("read_timestamp", requested)
-                << TErrorAttribute("retention_timestamp", retention);
+                .With("read_timestamp", requested)
+                .With("retention_timestamp", retention);
         }
     }
 }
@@ -322,7 +322,7 @@ TInputTableInfo CollectInputTableInfo(
     const TGetUserObjectBasicAttributesOptions& getBasicAttributesOptions,
     const TLogger& logger)
 {
-    auto Logger = logger.WithTag("Path: %v", path.GetPath());
+    auto Logger = logger.WithTag("Path", path.GetPath());
 
     TUserObject userObject(path);
 
@@ -341,7 +341,7 @@ TInputTableInfo CollectInputTableInfo(
             userObject.Type);
     }
 
-    YT_LOG_INFO("Requesting table chunk count");
+    YT_TLOG_INFO("Requesting table chunk count");
 
     int chunkCount;
     // XXX(babenko): YT-11825
@@ -375,7 +375,8 @@ TInputTableInfo CollectInputTableInfo(
         schema = attributes->Get<TTableSchemaPtr>("schema");
     }
 
-    YT_LOG_INFO("Fetching chunk specs (ChunkCount: %v)", chunkCount);
+    YT_TLOG_INFO("Fetching chunk specs")
+        .With("ChunkCount", chunkCount);
 
     auto chunkSpecs = FetchChunkSpecs(
         client,
@@ -595,12 +596,11 @@ std::optional<i64> EstimateReadDataSizeForColumns(
     }
 
     if (columnMeta.columns_size() != expectedColumnSize) {
-        YT_LOG_ALERT("Unexpected chunk columns size in column meta "
-            "(ChunkId: %v, SchemaStrict: %v, ExpectedColumnSize: %v, ActualColumnSize: %v)",
-            chunkId,
-            schema->IsStrict(),
-            expectedColumnSize,
-            columnMeta.columns_size());
+        YT_TLOG_ALERT("Unexpected chunk columns size in column meta")
+            .With("ChunkId", chunkId)
+            .With("SchemaStrict", schema->IsStrict())
+            .With("ExpectedColumnSize", expectedColumnSize)
+            .With("ActualColumnSize", columnMeta.columns_size());
         return compressedDataSize;
     }
 
@@ -627,6 +627,16 @@ std::optional<i64> EstimateReadDataSizeForColumns(
         }
     }
 
+    auto logReadEstimationWarning = [&] (i64 readSize) {
+        YT_TLOG_WARNING("Read estimation is greater than the chunk's compressed data size")
+            .With("ChunkId", chunkId)
+            .With("ReadSize", readSize)
+            .With("CompressedDataSize", compressedDataSize)
+            .With("IsSchemaStrict", schema->IsStrict())
+            .With("ColumnCount", schema->GetColumnCount())
+            .With("ReadColumnCount", std::ssize(columnStableNames));
+    };
+
     auto erasurePlacementExt = FindProtoExtension<TErasurePlacementExt>(meta.extensions());
     if (erasurePlacementExt) {
         auto dataBlockPlacement = BuildDataBlocksPlacementInParts(
@@ -641,6 +651,10 @@ std::optional<i64> EstimateReadDataSizeForColumns(
             }
         }
 
+        if (readSize > compressedDataSize + 1) {
+            logReadEstimationWarning(readSize);
+        }
+
         // Estimation is not exact sometimes and there are cases when readSize = compressedDataSize + 1.
         return std::min(readSize, compressedDataSize);
     }
@@ -653,13 +667,9 @@ std::optional<i64> EstimateReadDataSizeForColumns(
         readSize += blocksExt.blocks(blockIndex).size();
     }
 
-    YT_LOG_WARNING_IF(
-        readSize > compressedDataSize,
-        "Read estimation is greater than the chunk's compressed data size (ChunkId: %v, IsSchemaStrict: %v, ColumnCount: %v, ReadColumnCount: %v)",
-        chunkId,
-        schema->IsStrict(),
-        schema->GetColumnCount(),
-        std::ssize(columnStableNames));
+    if (readSize > compressedDataSize) {
+        logReadEstimationWarning(readSize);
+    }
 
     return std::min(readSize, compressedDataSize);
 }

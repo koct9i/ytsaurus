@@ -162,7 +162,7 @@ public:
                     NTabletClient::EErrorCode::NoSuchTablet,
                     "Tablet %v has been unregistered",
                     tabletSnapshot->TabletId)
-                    << TErrorAttribute("tablet_id", tabletSnapshot->TabletId);
+                    .With("tablet_id", tabletSnapshot->TabletId);
             }
         }
     }
@@ -192,9 +192,9 @@ public:
         if (dynamicOptions->BanMessage) {
             THROW_ERROR_EXCEPTION(NTabletClient::EErrorCode::BundleIsBanned,
                 "Bundle %Qv is banned", bundleName)
-                << TError(TRuntimeFormat(dynamicOptions->BanMessage.value()))
-                << TErrorAttribute("tablet_id", tabletSnapshot->TabletId)
-                << TErrorAttribute("table_path", tabletSnapshot->TablePath);
+                .With(TError(TRuntimeFormat(dynamicOptions->BanMessage.value())))
+                .With("tablet_id", tabletSnapshot->TabletId)
+                .With("table_path", tabletSnapshot->TablePath);
         }
     }
 
@@ -242,18 +242,18 @@ public:
                     guard.Release();
                     // This is where deadSnapshot dies. It's also nice to have logging moved outside
                     // of a critical section.
-                    YT_LOG_DEBUG("Tablet snapshot updated (TabletId: %v, CellId: %v)",
-                        tablet->GetId(),
-                        slot->GetCellId());
+                    YT_TLOG_DEBUG("Tablet snapshot updated")
+                        .With("TabletId", tablet->GetId())
+                        .With("CellId", slot->GetCellId());
                     return;
                 }
             }
             TabletIdToSnapshot_.emplace(tablet->GetId(), newSnapshot);
         }
 
-        YT_LOG_DEBUG("Tablet snapshot registered (TabletId: %v, CellId: %v)",
-            tablet->GetId(),
-            slot->GetCellId());
+        YT_TLOG_DEBUG("Tablet snapshot registered")
+            .With("TabletId", tablet->GetId())
+            .With("CellId", slot->GetCellId());
     }
 
     void UnregisterTabletSnapshot(const ITabletSlotPtr& slot, TTablet* tablet) override
@@ -271,12 +271,11 @@ public:
                     auto evictionTimeout = tablet->GetSnapshotEvictionTimeout().value_or(
                         Config_->TabletSnapshotEvictionTimeout);
 
-                    YT_LOG_DEBUG("Tablet snapshot unregistered; eviction scheduled "
-                        "(%v, MountRevision: %x, CellId: %v, EvictionTimeout: %v)",
-                        snapshot->LoggingTag,
-                        snapshot->MountRevision,
-                        slot->GetCellId(),
-                        evictionTimeout);
+                    YT_TLOG_DEBUG("Tablet snapshot unregistered; eviction scheduled")
+                        .With(snapshot->LoggingTags)
+                        .WithFormat("MountRevision", "%x", snapshot->MountRevision)
+                        .With("CellId", slot->GetCellId())
+                        .With("EvictionTimeout", evictionTimeout);
 
                     TDelayedExecutor::Submit(
                         BIND(&TTabletSnapshotStore::EvictTabletSnapshot, MakeStrong(this), tablet->GetId(), snapshot)
@@ -312,9 +311,9 @@ public:
         // This is where deadSnapshots die. It's also nice to have logging moved outside
         // of a critical section.
         for (const auto& snapshot : deadSnapshots) {
-            YT_LOG_DEBUG("Tablet snapshot unregistered (TabletId: %v, CellId: %v)",
-                snapshot->TabletId,
-                snapshot->CellId);
+            YT_TLOG_DEBUG("Tablet snapshot unregistered")
+                .With("TabletId", snapshot->TabletId)
+                .With("CellId", snapshot->CellId);
         }
     }
 
@@ -398,9 +397,9 @@ private:
 
                 // This is where snapshot dies. It's also nice to have logging moved outside
                 // of a critical section.
-                YT_LOG_DEBUG("Tablet snapshot evicted (TabletId: %v, CellId: %v)",
-                    tabletId,
-                    snapshot->CellId);
+                YT_TLOG_DEBUG("Tablet snapshot evicted")
+                    .With("TabletId", tabletId)
+                    .With("CellId", snapshot->CellId);
                 break;
             }
         }
@@ -454,7 +453,7 @@ private:
                 NTabletClient::EErrorCode::NoSuchTablet,
                 "Tablet %v is not known",
                 tabletId)
-                << TErrorAttribute("tablet_id", tabletId);
+                .With("tablet_id", tabletId);
         }
 
         const auto& slotManager = Bootstrap_->GetSlotManager();
@@ -464,8 +463,8 @@ private:
                 NTabletClient::EErrorCode::NoSuchCell,
                 "Cell %v is not known",
                 cellId)
-                << TErrorAttribute("tablet_id", tabletId)
-                << TErrorAttribute("cell_id", cellId);
+                .With("tablet_id", tabletId)
+                .With("cell_id", cellId);
         }
 
         auto hydraManager = slot->GetHydraManager();
@@ -474,15 +473,15 @@ private:
                 NTabletClient::EErrorCode::NoSuchCell,
                 "Cell %v is not active",
                 cellId)
-                << TErrorAttribute("tablet_id", tabletId)
-                << TErrorAttribute("cell_id", cellId);
+                .With("tablet_id", tabletId)
+                .With("cell_id", cellId);
         } else {
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::NoSuchTablet,
                 "Tablet %v is not known",
                 tabletId)
-                << TErrorAttribute("tablet_id", tabletId)
-                << TErrorAttribute("cell_id", cellId);
+                .With("tablet_id", tabletId)
+                .With("cell_id", cellId);
         }
     }
 
@@ -615,10 +614,10 @@ private:
                 .Item("atomicity").Value(replica->RuntimeData->Atomicity.load(std::memory_order::relaxed))
                 .Item("preserve_timestamps").Value(replica->RuntimeData->PreserveTimestamps)
                 .Item("start_replication_timestamp").Value(replica->StartReplicationTimestamp)
-                .Item("last_replication_timestamp").Value(replica->RuntimeData->LastReplicationTimestamp)
+                .Item("last_replication_timestamp").Value(replica->RuntimeData->LastReplicationTimestamp.load())
                 .Item("current_replication_row_index").Value(replica->RuntimeData->CurrentReplicationRowIndex)
                 .Item("committed_replication_row_index").Value(replica->RuntimeData->CommittedReplicationRowIndex)
-                .Item("current_replication_timestamp").Value(replica->RuntimeData->CurrentReplicationTimestamp)
+                .Item("current_replication_timestamp").Value(replica->RuntimeData->CurrentReplicationTimestamp.load())
                 .Item("prepared_replication_row_index").Value(replica->RuntimeData->PreparedReplicationRowIndex)
             .EndMap();
     }

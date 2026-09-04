@@ -155,18 +155,10 @@ void TransformWithIndexStatement(
     auto& index = *(query->WithIndex);
     auto& table = std::get<TTableDescriptor>(query->FromClause);
 
-    auto errorOrIndexTableInfo = WaitForFast(cache->GetTableInfo(index.Path));
+    auto indexTableInfo = WaitForFast(cache->GetTableInfo(index.Path))
+        .ValueOrThrow();
     auto tableInfo = WaitForFast(cache->GetTableInfo(table.Path))
         .ValueOrThrow();
-
-    if (!errorOrIndexTableInfo.IsOK() &&
-        errorOrIndexTableInfo.FindMatching(NYTree::EErrorCode::ResolveError) &&
-        tableInfo->IsReplicated())
-    {
-        return;
-    }
-
-    auto indexTableInfo = errorOrIndexTableInfo.ValueOrThrow();
 
     indexTableInfo->ValidateDynamic();
     indexTableInfo->ValidateSorted();
@@ -194,7 +186,7 @@ void TransformWithIndexStatement(
             THROW_ERROR_EXCEPTION("Cannot use index %v with %Qlv correspondence",
                 indexIt->IndexObjectId,
                 correspondence)
-                << TErrorAttribute("index_table_path", indexTableInfo->Path);
+                .With("index_table_path", indexTableInfo->Path);
         }
 
         ValidateIndexSchema(

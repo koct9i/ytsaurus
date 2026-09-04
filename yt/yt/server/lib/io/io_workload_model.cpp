@@ -299,7 +299,7 @@ public:
     {
         ModelCreationRoundExecutor_->Start();
         LatenciesMeasuringExecutor_->Start();
-        YT_LOG_DEBUG("Initialized workload model manager");
+        YT_TLOG_DEBUG("Initialized workload model manager");
     }
 
     ~TWorkloadModelManager()
@@ -339,9 +339,9 @@ private:
 
         auto model = Model_->ReleaseSizes();
 
-        YT_LOG_DEBUG("Observed IO request sizes (Reads: %v, Writes: %v)",
-            model.Reads,
-            model.Writes);
+        YT_TLOG_DEBUG("Observed IO request sizes")
+            .With("Reads", model.Reads)
+            .With("Writes", model.Writes);
 
         RequestSizesSignal_.Fire(model);
     }
@@ -520,6 +520,11 @@ public:
     EDirectIOPolicy UseDirectIOForReads() const override
     {
         return Underlying_->UseDirectIOForReads();
+    }
+
+    EDirectIOPolicy UseDirectIOForWrites() const override
+    {
+        return Underlying_->UseDirectIOForWrites();
     }
 
     bool IsInFlightRequestLimitExceeded() const override

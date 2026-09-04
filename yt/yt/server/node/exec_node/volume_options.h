@@ -7,6 +7,7 @@
 
 #include <yt/yt/server/lib/nbd/config.h>
 #include <yt/yt/server/lib/nbd/public.h>
+#include <yt/yt/server/lib/nbd/image/public.h>
 
 #include <yt/yt/ytlib/exec_node/public.h>
 
@@ -15,6 +16,8 @@
 
 #include <yt/yt/core/rpc/public.h>
 
+#include <variant>
+
 namespace NYT::NExecNode {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -22,9 +25,16 @@ namespace NYT::NExecNode {
 struct TCreateNbdVolumeOptions
 {
     TJobId JobId;
+
     std::string DeviceId;
-    std::string Filesystem;
+    std::string FilesystemType;
+
     bool IsReadOnly = true;
+
+    //! Block size (I/O alignment) reported to Porto so it configures the kernel NBD device's logical
+    //! block size accordingly (Porto defaults to 512 otherwise). For a block-granular backend this is
+    //! its block size, so the kernel aligns I/O and does any sub-block read-modify-write itself.
+    i64 BlockSize = 512;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -33,8 +43,22 @@ struct TPrepareRONbdVolumeOptions
 {
     TJobId JobId;
     TArtifactKey ArtifactKey;
-    NNbd::IImageReaderPtr ImageReader;
+    NNbd::NImage::IImageReaderPtr ImageReader;
 };
+
+////////////////////////////////////////////////////////////////////////////////
+
+//! Chunk-backed device: the request params plus the data node session opened for it.
+struct TChunkNbdVolumeOptions
+{
+    TChunkNbdVolumeSpec Spec;
+
+    //! Filled in once a suitable data node is found.
+    NRpc::IChannelPtr DataNodeChannel;
+    NChunkClient::TSessionId SessionId;
+};
+
+using TRWNbdVolumeBackendOptions = std::variant<TChunkNbdVolumeOptions>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -42,28 +66,14 @@ struct TPrepareRWNbdVolumeOptions
 {
     TJobId JobId;
 
-    i64 Size = 0;
-    int MediumIndex = 0;
-    NNbd::EFilesystemType Filesystem = NNbd::EFilesystemType::Unknown;
+    //! Identifier of NBD disk within NBD server.
     std::string DeviceId;
-    NRpc::IChannelPtr DataNodeChannel;
-    NChunkClient::TSessionId SessionId;
 
-    //! Params to connect to chosen data nodes.
-    TDuration DataNodeRpcTimeout;
-    std::optional<std::string> DataNodeAddress;
+    //! Volume params.
+    i64 DeviceSize = 0;
+    NNbd::EFilesystemType FilesystemType = NNbd::EFilesystemType::Unknown;
 
-    //! Params for NBD requests to data nodes.
-    TDuration DataNodeNbdServiceRpcTimeout;
-    TDuration DataNodeNbdServiceMakeTimeout;
-
-    //! Params to get suitable data nodes from master.
-    TDuration MasterRpcTimeout;
-    int MinDataNodeCount = 0;
-    int MaxDataNodeCount = 0;
-
-    //! Number of TCP connections to use for NBD RPC requests.
-    int MultiplexingParallelism = DefaultNbdMultiplexingParallelism;
+    TRWNbdVolumeBackendOptions BackendOptions;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

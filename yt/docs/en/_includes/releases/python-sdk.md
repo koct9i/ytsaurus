@@ -8,6 +8,85 @@ Available as a package in [PyPI](https://pypi.org/project/ytsaurus-client/).
 
 **Releases:**
 
+{% cut "**0.13.53**" %}
+
+**Release date:** 2026-07-24
+
+
+**Release page:** [0.13.53](https://github.com/ytsaurus/ytsaurus/releases/tag/python/ytsaurus-client/0.13.53)
+
+
+**PyPI package:** [0.13.53](https://pypi.org/project/ytsaurus-client/0.13.53/)
+
+
+#### Features
+- Make `yt admin logs k8s` use the active kubeconfig or in-cluster namespace by default, falling back to `default` [77e6e2c7f83aa240c9bddf2500577c6c3087776b]
+- Add `yt dq` CLI commands for managing DQ cliques through Strawberry [c1c4106e9dfa2c32f7565506d17bb8167b245454]
+- Add the `annotate_objects` config option and `YT_ANNOTATE_OBJECTS` environment variable to automatically attach underscore-prefixed attributes to newly created tables, files, and map nodes
+[6c162f1874bf54cd5ce5eaea94eb845dda3bba8a, 734943a5e2e14b3590013e924a61e90c18db4481]
+- Add `--status-only` to `yt flow describe-pipeline` to request only the pipeline status and related messages instead of its full description [bc0f6eb4c49e71cc7fed6e345153a59620894232]
+
+#### Fixes
+- Fix batch request retries to recognize retriable errors nested in individual batch responses [4d0033adc1f595d57a8e203f22ee08568209d791]
+- Fix wrapper retries after failed master transaction commits when using the native driver through an RPC proxy [ec101cfdbd3089d85d576367d7719150f5db633a]
+- Improve diagnostics when heavy-proxy discovery finds no proxy matching `http_proxy_role`, including explicit errors when light-proxy fallback is disabled [44df8fae938e8de235accde85690d155106f9845]
+- Fix crashes when reading zero-row results in Arrow format [a7e02e14416e58384ba71c862013012ef1acc351]
+- Fix `yt whoami` with invalid credentials to report the underlying authentication error instead of raising `AttributeError` [17b88749ad8696aabca8586237f32bf54c9602ff]
+
+{% endcut %}
+
+
+{% cut "**0.13.52**" %}
+
+**Release date:** 2026-07-08
+
+
+**Release page:** [0.13.52](https://github.com/ytsaurus/ytsaurus/releases/tag/python/ytsaurus-client/0.13.52)
+
+
+**PyPI package:** [0.13.52](https://pypi.org/project/ytsaurus-client/0.13.52/)
+
+
+#### Features
+- Warn when a short cluster alias is used without `proxy/default_suffix` configured, and raise an informative `YtError` on DNS resolution failure instead of an opaque connection error [5677a1bceebbf064b5e0dc234d411ac8f0a0c82e]
+- Add experimental (interface may change) `yt devtools image` CLI commands (`get-cluster-env`, `prepare`, `run`, `list`, `install`) to build and run Docker images matching the target cluster's OS/Python environment [7320a23fe95a982ac0bbb6442cca957a968066bc]
+
+#### Fixes
+- Redact auth headers (including `request_headers`) in HTTP error responses and logs [98fdfad3f8561fc4cb9a932cc0e645189895891f, 6f9fde83692386df25e285223ff0d625c1a0e040]
+- Fix `yt` CLI path autocompletion when a Cypress path `prefix` is configured [1ca058a74d91dc21991d6d125f629f6c5609f60f]
+- Fix `YPath.join()`/`ypath_join()` silently dropping attributes when joining paths; add a `with_attributes` parameter to control merging [82b104d3f3e4e70aba4c995e221f56d31411af40]
+
+
+{% endcut %}
+
+
+{% cut "**0.13.51**" %}
+
+**Release date:** 2026-06-26
+
+
+**Release page:** [0.13.51](https://github.com/ytsaurus/ytsaurus/releases/tag/python/ytsaurus-client/0.13.51)
+
+
+**PyPI package:** [0.13.51](https://pypi.org/project/ytsaurus-client/0.13.51/)
+
+
+#### Features
+- Add `yt-admin` CLI commands `get-user-banned`, `set-user-banned`, and `list-banned-users` for managing user bans [4a19859b389eb1668fb4f14396aab7d96801cfb6]
+- Add `yt admin remove-master-unrecognized-options` command to remove unrecognized options from the master dynamic config after update [7beacb9aed028a9cf961a9e18cf43f28d95c453a]
+- Add `check_cluster_liveness` method to `YtClient` (and module-level `yt.check_cluster_liveness`) with `check_cypress_root`, `check_secondary_master_cells`, and `check_tablet_cell_bundle` options [9286c63af6bee36ccd40d17f3d856da4cd0cfa11]
+
+#### Fixes
+- Add `--timestamp` flag to the `lookup-rows` CLI command [973bea764d9c8038dc8727ea75c94f0bb43ea3da]
+- Fix `YT_DRIVER_CONFIG` environment variable crashing with `TypeError` on Python 3 [9118cf7dc5a0f66cd042cc07f60ffd5e0108dad3]
+
+#### Breaking changes
+- Removed the `TzDate`, `TzDatetime`, `TzTimestamp`, `TzDate32`, `TzDatetime64`, `TzTimestamp64` typed-API classes from `yt.wrapper.schema` [e12b3891d56424113226d891995706fb09da93f7]
+
+
+{% endcut %}
+
+
 {% cut "**0.13.50**" %}
 
 **Release date:** 2026-05-29

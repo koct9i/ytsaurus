@@ -5,7 +5,7 @@
 #include "host.h"
 #include "helpers.h"
 #include "user_defined_sql_objects_storage.h"
-#include "cypress_config_repository.h"
+#include "cypress_object_repository.h"
 
 #include <yt/yt/core/rpc/message.h>
 #include <yt/yt/core/rpc/service_detail.h>
@@ -39,6 +39,7 @@ public:
         RegisterMethod(RPC_SERVICE_METHOD_DESC(SetSqlObject));
         RegisterMethod(RPC_SERVICE_METHOD_DESC(RemoveSqlObject));
         RegisterMethod(RPC_SERVICE_METHOD_DESC(ReloadDictionary));
+        RegisterMethod(RPC_SERVICE_METHOD_DESC(RefreshCypressObjectRepository));
     }
 
 private:
@@ -115,10 +116,19 @@ private:
 
         context->SetRequestInfo("ConfigPath: %v", configPath);
 
-        Host_->GetCypressDictionaryConfigRepository()->RefreshSnapshot();
+        Host_->GetCypressObjectRepository()->RefreshSnapshot();
 
         const auto& loader = Host_->GetContext()->getExternalDictionariesLoader();
-        loader.reloadConfig(TCypressDictionaryConfigRepository::CypressConfigRepositoryName, configPath);
+        loader.reloadConfig(TCypressObjectRepository::CypressConfigRepositoryName, configPath);
+
+        context->Reply();
+    }
+
+    DECLARE_RPC_SERVICE_METHOD(NProto, RefreshCypressObjectRepository)
+    {
+        context->SetRequestInfo();
+
+        Host_->GetCypressObjectRepository()->RefreshSnapshot();
 
         context->Reply();
     }

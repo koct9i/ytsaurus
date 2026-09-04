@@ -38,7 +38,7 @@ public:
         IBlackboxServicePtr blackboxService,
         NProfiling::TProfiler profiler)
         : Config_(std::move(config))
-        , BlackboxSevice_(std::move(blackboxService))
+        , BlackboxService_(std::move(blackboxService))
         , RejectedTokensCounter_(profiler.Counter("/rejected_tokens"))
         , InvalidBlackboxResponsesCounter_(profiler.Counter("/invalid_responses"))
         , TokenScopeCheckErrorsCounter_(profiler.Counter("/scope_check_errors"))
@@ -55,9 +55,9 @@ public:
         auto userIP = FormatUserIP(credentials.UserIP);
         auto tokenHash = GetCryptoHash(token);
 
-        YT_LOG_DEBUG("Authenticating user with token via Blackbox (TokenHash: %v, UserIP: %v)",
-            tokenHash,
-            userIP);
+        YT_TLOG_DEBUG("Authenticating user with token via Blackbox")
+            .With("TokenHash", tokenHash)
+            .With("UserIP", userIP);
 
         THashMap<std::string, std::string> params{
             {"oauth_token", token},
@@ -68,7 +68,7 @@ public:
             params["get_user_ticket"] = "yes";
         }
 
-        return BlackboxSevice_->Call("oauth", params)
+        return BlackboxService_->Call("oauth", params)
             .Apply(BIND(
                 &TBlackboxTokenAuthenticator::OnCallResult,
                 MakeStrong(this),
@@ -77,7 +77,7 @@ public:
 
 private:
     const TBlackboxTokenAuthenticatorConfigPtr Config_;
-    const IBlackboxServicePtr BlackboxSevice_;
+    const IBlackboxServicePtr BlackboxService_;
 
     const TCounter RejectedTokensCounter_;
     const TCounter InvalidBlackboxResponsesCounter_;
@@ -88,16 +88,17 @@ private:
     {
         auto result = OnCallResultImpl(data);
         if (!result.IsOK()) {
-            YT_LOG_DEBUG(result, "Blackbox authentication failed (TokenHash: %v)",
-                tokenHash);
+            YT_TLOG_DEBUG("Blackbox authentication failed")
+                .With("TokenHash", tokenHash)
+                .With(result);
             THROW_ERROR result
-                << TErrorAttribute("token_hash", tokenHash);
+                .With("token_hash", tokenHash);
         }
 
-        YT_LOG_DEBUG("Blackbox authentication successful (TokenHash: %v, Login: %v, Realm: %v)",
-            tokenHash,
-            result.Value().Login,
-            result.Value().Realm);
+        YT_TLOG_DEBUG("Blackbox authentication successful")
+            .With("TokenHash", tokenHash)
+            .With("Login", result.Value().Login)
+            .With("Realm", result.Value().Realm);
         return result.Value();
     }
 
@@ -115,10 +116,10 @@ private:
             auto reason = error.IsOK() ? error.Value() : "unknown";
             RejectedTokensCounter_.Increment();
             return TError(NRpc::EErrorCode::InvalidCredentials, "Blackbox rejected token")
-                << TErrorAttribute("reason", reason);
+                .With("reason", reason);
         }
 
-        auto login = BlackboxSevice_->GetLogin(data);
+        auto login = BlackboxService_->GetLogin(data);
         auto oauthClientId = GetByYPath<std::string>(data, "/oauth/client_id");
         auto oauthClientName = GetByYPath<std::string>(data, "/oauth/client_name");
         auto oauthScope = GetByYPath<std::string>(data, "/oauth/scope");
@@ -151,8 +152,8 @@ private:
             if (!matchedScope) {
                 TokenScopeCheckErrorsCounter_.Increment();
                 return TError(NRpc::EErrorCode::InvalidCredentials, "Token does not provide a valid scope")
-                    << TErrorAttribute("provided_scopes", providedScopes)
-                    << TErrorAttribute("allowed_scope", Config_->Scope);
+                    .With("provided_scopes", providedScopes)
+                    .With("allowed_scope", Config_->Scope);
             }
         }
 
@@ -204,9 +205,9 @@ public:
         const auto& token = *credentials.Token;
         const auto& userIP = credentials.UserIP;
         auto tokenHash = GetCryptoHash(token);
-        YT_LOG_DEBUG("Authenticating user with token via Cypress (TokenHash: %v, UserIP: %v)",
-            tokenHash,
-            userIP);
+        YT_TLOG_DEBUG("Authenticating user with token via Cypress")
+            .With("TokenHash", tokenHash)
+            .With("UserIP", userIP);
 
         auto path = Format("%v/%v",
             Config_->RootPath ? Config_->RootPath : "//sys/tokens",
@@ -245,18 +246,20 @@ private:
                 SanitizeToken(&error, token);
             }
             if (callResult.FindMatching(NYTree::EErrorCode::ResolveError)) {
-                YT_LOG_DEBUG(callResult, "Token is missing in Cypress (TokenHash: %v)",
-                    tokenHash);
+                YT_TLOG_DEBUG("Token is missing in Cypress")
+                    .With("TokenHash", tokenHash)
+                    .With(callResult);
                 THROW_ERROR_EXCEPTION(NRpc::EErrorCode::InvalidCredentials,
                     "Token is missing in Cypress")
-                    << TErrorAttribute("token_hash", tokenHash)
-                    << callResult;
+                    .With("token_hash", tokenHash)
+                    .With(callResult);
             } else {
-                YT_LOG_DEBUG(callResult, "Cypress authentication failed (TokenHash: %v)",
-                    tokenHash);
+                YT_TLOG_DEBUG("Cypress authentication failed")
+                    .With("TokenHash", tokenHash)
+                    .With(callResult);
                 THROW_ERROR_EXCEPTION("Cypress authentication failed")
-                    << TErrorAttribute("token_hash", tokenHash)
-                    << callResult;
+                    .With("token_hash", tokenHash)
+                    .With(callResult);
             }
         }
 
@@ -265,15 +268,16 @@ private:
             TAuthenticationResult authResult;
             authResult.Login = ConvertTo<std::string>(ysonString);
             authResult.Realm = Config_->Realm;
-            YT_LOG_DEBUG("Cypress authentication successful (TokenHash: %v, Login: %v)",
-                tokenHash,
-                authResult.Login);
+            YT_TLOG_DEBUG("Cypress authentication successful")
+                .With("TokenHash", tokenHash)
+                .With("Login", authResult.Login);
             return authResult;
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(callResult, "Cypress contains malformed authentication entry (TokenHash: %v)",
-                tokenHash);
+            YT_TLOG_DEBUG("Cypress contains malformed authentication entry")
+                .With("TokenHash", tokenHash)
+                .With(callResult);
             THROW_ERROR_EXCEPTION("Malformed Cypress authentication entry")
-                << TErrorAttribute("token_hash", tokenHash);
+                .With("token_hash", tokenHash);
         }
     }
 };

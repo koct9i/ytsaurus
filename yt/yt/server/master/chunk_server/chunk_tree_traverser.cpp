@@ -47,7 +47,7 @@ i64 GetChunkCountInChunkList(const TChunkList* chunkList)
     // NB: Within hunk tree statistics we count only sealed chunks and without repetitions.
     // However when traverseing we need to consider every chunk occurrence as a unique entry
     // so we rely on cumulative statistics.
-    if (IsHunkRelatedChunkList(chunkList)) {
+    if (chunkList->IsHunkRelated()) {
         YT_VERIFY(chunkList->HasCumulativeStatistics());
         return chunkList->CumulativeStatistics().Empty()
             ? 0
@@ -158,11 +158,12 @@ protected:
 
     void OnFinish(const TError& error)
     {
-        YT_LOG_DEBUG(error, "Chunk tree traversal finished (CpuTime: %v, WallTime: %v, ChunkCount: %v, ChunkListCount: %v)",
-            CpuTime_,
-            TInstant::Now() - StartInstant_,
-            ChunkCount_,
-            ChunkListCount_);
+        YT_TLOG_DEBUG("Chunk tree traversal finished")
+            .With("CpuTime", CpuTime_)
+            .With("WallTime", TInstant::Now() - StartInstant_)
+            .With("ChunkCount", ChunkCount_)
+            .With("ChunkListCount", ChunkListCount_)
+            .With(error);
         Visitor_->OnFinish(error);
     }
 
@@ -193,7 +194,8 @@ protected:
                 return;
             }
 
-            YT_LOG_TRACE("Iteration started (Stack: %v)", Stack_);
+            YT_TLOG_TRACE("Iteration started")
+                .With("Stack", Stack_);
 
             auto& entry = PeekStack();
             if (!Comparator_ && (entry.LowerLimit.KeyBound() || entry.UpperLimit.KeyBound())) {
@@ -214,35 +216,30 @@ protected:
                 continue;
             }
 
-            YT_LOG_TRACE("Current entry (Entry: %v)", entry);
+            YT_TLOG_TRACE("Current entry")
+                .With("Entry", entry);
 
             auto child = chunkList->Children()[entry.ChildIndex];
 
             // YT-4840: Skip empty children since Get(Min|Max)Key will not work for them.
-            if (IsEmpty(child) && !IsHunkRelatedChunkList(chunkList.Get())) {
+            if (IsEmpty(child) && !chunkList->IsHunkRelated()) {
                 if (IsObjectAlive(child)) {
-                    YT_LOG_TRACE("Child is empty (Index: %v, Id: %v, Kind: %v)",
-                        entry.ChildIndex,
-                        child->GetId(),
-                        child->GetType());
+                    YT_TLOG_TRACE("Child is empty")
+                        .With("Index", entry.ChildIndex)
+                        .With("Id", child->GetId())
+                        .With("Kind", child->GetType());
                 } else {
-                    YT_LOG_TRACE("Child is empty (Index: %v)",
-                        entry.ChildIndex);
+                    YT_TLOG_TRACE("Child is empty")
+                        .With("Index", entry.ChildIndex);
                 }
                 ++entry.ChildIndex;
                 continue;
             }
 
-            if (IsJournalChunkType(child->GetType()) && ShouldTraverseHunkChunkListAsMain()) {
-                // NB: This constraint on fetching journal hunk chunks is a robust way
-                // to ensure they are not accessed in such operations as remote copy.
-                THROW_ERROR_EXCEPTION("Chunk tree traverser encountered journal chunk while fetching hunk chunks");
-            }
-
-            YT_LOG_TRACE("Current child (Index: %v, Id: %v, Kind: %v)",
-                entry.ChildIndex,
-                child->GetId(),
-                child->GetType());
+            YT_TLOG_TRACE("Current child")
+                .With("Index", entry.ChildIndex)
+                .With("Id", child->GetId())
+                .With("Kind", child->GetType());
 
             switch (chunkList->GetKind()) {
                 case EChunkListKind::Static:
@@ -325,7 +322,7 @@ protected:
         return it == UnsealedChunkIdToStatisticsFuture_.end() ? TFuture<void>() : it->second.AsVoid();
     }
 
-    void InferJournalChunkRowRange(const TStackEntry& entry)
+    void MemoizeJournalChunkRowRange(const TStackEntry& entry)
     {
         YT_VERIFY(EnforceBounds_);
 
@@ -372,12 +369,11 @@ protected:
             endRowIndex = std::max(startRowIndex, endRowIndex);
         }
 
-        YT_VERIFY(JournalChunkIdToRowRange_.emplace(chunk->GetId(), std::pair{startRowIndex, endRowIndex}).second);
+        EmplaceOrCrash(JournalChunkIdToRowRange_, chunk->GetId(), std::pair(startRowIndex, endRowIndex));
 
-        YT_LOG_DEBUG("Journal chunk row range inferred (ChunkId: %v, RowIndexes: %v-%v)",
-            chunk->GetId(),
-            startRowIndex,
-            endRowIndex - 1);
+        YT_TLOG_DEBUG("Journal chunk row range inferred")
+            .With("ChunkId", chunk->GetId())
+            .WithFormat("RowIndexes", "%v-%v", startRowIndex, endRowIndex - 1);
     }
 
     std::pair<i64, i64> GetJournalChunkRowRange(const TChunk* chunk)
@@ -429,7 +425,8 @@ protected:
         TReadLimit subtreeEndLimit;
         std::optional<i64> rowIndex;
 
-        YT_LOG_TRACE("Visiting static entry (Entry: %v)", *entry);
+        YT_TLOG_TRACE("Visiting static entry")
+            .With("Entry", *entry);
 
         if (EnforceBounds_) {
             if (auto future = RequestUnsealedChunksStatistics(*entry)) {
@@ -441,7 +438,7 @@ protected:
             }
 
             if (IsJournalChunkType(childType)) {
-                InferJournalChunkRowRange(*entry);
+                MemoizeJournalChunkRowRange(*entry);
             }
 
             auto [childLowerStatistics, childUpperStatistics] = GetCumulativeStatisticsRange(*entry);
@@ -531,12 +528,11 @@ protected:
                 subtreeEndLimit);
         } else if (IsPhysicalChunkType(childType)) {
             auto* childChunk = child->AsChunk();
-            YT_LOG_TRACE(
-                "Visiting static chunk (Id: %v, RowIndex: %v, StartLimit: %v, EndLimit: %v)",
-                childChunk->GetId(),
-                rowIndex,
-                subtreeStartLimit,
-                subtreeEndLimit);
+            YT_TLOG_TRACE("Visiting static chunk")
+                .With("Id", childChunk->GetId())
+                .With("RowIndex", rowIndex)
+                .With("StartLimit", subtreeStartLimit)
+                .With("EndLimit", subtreeEndLimit);
             if (!Visitor_->OnChunk(
                 childChunk,
                 chunkList.Get(),
@@ -572,7 +568,8 @@ protected:
         TReadLimit subtreeEndLimit;
         std::optional<int> tabletIndex;
 
-        YT_LOG_TRACE("Visiting dynamic root entry (Entry: %v)", *entry);
+        YT_TLOG_TRACE("Visiting dynamic root entry")
+            .With("Entry", *entry);
 
         if (EnforceBounds_) {
             // Row index.
@@ -703,7 +700,8 @@ protected:
 
         bool isOrdered = chunkList->GetKind() == EChunkListKind::OrderedDynamicTablet;
 
-        YT_LOG_TRACE("Visiting dynamic entry (Entry: %v)", *entry);
+        YT_TLOG_TRACE("Visiting dynamic entry")
+            .With("Entry", *entry);
 
         // Row index.
         YT_VERIFY((!entry->LowerLimit.GetRowIndex() && !entry->UpperLimit.GetRowIndex()) || isOrdered);
@@ -838,22 +836,21 @@ protected:
                 if (childType == EObjectType::ChunkView) {
                     auto* chunkView = child->AsChunkView();
 
-                    YT_LOG_TRACE(
-                        "Visiting chunk view (Id: %v, UnderlyingTreeId: %v, LowerLimit: %v, UpperLimit: %v)",
-                        chunkView->GetId(),
-                        chunkView->GetUnderlyingTree()->GetId(),
-                        chunkView->ReadRange().LowerLimit(),
-                        chunkView->ReadRange().UpperLimit());
+                    YT_TLOG_TRACE("Visiting chunk view")
+                        .With("Id", chunkView->GetId())
+                        .With("UnderlyingTreeId", chunkView->GetUnderlyingTree()->GetId())
+                        .With("LowerLimit", chunkView->ReadRange().LowerLimit())
+                        .With("UpperLimit", chunkView->ReadRange().UpperLimit());
 
                     if (Visitor_->OnChunkView(chunkView)) {
                         ++ChunkCount_;
-                        YT_LOG_TRACE("Not visiting underlying chunk");
+                        YT_TLOG_TRACE("Not visiting underlying chunk");
                         return;
                     }
 
                     // TODO(ifsmirnov): rewrite this switch-case into a while loop.
                     if (!IsBlobChunkType(chunkView->GetUnderlyingTree()->GetType())) {
-                        YT_LOG_WARNING("Skipped dynamic store under chunk view");
+                        YT_TLOG_WARNING("Skipped dynamic store under chunk view");
                         break;
                     }
 
@@ -884,10 +881,9 @@ protected:
                                 /*isUpper*/ true,
                                 Comparator_.GetLength());
 
-                            YT_LOG_TRACE(
-                                "Adjusting subtree limits using chunk view (SubtreeStartLimit: %v, SubtreeEndLimit: %v)",
-                                subtreeStartLimit,
-                                subtreeEndLimit);
+                            YT_TLOG_TRACE("Adjusting subtree limits using chunk view")
+                                .With("SubtreeStartLimit", subtreeStartLimit)
+                                .With("SubtreeEndLimit", subtreeEndLimit);
                         }
                     }
 
@@ -898,13 +894,12 @@ protected:
                     childChunk = child->AsChunk();
                 }
 
-                YT_LOG_TRACE(
-                    "Visiting dynamic chunk (Id: %v, RowIndex: %v, TabletIndex: %v, StartLimit: %v, EndLimit: %v)",
-                    childChunk->GetId(),
-                    rowIndex,
-                    tabletIndex,
-                    subtreeStartLimit,
-                    subtreeEndLimit);
+                YT_TLOG_TRACE("Visiting dynamic chunk")
+                    .With("Id", childChunk->GetId())
+                    .With("RowIndex", rowIndex)
+                    .With("TabletIndex", tabletIndex)
+                    .With("StartLimit", subtreeStartLimit)
+                    .With("EndLimit", subtreeEndLimit);
 
                 if (!Visitor_->OnChunk(
                     childChunk,
@@ -926,12 +921,11 @@ protected:
             case EObjectType::SortedDynamicTabletStore:
             case EObjectType::OrderedDynamicTabletStore: {
                 auto* dynamicStore = child->AsDynamicStore();
-                YT_LOG_TRACE(
-                    "Visiting dynamic store (Id: %v, TabletIndex: %v, StartLimit: %v, EndLimit: %v)",
-                    dynamicStore->GetId(),
-                    tabletIndex,
-                    subtreeStartLimit,
-                    subtreeEndLimit);
+                YT_TLOG_TRACE("Visiting dynamic store")
+                    .With("Id", dynamicStore->GetId())
+                    .With("TabletIndex", tabletIndex)
+                    .With("StartLimit", subtreeStartLimit)
+                    .With("EndLimit", subtreeEndLimit);
 
                 if (!Visitor_->OnDynamicStore(dynamicStore, tabletIndex, subtreeStartLimit, subtreeEndLimit)) {
                     Shutdown();
@@ -956,7 +950,10 @@ protected:
                 }
 
                 // Don't traverse hunks when bounds are enforced and hunks are not explicitly requested.
-                if (!isHunkChunkList || !EnforceBounds_ || ShouldTraverseHunkChunkListAsMain()) {
+                if (!isHunkChunkList ||
+                    !EnforceBounds_ ||
+                    PrimaryChunkListContentType_ == EChunkListContentType::Hunk)
+                {
                     PushFirstChild(childChunkList, childIndex, 0, tabletIndex, subtreeStartLimit, subtreeEndLimit);
                 }
                 break;
@@ -1123,9 +1120,9 @@ protected:
         int childIndex = 0;
 
         // Don't traverse hunks when bounds are enforced and hunks are not explicitly requested.
-        if (EnforceBounds_ &&
-            chunkList->GetKind() == EChunkListKind::HunkRoot &&
-            !ShouldTraverseHunkChunkListAsMain())
+        if (chunkList->GetKind() == EChunkListKind::HunkRoot &&
+            EnforceBounds_ &&
+            PrimaryChunkListContentType_ != EChunkListContentType::Hunk)
         {
             auto error = TError("Attempted to traverse hunk root chunk list %v with bounds enforced",
                 chunkList->GetId());
@@ -1318,10 +1315,8 @@ protected:
             }
         }
 
-        // Adjust for journal chunks.
-        if (IsJournalChunkType(child->GetType())) {
-            YT_VERIFY(!ShouldTraverseHunkChunkListAsMain());
-
+        // Handle journal chunks in main chunk list.
+        if (IsJournalChunkType(child->GetType()) && PrimaryChunkListContentType_ == EChunkListContentType::Main) {
             const auto* chunk = child->AsChunk();
             auto [startRowIndex, endRowIndex] = GetJournalChunkRowRange(chunk);
 
@@ -1340,8 +1335,8 @@ protected:
                 if (startRowIndex < firstOverlayedRowIndex) {
                     THROW_ERROR_EXCEPTION("Row gap detected in overlayed chunk %v",
                         chunk->GetId())
-                        << TErrorAttribute("start_row_index", startRowIndex)
-                        << TErrorAttribute("first_overlayed_row_index", firstOverlayedRowIndex);
+                        .With("start_row_index", startRowIndex)
+                        .With("first_overlayed_row_index", firstOverlayedRowIndex);
                 }
                 auto rowIndexDelta =
                     (startRowIndex - firstOverlayedRowIndex) + // rows overlayed with the previous chunk
@@ -1353,16 +1348,12 @@ protected:
             auto physicalStartRowIndex = *startLimit->GetRowIndex();
             auto physicalEndRowIndex = *endLimit->GetRowIndex();
 
-            YT_LOG_DEBUG("Journal chunk fetched "
-                "(ChunkId: %v, Overlayed: %v, LogicalRowIndexes: %v-%v, PhysicalRowIndexes: %v-%v, JournalRowIndexes: %v-%v)",
-                chunk->GetId(),
-                chunk->GetOverlayed(),
-                logicalStartRowIndex,
-                logicalEndRowIndex - 1,
-                physicalStartRowIndex,
-                physicalEndRowIndex - 1,
-                startRowIndex + logicalStartRowIndex,
-                startRowIndex + logicalEndRowIndex - 1);
+            YT_TLOG_DEBUG("Journal chunk row limits inferred")
+                .With("ChunkId", chunk->GetId())
+                .With("Overlayed", chunk->GetOverlayed())
+                .WithFormat("LogicalRowIndexes", "%v-%v", logicalStartRowIndex, logicalEndRowIndex - 1)
+                .WithFormat("PhysicalRowIndexes", "%v-%v", physicalStartRowIndex, physicalEndRowIndex - 1)
+                .WithFormat("JournalRowIndexes", "%v-%v", startRowIndex + logicalStartRowIndex, startRowIndex + logicalEndRowIndex - 1);
         }
 
         // NB: Tablet index is not needed here, because only chunks inside correct tablets
@@ -1418,19 +1409,12 @@ protected:
             }
         }
 
-        YT_LOG_TRACE(
-            "Subtree range induced (Entry: %v, ChildLowerLimit: %v, ChildUpperLimit: %v, "
-            "StartLimit: %v, EndLimit: %v)",
-            entry,
-            childLowerLimit,
-            childUpperLimit,
-            *startLimit,
-            *endLimit);
-    }
-
-    bool ShouldTraverseHunkChunkListAsMain() const
-    {
-        return PrimaryChunkListContentType_ == EChunkListContentType::Hunk;
+        YT_TLOG_TRACE("Subtree range induced")
+            .With("Entry", entry)
+            .With("ChildLowerLimit", childLowerLimit)
+            .With("ChildUpperLimit", childUpperLimit)
+            .With("StartLimit", *startLimit)
+            .With("EndLimit", *endLimit);
     }
 
     bool IsStackEmpty()
@@ -1443,7 +1427,8 @@ protected:
     {
         ++ChunkListCount_;
         const auto& newEntry = Stack_.emplace_back(std::forward<TArgs>(args)...);
-        YT_LOG_TRACE("Pushing new entry to stack (Entry: %v)", newEntry);
+        YT_TLOG_TRACE("Pushing new entry to stack")
+            .With("Entry", newEntry);
     }
 
     TStackEntry& PeekStack()
@@ -1454,7 +1439,8 @@ protected:
     void PopStack()
     {
         auto& entry = Stack_.back();
-        YT_LOG_TRACE("Popping stack (Entry: %v)", entry);
+        YT_TLOG_TRACE("Popping stack")
+            .With("Entry", entry);
         Stack_.pop_back();
     }
 
@@ -1495,7 +1481,7 @@ public:
         TReadLimit lowerLimit,
         TReadLimit upperLimit,
         TTraverserTestingOptions testingOptions,
-        EChunkListContentType primaryChunkListContentType = EChunkListContentType::Main)
+        EChunkListContentType primaryChunkListContentType)
         : Context_(std::move(context))
         , Visitor_(std::move(visitor))
         , EnforceBounds_(enforceBounds)
@@ -1503,16 +1489,16 @@ public:
         , TestingOptions_(std::move(testingOptions))
         , PrimaryChunkListContentType_(primaryChunkListContentType)
         , RootHunkChunkList_(chunkLists[EChunkListContentType::Hunk])
-        , Logger(ChunkServerLogger().WithTag("RootId: %v", chunkLists[EChunkListContentType::Main]->GetId()))
+        , Logger(ChunkServerLogger().WithTag("RootId", chunkLists[EChunkListContentType::Main]->GetId()))
     {
-        YT_LOG_DEBUG("Chunk tree traversal started (LowerLimit: %v, UpperLimit: %v, EnforceBounds: %v)",
-            lowerLimit,
-            upperLimit,
-            EnforceBounds_);
+        YT_TLOG_DEBUG("Chunk tree traversal started")
+            .With("LowerLimit", lowerLimit)
+            .With("UpperLimit", upperLimit)
+            .With("EnforceBounds", EnforceBounds_);
 
         auto* chunkList = chunkLists[PrimaryChunkListContentType_];
         if (!chunkList && PrimaryChunkListContentType_ == EChunkListContentType::Hunk) {
-            YT_LOG_DEBUG("Started chunk tree traversal by hunk chunk list for node without hunk chunk list");
+            YT_TLOG_DEBUG("Started chunk tree traversal by hunk chunk list for node without hunk chunk list");
             return;
         }
 
@@ -1520,7 +1506,7 @@ public:
             !EnforceBounds_ &&
             RootHunkChunkList_)
         {
-            YT_VERIFY(!ShouldTraverseHunkChunkListAsMain());
+            YT_VERIFY(PrimaryChunkListContentType_ == EChunkListContentType::Main);
 
             auto* hunkChunkList = RootHunkChunkList_.Get();
             if (hunkChunkList->GetKind() != EChunkListKind::HunkRoot) {
@@ -1684,7 +1670,8 @@ void TraverseChunkTree(
         TComparator(),
         TReadLimit(),
         TReadLimit(),
-        std::move(testingOptions))
+        std::move(testingOptions),
+        EChunkListContentType::Main)
         ->Run();
 }
 

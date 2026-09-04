@@ -25,6 +25,7 @@
 #include <Common/ThreadPool.h>
 #include <Common/SettingsChanges.h>
 #include <Interpreters/Context.h>
+#include <Parsers/ASTSetQuery.h>
 #include <Interpreters/executeQuery.h>
 #include <Interpreters/Session.h>
 #include <Parsers/parseQuery.h>
@@ -176,9 +177,23 @@ private:
         QueryContext_->setQueryKind(DB::ClientInfo::QueryKind::INITIAL_QUERY);
         QueryContext_->setCurrentQueryId(ToString(InitialQueryId_));
 
+        if (Request_->has_parent_transaction_id()) {
+            auto parentTransactionId = FromProto<NTransactionClient::TTransactionId>(
+                Request_->parent_transaction_id());
+            QueryContext_->setQueryParameter(ParamTransactionId, ToString(parentTransactionId));
+        }
+
         DB::SettingsChanges settingsChanges;
         auto& chytRequest = Request_->chyt_request();
         for (const auto& [key, value] : chytRequest.settings()) {
+            static const TStringBuf ParameterPrefix(DB::QUERY_PARAMETER_NAME_PREFIX);
+            if (TStringBuf(key).StartsWith(ParameterPrefix)) {
+                std::string name(TStringBuf(key).SubStr(ParameterPrefix.size()));
+                if (!name.empty() && !QueryContext_->getQueryParameters().contains(name)) {
+                    QueryContext_->setQueryParameter(name, std::string(value));
+                }
+                continue;
+            }
             std::string_view view(value);
             settingsChanges.emplace_back(key, DB::Field(view));
         }

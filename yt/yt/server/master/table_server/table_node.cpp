@@ -235,7 +235,7 @@ void TTableNode::ValidateBeginUpload(const TBeginUploadContext& context)
 {
     // COMPAT(h0pless): This check protects from requests from pre-24.2 clients.
     // It is safe to remove once we become brave enough.
-    YT_LOG_ALERT_AND_THROW_UNLESS(context.TableSchema, "Schema is missing in begin upload context");
+    YT_TLOG_ALERT_AND_THROW_UNLESS(context.TableSchema, "Schema is missing in begin upload context");
 
     const auto& config = context.Bootstrap->GetConfigManager()->GetConfig();
     if (config->TableManager->ValidateNoDescendingSortOrder) {
@@ -243,6 +243,16 @@ void TTableNode::ValidateBeginUpload(const TBeginUploadContext& context)
             const auto& compactTableSchema = context.TableSchema->AsCompactTableSchema();
             ValidateNoDescendingSortOrder(compactTableSchema->GetSortOrders(), compactTableSchema->GetKeyColumns());
         }
+    }
+
+    // NB: Heavy schema is materialized only when there is something to complain about,
+    // since upload is a hot path.
+    if (!config->EnableAggregateStateType &&
+        context.TableSchema->AsCompactTableSchema()->HasAggregateStateColumns())
+    {
+        const auto& tableManager = context.Bootstrap->GetTableManager();
+        auto tableSchema = tableManager->GetHeavyTableSchemaSync(context.TableSchema);
+        ValidateNoAggregateStateType(*tableSchema);
     }
 }
 
@@ -255,14 +265,13 @@ void TTableNode::BeginUpload(const TBeginUploadContext &context)
         if ((SchemaMode_ != contextMode) ||
             (contextSchema && *GetSchema()->AsCompactTableSchema() != *contextSchema->AsCompactTableSchema()))
         {
-            YT_LOG_ALERT("Schema of a dynamic table changed during upload (TableId: %v, TransactionId: %v, "
-                "OriginalSchemaMode: %v, NewSchemaMode: %v, OriginalSchema: %v, NewSchema: %v)",
-                GetId(),
-                GetTransaction()->GetId(),
-                SchemaMode_,
-                context.SchemaMode,
-                tableManager->GetHeavyTableSchemaSync(GetSchema()),
-                tableManager->GetHeavyTableSchemaSync(context.TableSchema));
+            YT_TLOG_ALERT("Schema of a dynamic table changed during upload")
+                .With("TableId", GetId())
+                .With("TransactionId", GetTransaction()->GetId())
+                .With("OriginalSchemaMode", SchemaMode_)
+                .With("NewSchemaMode", context.SchemaMode)
+                .With("OriginalSchema", tableManager->GetHeavyTableSchemaSync(GetSchema()))
+                .With("NewSchema", tableManager->GetHeavyTableSchemaSync(context.TableSchema));
         }
     }
 
@@ -624,7 +633,8 @@ void TTableNode::ValidateReshard(
     int lastTabletIndex,
     int newTabletCount,
     const std::vector<TLegacyOwningKey>& pivotKeys,
-    const std::vector<i64>& trimmedRowCounts) const
+    const std::vector<i64>& trimmedRowCounts,
+    const std::vector<i64>& cumulativeDataWeights) const
 {
     TTabletOwnerBase::ValidateReshard(
         bootstrap,
@@ -632,7 +642,8 @@ void TTableNode::ValidateReshard(
         lastTabletIndex,
         newTabletCount,
         pivotKeys,
-        trimmedRowCounts);
+        trimmedRowCounts,
+        cumulativeDataWeights);
 
     // First, check parameters with little knowledge of the table.
     // Primary master must ensure that the table could be created.
@@ -692,6 +703,10 @@ void TTableNode::ValidateReshard(
         if (!trimmedRowCounts.empty()) {
             THROW_ERROR_EXCEPTION("Cannot reshard sorted table with \"trimmed_row_counts\"");
         }
+
+        if (!cumulativeDataWeights.empty()) {
+            THROW_ERROR_EXCEPTION("Cannot reshard sorted table with \"cumulative_data_weights\"");
+        }
     } else {
         if (!pivotKeys.empty()) {
             THROW_ERROR_EXCEPTION("Table is ordered; must provide tablet count");
@@ -710,6 +725,10 @@ void TTableNode::ValidateReshard(
     if (IsPhysicallyLog()) {
         if (!trimmedRowCounts.empty()) {
             THROW_ERROR_EXCEPTION("Cannot reshard log table with \"trimmed_row_counts\"");
+        }
+
+        if (!cumulativeDataWeights.empty()) {
+            THROW_ERROR_EXCEPTION("Cannot reshard log table with \"cumulative_data_weights\"");
         }
     }
 
@@ -750,6 +769,21 @@ void TTableNode::ValidateReshard(
             if (count < 0) {
                 THROW_ERROR_EXCEPTION("Trimmed row count must be nonnegative, got %v",
                     count);
+            }
+        }
+
+        if (!cumulativeDataWeights.empty() && ssize(cumulativeDataWeights) != createdTabletCount) {
+            THROW_ERROR_EXCEPTION("\"cumulative_data_weights\" has invalid size: expected "
+                "%v or %v, got %v",
+                0,
+                createdTabletCount,
+                ssize(cumulativeDataWeights));
+        }
+
+        for (auto dataWeight : cumulativeDataWeights) {
+            if (dataWeight < 0) {
+                THROW_ERROR_EXCEPTION("Cumulative data weight must be nonnegative, got %v",
+                    dataWeight);
             }
         }
     }
@@ -822,17 +856,17 @@ void TTableNode::ValidateAndSetHunkStorage(TObject* node)
         THROW_ERROR_EXCEPTION("Unexpected node type: expected %Qlv, got %Qlv",
             EObjectType::HunkStorage,
             node->GetType())
-            << TErrorAttribute("object_id", node->GetId());
+            .With("object_id", node->GetId());
     }
 
     auto* hunkStorage = node->As<THunkStorageNode>();
 
     if (GetExternalCellTag() != hunkStorage->GetExternalCellTag()) {
         THROW_ERROR_EXCEPTION("Table and its hunk storage must reside on the same external cell")
-            << TErrorAttribute("table_id", GetId())
-            << TErrorAttribute("table_external_cell_tag", GetExternalCellTag())
-            << TErrorAttribute("hunk_storage_id", hunkStorage->GetId())
-            << TErrorAttribute("hunk_storage_external_cell_tag", hunkStorage->GetExternalCellTag());
+            .With("table_id", GetId())
+            .With("table_external_cell_tag", GetExternalCellTag())
+            .With("hunk_storage_id", hunkStorage->GetId())
+            .With("hunk_storage_external_cell_tag", hunkStorage->GetExternalCellTag());
     }
 
     SetHunkStorage(hunkStorage);

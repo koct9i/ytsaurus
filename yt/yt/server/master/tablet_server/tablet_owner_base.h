@@ -122,7 +122,8 @@ public:
         int lastTabletIndex,
         int newTabletCount,
         const std::vector<NTableClient::TLegacyOwningKey>& pivotKeys,
-        const std::vector<i64>& trimmedRowCounts) const;
+        const std::vector<i64>& trimmedRowCounts,
+        const std::vector<i64>& cumulativeDataWeights) const;
 
     void LockCurrentMountTransaction(NTransactionClient::TTransactionId transactionId);
     void UnlockCurrentMountTransaction(NTransactionClient::TTransactionId transactionId);
@@ -136,7 +137,7 @@ private:
 DEFINE_MASTER_OBJECT_TYPE(TTabletOwnerBase)
 
 // Think twice before increasing this.
-YT_STATIC_ASSERT_SIZEOF_SANITY(TTabletOwnerBase, 592);
+YT_STATIC_ASSERT_SIZEOF_SANITY(TTabletOwnerBase, 584);
 
 ////////////////////////////////////////////////////////////////////////////////
 

@@ -15,6 +15,7 @@
 
 #include <yt/yt/core/misc/protobuf_helpers.h>
 #include <yt/yt/core/misc/fs.h>
+#include <yt/yt/core/misc/sync_cache.h>
 
 namespace NYT::NExecNode {
 
@@ -33,11 +34,20 @@ std::string MakeNbdDeviceId(TJobId jobId, int nbdDeviceIndex)
     return ToString(nbdDeviceId);
 }
 
-} // namespace
+// A global cache mapping TArtifactKey to a stable NBD device id (eviction is acceptable).
+constexpr i64 NbdDeviceIdCacheMaxSize = 100'000;
+TSimpleLruCache<TArtifactKey, std::string> NbdDeviceIdCache(NbdDeviceIdCacheMaxSize);
+YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, NbdDeviceIdCacheLock);
 
-////////////////////////////////////////////////////////////////////////////////
-
-namespace {
+std::string GetOrCreateNbdDeviceId(const TArtifactKey& artifactKey)
+{
+    auto guard = Guard(NbdDeviceIdCacheLock);
+    auto* deviceId = NbdDeviceIdCache.Find(artifactKey);
+    if (!deviceId) {
+        deviceId = NbdDeviceIdCache.Insert(artifactKey, ToString(TGuid::Create()));
+    }
+    return *deviceId;
+}
 
 TError CheckArtifacts(
     const std::vector<TArtifactDescription>& baseline,
@@ -45,15 +55,15 @@ TError CheckArtifacts(
 {
     if (baseline.size() != current.size()) {
         return TError("Job spec artifacts count differs from the first job in this allocation")
-            << TErrorAttribute("baseline_count", baseline.size())
-            << TErrorAttribute("current_count", current.size());
+            .With("baseline_count", baseline.size())
+            .With("current_count", current.size());
     }
     for (int i = 0; i < ssize(current); ++i) {
         if (!baseline[i].IsStaticDescriptionEqualTo(current[i])) {
             return TError("Job spec artifacts differ from the first job in this allocation")
-                << TErrorAttribute("artifact_index", i)
-                << TErrorAttribute("baseline", Format("%v", baseline[i].Key))
-                << TErrorAttribute("current", Format("%v", current[i].Key));
+                .With("artifact_index", i)
+                .With("baseline", Format("%v", baseline[i].Key))
+                .With("current", Format("%v", current[i].Key));
         }
     }
     return {};
@@ -66,15 +76,15 @@ TError CheckLayerArtifactKeyList(
 {
     if (baseline.size() != current.size()) {
         return TError("Job spec %v layer artifact keys count differs from the first job in this allocation", layerKind)
-            << TErrorAttribute("baseline_count", baseline.size())
-            << TErrorAttribute("current_count", current.size());
+            .With("baseline_count", baseline.size())
+            .With("current_count", current.size());
     }
     for (int i = 0; i < ssize(current); ++i) {
         if (baseline[i] != current[i]) {
             return TError("Job spec %v layer artifact keys differ from the first job in this allocation", layerKind)
-                << TErrorAttribute("layer_index", i)
-                << TErrorAttribute("baseline", Format("%v", baseline[i]))
-                << TErrorAttribute("current", Format("%v", current[i]));
+                .With("layer_index", i)
+                .With("baseline", Format("%v", baseline[i]))
+                .With("current", Format("%v", current[i]));
         }
     }
     return {};
@@ -101,8 +111,8 @@ TError CheckDockerImage(
 {
     if (baseline != current) {
         return TError("Job spec docker image differs from the first job in this allocation")
-            << TErrorAttribute("baseline", baseline)
-            << TErrorAttribute("current", current);
+            .With("baseline", baseline)
+            .With("current", current);
     }
     return {};
 }
@@ -115,13 +125,13 @@ TError CheckRootVolumeDiskSpaceAndInodeLimit(
 {
     if (baselineDiskSpace != currentDiskSpace) {
         return TError("Job spec root volume disk space differs from the first job in this allocation")
-            << TErrorAttribute("baseline", baselineDiskSpace)
-            << TErrorAttribute("current", currentDiskSpace);
+            .With("baseline", baselineDiskSpace)
+            .With("current", currentDiskSpace);
     }
     if (baselineInodeLimit != currentInodeLimit) {
         return TError("Job spec root volume inode limit differs from the first job in this allocation")
-            << TErrorAttribute("baseline", baselineInodeLimit)
-            << TErrorAttribute("current", currentInodeLimit);
+            .With("baseline", baselineInodeLimit)
+            .With("current", currentInodeLimit);
     }
     return {};
 }
@@ -132,8 +142,8 @@ TError CheckNonRootVolumeParams(
 {
     if (baseline.size() != current.size()) {
         return TError("Job spec non-root volume params count differs from the first job in this allocation")
-            << TErrorAttribute("baseline_count", baseline.size())
-            << TErrorAttribute("current_count", current.size());
+            .With("baseline_count", baseline.size())
+            .With("current_count", current.size());
     }
 
     // Sort volumes by VolumeId for comparison since protobuf map iteration order is not guaranteed.
@@ -149,9 +159,9 @@ TError CheckNonRootVolumeParams(
     for (int i = 0; i < ssize(sortedCurrent); ++i) {
         if (!(*sortedBaseline[i] == *sortedCurrent[i])) {
             return TError("Job spec non-root volume params differ from the first job in this allocation")
-                << TErrorAttribute("volume_index", i)
-                << TErrorAttribute("baseline", Format("%v", sortedBaseline[i]))
-                << TErrorAttribute("current", Format("%v", sortedCurrent[i]));
+                .With("volume_index", i)
+                .With("baseline", Format("%v", sortedBaseline[i]))
+                .With("current", Format("%v", sortedCurrent[i]));
         }
     }
     return {};
@@ -163,15 +173,15 @@ TError CheckJobVolumeMounts(
 {
     if (baseline.size() != current.size()) {
         return TError("Job spec job volume mounts count differs from the first job in this allocation")
-            << TErrorAttribute("baseline_count", baseline.size())
-            << TErrorAttribute("current_count", current.size());
+            .With("baseline_count", baseline.size())
+            .With("current_count", current.size());
     }
     for (int i = 0; i < ssize(current); ++i) {
         if (*baseline[i] != *current[i]) {
             return TError("Job spec job volume mounts differ from the first job in this allocation")
-                << TErrorAttribute("mount_index", i)
-                << TErrorAttribute("baseline", baseline[i])
-                << TErrorAttribute("current", current[i]);
+                .With("mount_index", i)
+                .With("baseline", baseline[i])
+                .With("current", current[i]);
         }
     }
     return {};
@@ -183,46 +193,46 @@ TError CheckSidecarsVolumeMounts(
 {
     if (baseline.size() != current.size()) {
         return TError("Job spec sidecar volume mounts count differs from the first job in this allocation")
-            << TErrorAttribute("baseline_count", baseline.size())
-            << TErrorAttribute("current_count", current.size());
+            .With("baseline_count", baseline.size())
+            .With("current_count", current.size());
     }
 
     for (const auto& [baselineSidecarName, baselineSidecarMounts] : baseline) {
         auto it = current.find(baselineSidecarName);
         if (it == current.end()) {
             return TError("Job spec sidecar volume mounts count differs from the first job in this allocation")
-                << TErrorAttribute("baseline_count", baseline.size())
-                << TErrorAttribute("current_count", current.size());
+                .With("baseline_count", baseline.size())
+                .With("current_count", current.size());
         }
         const auto& currentSidecarMounts = it->second;
         for (int i = 0; i < ssize(current); ++i) {
             if (*baselineSidecarMounts[i] != *currentSidecarMounts[i]) {
                 return TError("Job spec sidecar volume mounts differ from the first job in this allocation")
-                    << TErrorAttribute("mount_index", i)
-                    << TErrorAttribute("baseline", baselineSidecarMounts[i])
-                    << TErrorAttribute("current", currentSidecarMounts[i]);
+                    .With("mount_index", i)
+                    .With("baseline", baselineSidecarMounts[i])
+                    .With("current", currentSidecarMounts[i]);
             }
         }
     }
     return {};
 }
 
-TError CheckSandboxNbdRootVolumeData(
-    const std::optional<TSandboxNbdRootVolumeData>& baseline,
-    const std::optional<TSandboxNbdRootVolumeData>& current)
+TError CheckSandboxNbdRootVolumeSpec(
+    const std::optional<TSandboxNbdRootVolumeSpec>& baseline,
+    const std::optional<TSandboxNbdRootVolumeSpec>& current)
 {
     if (baseline.has_value() != current.has_value()) {
         return TError("Job spec sandbox NBD root volume data presence differs from the first job in this allocation")
-            << TErrorAttribute("baseline_has_value", baseline.has_value())
-            << TErrorAttribute("current_has_value", current.has_value());
+            .With("baseline_has_value", baseline.has_value())
+            .With("current_has_value", current.has_value());
     }
     if (!baseline) {
         return {};
     }
     if (*baseline != *current) {
         return TError("Job spec sandbox NBD root volume data differs from the first job in this allocation")
-            << TErrorAttribute("baseline", Format("%v", *baseline))
-            << TErrorAttribute("current", Format("%v", *current));
+            .With("baseline", Format("%v", *baseline))
+            .With("current", Format("%v", *current));
     }
     return {};
 }
@@ -246,98 +256,90 @@ void TJobFSSecretary::ConfigureFromSpec(
     int userId,
     bool hasNbdServer,
     bool enableVirtualSandbox,
-    bool enableRootVolumeDiskQuota,
+    bool disableRbindRootVolume,
     bool needGpuLayers)
 {
     const bool firstConfiguration = !JobId_;
 
     OnNewJobStarted(jobId);
-    RootVolumeDiskQuotaEnabled_ = enableRootVolumeDiskQuota;
+    RbindRootVolumeDisabled_ = disableRbindRootVolume;
 
-    // Build description directly into a local struct so the result
-    // does not depend on any prior member-variable state.
-    TJobFSDescription current;
-    ConfigureUserArtifacts(GetPtr(current), userJobSpec);
-    ConfigureLayerArtifacts(GetPtr(current), userJobSpec);
-    ConfigureDockerImage(GetPtr(current), userJobSpec);
-    ConfigureUdfArtifacts(GetPtr(current), jobSpecExt);
-    ConfigureVolumes(GetPtr(current), userJobSpec, userId);
+    {
+        // Build description directly into a local struct so the result
+        // does not depend on any prior member-variable state.
+        auto current = New<TJobFSDescription>();
+        ConfigureUserArtifacts(current, userJobSpec);
+        ConfigureLayerArtifacts(current, userJobSpec);
+        ConfigureDockerImage(current, userJobSpec);
+        ConfigureUdfArtifacts(current, jobSpecExt);
+        ConfigureVolumes(current, userJobSpec, userId);
 
-    // Baseline verification:
-    //  - after all spec-derived Configure* calls,
-    //  - before AddGpuToppingLayersIfNeeded (adds node-derived layers from GpuManager),
-    //  - before MarkArtifactsAccessed* (set AccessedViaBind/AccessedViaVirtualSandbox
-    //    depending on hasNbdServer, enableVirtualSandbox, etc.).
-    // For the first job the member fields are not yet set, so we just apply.
-    // For subsequent jobs the member fields still hold the first job's data
-    // (OnNewJobStarted does not clear them), so we compare against them.
-    if (!firstConfiguration) {
-        VerifyDescriptionMatchesApplied(current);
-    } else {
-        ApplyDescription(GetPtr(current));
-    }
+        if (enableVirtualSandbox && hasNbdServer) {
+            MarkArtifactsAccessedViaVirtualSandbox(current, userJobSpec);
+        }
+        MarkArtifactsAccessedViaBind(current);
 
-    if (needGpuLayers && userJobSpec) {
-        AddGpuToppingLayersIfNeeded(userJobSpec);
+        ConfigureNbdDeviceIds(current);
+
+        // Baseline verification. The whole description (including GPU topping
+        // layers and access flags) is now built before this point.
+        // For the first job Description_ is empty, so we just apply it.
+        // For subsequent jobs Description_ still holds the first job's data
+        // (OnNewJobStarted does not clear it), so we compare against it.
+        if (!firstConfiguration) {
+            VerifyDescriptionMatchesApplied(current);
+        } else {
+            ApplyDescription(std::move(current));
+        }
+
+        ActualDockerImage_ = Description_->DockerImage;
+
+        MergedGpuCheckVolumeLayerArtifactKeys_ = Description_->GpuCheckVolumeLayerArtifactKeys;
+        MergedRootVolumeLayerArtifactKeys_ = Description_->RootVolumeLayerArtifactKeys;
+
+        if (needGpuLayers && userJobSpec) {
+            AddGpuToppingLayersIfNeeded(userJobSpec);
+        }
     }
-    if (enableVirtualSandbox && hasNbdServer) {
-        MarkArtifactsAccessedViaVirtualSandbox(userJobSpec);
-    }
-    MarkArtifactsAccessedViaBind();
 
     CheckConfiguration(hasNbdServer);
-
-    ConfigureNbdDeviceIds();
 }
 
-void TJobFSSecretary::VerifyDescriptionMatchesApplied(const TJobFSDescription& current) const
+void TJobFSSecretary::VerifyDescriptionMatchesApplied(const TJobFSDescriptionPtr& current) const
 {
     auto crashIfFailed = [&] (const TError& error) {
-        YT_LOG_FATAL_UNLESS(
-            error.IsOK(),
-            error,
-            "Job spec differs from the first job in this allocation (CurrentJobId: %v)",
-            JobId_);
+        YT_TLOG_FATAL_UNLESS(error.IsOK(), "Job spec differs from the first job in this allocation")
+            .With("CurrentJobId", JobId_)
+            .With(error);
     };
 
-    crashIfFailed(CheckArtifacts(Artifacts_, current.Artifacts));
+    crashIfFailed(CheckArtifacts(Description_->Artifacts, current->Artifacts));
     crashIfFailed(CheckLayerArtifactKeys(
-        RootVolumeLayerArtifactKeys_,
-        current.RootVolumeLayerArtifactKeys,
-        GpuCheckVolumeLayerArtifactKeys_,
-        current.GpuCheckVolumeLayerArtifactKeys));
-    crashIfFailed(CheckDockerImage(DockerImage_, current.DockerImage));
+        Description_->RootVolumeLayerArtifactKeys,
+        current->RootVolumeLayerArtifactKeys,
+        Description_->GpuCheckVolumeLayerArtifactKeys,
+        current->GpuCheckVolumeLayerArtifactKeys));
+    crashIfFailed(CheckDockerImage(Description_->DockerImage, current->DockerImage));
 
     crashIfFailed(CheckRootVolumeDiskSpaceAndInodeLimit(
-            RootVolumeDiskSpace_,
-            current.RootVolumeDiskSpace,
-            RootVolumeInodeLimit_,
-            current.RootVolumeInodeLimit));
-    crashIfFailed(CheckNonRootVolumeParams(NonRootVolumeParams_, current.NonRootVolumeParams));
-    crashIfFailed(CheckJobVolumeMounts(JobVolumeMounts_, current.JobVolumeMounts));
-    crashIfFailed(CheckSidecarsVolumeMounts(SidecarsVolumeMounts_, current.SidecarsVolumeMounts));
-    crashIfFailed(CheckSandboxNbdRootVolumeData(SandboxNbdRootVolumeData_, current.SandboxNbdRootVolumeData));
+            Description_->RootVolumeDiskSpace,
+            current->RootVolumeDiskSpace,
+            Description_->RootVolumeInodeLimit,
+            current->RootVolumeInodeLimit));
+    crashIfFailed(CheckNonRootVolumeParams(Description_->NonRootVolumeParams, current->NonRootVolumeParams));
+    crashIfFailed(CheckJobVolumeMounts(Description_->JobVolumeMounts, current->JobVolumeMounts));
+    crashIfFailed(CheckSidecarsVolumeMounts(Description_->SidecarsVolumeMounts, current->SidecarsVolumeMounts));
+    crashIfFailed(CheckSandboxNbdRootVolumeSpec(Description_->SandboxNbdRootVolumeSpec, current->SandboxNbdRootVolumeSpec));
 }
 
-void TJobFSSecretary::ApplyDescription(TNonNullPtr<TJobFSDescription> description)
+void TJobFSSecretary::ApplyDescription(TJobFSDescriptionPtr&& description)
 {
-    Artifacts_ = std::move(description->Artifacts);
-    UserArtifactNameToIndex_ = std::move(description->UserArtifactNameToIndex);
-    RootVolumeLayerArtifactKeys_ = std::move(description->RootVolumeLayerArtifactKeys);
-    GpuCheckVolumeLayerArtifactKeys_ = std::move(description->GpuCheckVolumeLayerArtifactKeys);
-    DockerImage_ = std::move(description->DockerImage);
-    RootVolumeDiskSpace_ = description->RootVolumeDiskSpace;
-    RootVolumeInodeLimit_ = description->RootVolumeInodeLimit;
-    RootVolumeReusingAllowed_ = description->RootVolumeAllowReusing;
-    NonRootVolumeParams_ = std::move(description->NonRootVolumeParams);
-    JobVolumeMounts_ = std::move(description->JobVolumeMounts);
-    SidecarsVolumeMounts_ = std::move(description->SidecarsVolumeMounts);
-    SandboxNbdRootVolumeData_ = std::move(description->SandboxNbdRootVolumeData);
+    Description_ = std::move(description);
 }
 
 void TJobFSSecretary::CheckConfiguration(bool hasNbdServer) const
 {
-    if (SandboxNbdRootVolumeData_ && !hasNbdServer) {
+    if (Description_->SandboxNbdRootVolumeSpec && !hasNbdServer) {
         THROW_ERROR_EXCEPTION(
             NExecNode::EErrorCode::NbdServerDisabledOnNode,
             "NBD server disabled on this node but job requested nbd volume");
@@ -358,7 +360,6 @@ void TJobFSSecretary::ConfigureUserArtifacts(TNonNullPtr<TJobFSDescription> desc
             .BypassArtifactCache = descriptor.bypass_artifact_cache(),
             .CopyFile = descriptor.copy_file(),
             .Key = TArtifactKey(descriptor),
-            .Artifact = nullptr,
         });
         EmplaceOrCrash(description->UserArtifactNameToIndex, descriptor.file_name(), description->Artifacts.size() - 1);
     }
@@ -370,7 +371,7 @@ void TJobFSSecretary::AddGpuToppingLayersIfNeeded(const TUserJobSpec* userJobSpe
         return;
     }
 
-    if (RootVolumeLayerArtifactKeys_.empty()) {
+    if (Description_->RootVolumeLayerArtifactKeys.empty()) {
         THROW_ERROR_EXCEPTION(
             NExecNode::EErrorCode::GpuJobWithoutLayers,
             "No layers specified for GPU job; at least a base layer is required to use GPU");
@@ -379,14 +380,14 @@ void TJobFSSecretary::AddGpuToppingLayersIfNeeded(const TUserJobSpec* userJobSpe
     auto toppingLayers = Bootstrap_->GetGpuManager()->GetToppingLayers();
 
     if (!userJobSpec->gpu_check_volume_layers().empty()) {
-        GpuCheckVolumeLayerArtifactKeys_.insert(
-            GpuCheckVolumeLayerArtifactKeys_.begin(),
+        MergedGpuCheckVolumeLayerArtifactKeys_.insert(
+            MergedGpuCheckVolumeLayerArtifactKeys_.begin(),
             toppingLayers.begin(),
             toppingLayers.end());
     }
 
-    RootVolumeLayerArtifactKeys_.insert(
-            RootVolumeLayerArtifactKeys_.begin(),
+    MergedRootVolumeLayerArtifactKeys_.insert(
+            MergedRootVolumeLayerArtifactKeys_.begin(),
             std::make_move_iterator(toppingLayers.begin()),
             std::make_move_iterator(toppingLayers.end()));
 }
@@ -431,20 +432,19 @@ void TJobFSSecretary::ConfigureUdfArtifacts(TNonNullPtr<TJobFSDescription> descr
             .BypassArtifactCache = false,
             .CopyFile = false,
             .Key = key,
-            .Artifact = nullptr,
         });
     }
 }
 
-void TJobFSSecretary::ConfigureNbdDeviceIds()
+void TJobFSSecretary::ConfigureNbdDeviceIds(TNonNullPtr<TJobFSDescription> description)
 {
     // Mark NBD layers with NBD device ids.
     int nbdDeviceCount = 0;
-    for (auto& layer : RootVolumeLayerArtifactKeys_) {
+    for (auto& layer : description->RootVolumeLayerArtifactKeys) {
         if (NYT::FromProto<ELayerAccessMethod>(layer.access_method()) == ELayerAccessMethod::Nbd) {
-            auto deviceId = layer.GetRuntimeGuid();
+            auto deviceId = GetOrCreateNbdDeviceId(layer);
             EmplaceOrCrash(NbdDeviceIds_, deviceId);
-            ToProto(layer.mutable_nbd_device_id(), deviceId);
+            layer.set_nbd_device_id(deviceId);
             ++nbdDeviceCount;
         }
     }
@@ -459,7 +459,7 @@ void TJobFSSecretary::ConfigureNbdDeviceIds()
             dataSource->set_type(ToProto(NChunkClient::EDataSourceType::File));
         }
 
-        for (auto& artifact : Artifacts_) {
+        for (const auto& artifact : description->Artifacts) {
             if (artifact.AccessedViaVirtualSandbox) {
                 // Construct concatenated data source path of the form "path1;path2;path3".
                 auto* dataSource = virtualArtifactKey.mutable_data_source();
@@ -475,24 +475,24 @@ void TJobFSSecretary::ConfigureNbdDeviceIds()
             }
         }
 
-        auto deviceId = virtualArtifactKey.GetRuntimeGuid();
+        auto deviceId = GetOrCreateNbdDeviceId(virtualArtifactKey);
         EmplaceOrCrash(NbdDeviceIds_, deviceId);
-        ToProto(virtualArtifactKey.mutable_nbd_device_id(), deviceId);
+        virtualArtifactKey.set_nbd_device_id(deviceId);
         ++nbdDeviceCount;
 
-        VirtualSandboxData_ = TVirtualSandboxData{
+        VirtualSandboxOptions_ = TVirtualSandboxOptions{
             .NbdDeviceId = deviceId,
             .ArtifactKey = std::move(virtualArtifactKey),
         };
     }
 
     // Create NBD device id for NBD root volume.
-    if (SandboxNbdRootVolumeData_) {
+    if (description->SandboxNbdRootVolumeSpec) {
         auto deviceId = MakeNbdDeviceId(JobId_, nbdDeviceCount);
         EmplaceOrCrash(NbdDeviceIds_, deviceId);
         ++nbdDeviceCount;
 
-        SandboxNbdRootVolumeData_->DeviceId = std::move(deviceId);
+        description->SandboxNbdRootVolumeSpec->DeviceId = std::move(deviceId);
     }
 }
 
@@ -502,10 +502,23 @@ void TJobFSSecretary::ConfigureVolumes(TNonNullPtr<TJobFSDescription> descriptio
         return;
     }
 
+    bool hasRootVolumeForUserJob = [&] () {
+        if (Bootstrap_->GetConfig()->ExecNode->JobProxy->TestRootFS) {
+            return false;
+        }
+
+        for (const auto& volumeMount : userJobSpec->job_volume_mounts()) {
+            if (volumeMount.mount_path() == "/") {
+                return !userJobSpec->volumes().at(volumeMount.volume_id()).layers().empty();
+            }
+        }
+        return false;
+    }();
+
     auto fromProtoVolumeMount = [&] (const TVolumeMountPtr& volumeMount, const NControllerAgent::NProto::TVolumeMount& protoVolumeMount) {
         std::filesystem::path mountPath(std::string(protoVolumeMount.mount_path()));
         if (!mountPath.is_absolute()) {
-            if (description->RootVolumeLayerArtifactKeys.empty() || Bootstrap_->GetConfig()->ExecNode->JobProxy->TestRootFS) {
+            if (!hasRootVolumeForUserJob) {
                 volumeMount->MountPath = NFS::JoinPaths("/sandbox/", mountPath.string());
             } else {
                 volumeMount->MountPath = NFS::JoinPaths("/slot/sandbox/", mountPath.string());
@@ -607,9 +620,9 @@ void TJobFSSecretary::ConfigureVolumes(TNonNullPtr<TJobFSDescription> descriptio
                 break;
             }
             case TProtoMessage::kNbdDiskRequest: {
-                TSandboxNbdRootVolumeData sandboxNbdData;
-                NExecNode::FromProto(&sandboxNbdData, protoVolume.nbd_disk_request());
-                description->SandboxNbdRootVolumeData = std::move(sandboxNbdData);
+                TSandboxNbdRootVolumeSpec sandboxNbdRootVolumeSpec;
+                NExecNode::FromProto(&sandboxNbdRootVolumeSpec, protoVolume.nbd_disk_request());
+                description->SandboxNbdRootVolumeSpec = std::move(sandboxNbdRootVolumeSpec);
 
                 for (const auto& layerKey : protoVolume.layers()) {
                     description->RootVolumeLayerArtifactKeys.emplace_back(layerKey);
@@ -634,15 +647,15 @@ void TJobFSSecretary::ConfigureVolumes(TNonNullPtr<TJobFSDescription> descriptio
     }
 }
 
-const std::vector<TArtifactDescription>& TJobFSSecretary::GetArtifacts() const
+const std::vector<TArtifactDescription>& TJobFSSecretary::GetArtifactDescriptors() const
 {
-    return Artifacts_;
+    return Description_->Artifacts;
 }
 
-void TJobFSSecretary::MarkArtifactsAccessedViaVirtualSandbox(const NControllerAgent::NProto::TUserJobSpec* userJobSpec)
+void TJobFSSecretary::MarkArtifactsAccessedViaVirtualSandbox(TNonNullPtr<TJobFSDescription> description, const NControllerAgent::NProto::TUserJobSpec* userJobSpec)
 {
-    if (!RootVolumeLayerArtifactKeys_.empty() && RootVolumeDiskQuotaEnabled_) {
-        for (auto& artifact : Artifacts_) {
+    if (!description->RootVolumeLayerArtifactKeys.empty() && RbindRootVolumeDisabled_) {
+        for (auto& artifact : description->Artifacts) {
             if (CanBeAccessedViaVirtualSandbox(artifact, userJobSpec)) {
                 artifact.AccessedViaVirtualSandbox = true;
                 HasVirtualSandboxArtifacts_ = true;
@@ -651,9 +664,9 @@ void TJobFSSecretary::MarkArtifactsAccessedViaVirtualSandbox(const NControllerAg
     }
 }
 
-void TJobFSSecretary::MarkArtifactsAccessedViaBind()
+void TJobFSSecretary::MarkArtifactsAccessedViaBind(TNonNullPtr<TJobFSDescription> description)
 {
-    for (auto& artifact : Artifacts_) {
+    for (auto& artifact : description->Artifacts) {
         artifact.AccessedViaBind = CanBeAccessedViaBind(artifact);
     }
 }
@@ -688,23 +701,23 @@ bool TJobFSSecretary::CanBeAccessedViaBind(const TArtifactDescription& artifact)
 
 const std::vector<TArtifactKey>& TJobFSSecretary::GetRootVolumeLayerArtifactKeys() const
 {
-    return RootVolumeLayerArtifactKeys_;
+    return MergedRootVolumeLayerArtifactKeys_;
 }
 
 const std::vector<TArtifactKey>& TJobFSSecretary::GetGpuCheckVolumeLayerArtifactKeys() const
 {
-    return GpuCheckVolumeLayerArtifactKeys_;
+    return MergedGpuCheckVolumeLayerArtifactKeys_;
 }
 
 const std::optional<std::string>& TJobFSSecretary::GetDockerImage() const
 {
-    return DockerImage_;
+    return ActualDockerImage_;
 }
 
-// Note that DockerImage_ can be set multiple times during job preparation.
+// Note that ActualDockerImage_ can be set multiple times during job preparation.
 void TJobFSSecretary::SetDockerImage(std::optional<std::string> image)
 {
-    DockerImage_ = std::move(image);
+    ActualDockerImage_ = std::move(image);
 }
 
 const std::optional<std::string>& TJobFSSecretary::GetDockerImageId() const
@@ -735,7 +748,7 @@ void TJobFSSecretary::SetRootVolume(IVolumePtr volume)
 
 IVolumePtr TJobFSSecretary::ReleaseRootVolume()
 {
-    YT_LOG_DEBUG("Releasing root volume");
+    YT_TLOG_DEBUG("Releasing root volume");
     return std::move(RootVolume_);
 }
 
@@ -751,13 +764,13 @@ void TJobFSSecretary::SetGpuCheckVolume(IVolumePtr volume)
 
 IVolumePtr TJobFSSecretary::ReleaseGpuCheckVolume()
 {
-    YT_LOG_DEBUG("Releasing GPU check volume");
+    YT_TLOG_DEBUG("Releasing GPU check volume");
     return std::move(GpuCheckVolume_);
 }
 
-bool TJobFSSecretary::IsRootVolumeDiskQuotaEnabled() const
+bool TJobFSSecretary::IsRbindRootVolumeDisabled() const
 {
-    return RootVolumeDiskQuotaEnabled_;
+    return RbindRootVolumeDisabled_;
 }
 
 const THashSet<std::string>& TJobFSSecretary::GetNbdDeviceIds() const
@@ -767,13 +780,13 @@ const THashSet<std::string>& TJobFSSecretary::GetNbdDeviceIds() const
 
 THashSet<std::string> TJobFSSecretary::ReleaseNbdDeviceIds()
 {
-    YT_LOG_DEBUG("Releasing NBD device ids");
+    YT_TLOG_DEBUG("Releasing NBD device ids");
     return std::move(NbdDeviceIds_);
 }
 
-const std::optional<TSandboxNbdRootVolumeData>& TJobFSSecretary::GetSandboxNbdRootVolumeData() const
+const std::optional<TSandboxNbdRootVolumeSpec>& TJobFSSecretary::GetSandboxNbdRootVolumeSpec() const
 {
-    return SandboxNbdRootVolumeData_;
+    return Description_->SandboxNbdRootVolumeSpec;
 }
 
 const THashMap<std::string, TVolumeResultPtr>& TJobFSSecretary::GetNonRootVolumes() const
@@ -783,19 +796,19 @@ const THashMap<std::string, TVolumeResultPtr>& TJobFSSecretary::GetNonRootVolume
 
 THashMap<std::string, TVolumeResultPtr> TJobFSSecretary::ReleaseNonReusableNonRootVolumes()
 {
-    YT_LOG_DEBUG("Releasing non-reusable non-root volumes");
+    YT_TLOG_DEBUG("Releasing non-reusable non-root volumes");
 
     THashMap<std::string, TVolumeResultPtr> result;
 
     for (auto& [volumeId, volume] : NonRootVolumes_) {
         // Find the corresponding params to check if it's reusable.
         auto paramsIt = std::find_if(
-            begin(NonRootVolumeParams_),
-            end(NonRootVolumeParams_),
+            begin(Description_->NonRootVolumeParams),
+            end(Description_->NonRootVolumeParams),
             [&volumeId = volumeId] (const TBaseVolumeParamsPtr& params) {
                 return params->VolumeId == volumeId;
             });
-        YT_VERIFY(paramsIt != NonRootVolumeParams_.end());
+        YT_VERIFY(paramsIt != Description_->NonRootVolumeParams.end());
         bool isReusable = (*paramsIt)->AllowReusing;
         if (!isReusable) {
             result[volumeId] = std::move(volume);
@@ -820,8 +833,8 @@ void TJobFSSecretary::SetNonRootVolumes(std::vector<TVolumeResultPtr> volumes)
 std::vector<TBaseVolumeParamsPtr> TJobFSSecretary::GetNonRootVolumesToPrepare() const
 {
     std::vector<TBaseVolumeParamsPtr> result;
-    result.reserve(size(NonRootVolumeParams_));
-    for (const auto& params : NonRootVolumeParams_) {
+    result.reserve(size(Description_->NonRootVolumeParams));
+    for (const auto& params : Description_->NonRootVolumeParams) {
         // Check if this volume is already prepared (reused from previous job).
         if (!NonRootVolumes_.contains(params->VolumeId)) {
             // Volume not yet prepared, needs preparation.
@@ -842,35 +855,35 @@ size_t TJobFSSecretary::GetTmpfsVolumeCount() const
     return tmpfsVolumeCount;
 }
 
-const std::optional<TVirtualSandboxData>& TJobFSSecretary::GetVirtualSandboxData() const
+const std::optional<TVirtualSandboxOptions>& TJobFSSecretary::GetVirtualSandboxOptions() const
 {
-    return VirtualSandboxData_;
+    return VirtualSandboxOptions_;
 }
 
-void TJobFSSecretary::SetVirtualSandboxReader(NNbd::IImageReaderPtr reader)
+void TJobFSSecretary::SetVirtualSandboxReader(NNbd::NImage::IImageReaderPtr reader)
 {
-    YT_VERIFY(VirtualSandboxData_);
-    VirtualSandboxData_->Reader = std::move(reader);
+    YT_VERIFY(VirtualSandboxOptions_);
+    VirtualSandboxOptions_->Reader = std::move(reader);
 }
 
 const std::optional<i64>& TJobFSSecretary::GetRootVolumeDiskSpace() const
 {
-    return RootVolumeDiskSpace_;
+    return Description_->RootVolumeDiskSpace;
 }
 
 const std::optional<i64>& TJobFSSecretary::GetRootVolumeInodeLimit() const
 {
-    return RootVolumeInodeLimit_;
+    return Description_->RootVolumeInodeLimit;
 }
 
 bool TJobFSSecretary::IsRootVolumeReusable() const
 {
-    return RootVolumeReusingAllowed_;
+    return Description_->RootVolumeAllowReusing;
 }
 
 IVolumePtr TJobFSSecretary::ReleaseRootVolumeIfNeeded()
 {
-    if (RootVolumeReusingAllowed_) {
+    if (Description_->RootVolumeAllowReusing) {
         return nullptr;
     }
     return std::move(RootVolume_);
@@ -878,7 +891,7 @@ IVolumePtr TJobFSSecretary::ReleaseRootVolumeIfNeeded()
 
 std::vector<IVolumePtr> TJobFSSecretary::ReleaseVolumes()
 {
-    YT_LOG_DEBUG("Releasing volumes");
+    YT_TLOG_DEBUG("Releasing volumes");
 
     std::vector<IVolumePtr> volumes;
     volumes.reserve(2 + NonRootVolumes_.size());
@@ -896,23 +909,28 @@ std::vector<IVolumePtr> TJobFSSecretary::ReleaseVolumes()
 
 const std::vector<TBaseVolumeParamsPtr>& TJobFSSecretary::GetNonRootVolumeParams() const
 {
-    return NonRootVolumeParams_;
+    return Description_->NonRootVolumeParams;
 }
 
 const std::vector<TVolumeMountPtr>& TJobFSSecretary::GetJobVolumeMounts() const
 {
-    return JobVolumeMounts_;
+    return Description_->JobVolumeMounts;
 }
 
 const THashMap<std::string, std::vector<TVolumeMountPtr>>& TJobFSSecretary::GetSidecarsVolumeMounts() const
 {
-    return SidecarsVolumeMounts_;
+    return Description_->SidecarsVolumeMounts;
 }
 
-const TArtifactDescription& TJobFSSecretary::GetUserArtifact(const std::string& name) const
+const TArtifactPtr& TJobFSSecretary::GetArtifactByName(const std::string& name) const
 {
-    int index = GetOrCrash(UserArtifactNameToIndex_, name);
-    return Artifacts_[index];
+    return GetOrCrash(NameToPreparedArtifacts_, name);
+}
+
+const TArtifactDescription& TJobFSSecretary::GetUserArtifactDescriptor(const std::string& name) const
+{
+    int index = GetOrCrash(Description_->UserArtifactNameToIndex, name);
+    return Description_->Artifacts[index];
 }
 
 std::vector<TArtifactDescription> TJobFSSecretary::GetArtifactsToCache() const
@@ -922,8 +940,8 @@ std::vector<TArtifactDescription> TJobFSSecretary::GetArtifactsToCache() const
     }
 
     std::vector<TArtifactDescription> result;
-    result.reserve(size(Artifacts_));
-    for (const auto& artifact : Artifacts_) {
+    result.reserve(size(Description_->Artifacts));
+    for (const auto& artifact : Description_->Artifacts) {
         if (!artifact.BypassArtifactCache && !artifact.AccessedViaVirtualSandbox) {
             result.push_back(artifact);
         }
@@ -938,10 +956,10 @@ void TJobFSSecretary::SetCachedArtifacts(std::vector<TArtifactPtr> artifacts)
     }
 
     int cacheIndex = 0;
-    for (auto& artifact : Artifacts_) {
+    for (auto& artifact : Description_->Artifacts) {
         if (!artifact.BypassArtifactCache && !artifact.AccessedViaVirtualSandbox) {
             YT_VERIFY(cacheIndex < ssize(artifacts));
-            artifact.Artifact = std::move(artifacts[cacheIndex++]);
+            NameToPreparedArtifacts_[artifact.Name] = std::move(artifacts[cacheIndex++]);
         }
     }
     YT_VERIFY(cacheIndex == ssize(artifacts));
@@ -950,10 +968,9 @@ void TJobFSSecretary::SetCachedArtifacts(std::vector<TArtifactPtr> artifacts)
 
 void TJobFSSecretary::AddPreparedLayers(TPreparedLayers layers)
 {
-    YT_LOG_DEBUG(
-        "Adding prepared layers (NewLayerCount: %v, ExistingLayerCount: %v)",
-        size(layers.ArtifactKeyToOverlayData),
-        size(PreparedLayers_.ArtifactKeyToOverlayData));
+    YT_TLOG_DEBUG("Adding prepared layers")
+        .With("NewLayerCount", size(layers.ArtifactKeyToOverlayData))
+        .With("ExistingLayerCount", size(PreparedLayers_.ArtifactKeyToOverlayData));
 
     for (auto& [key, overlayData] : layers.ArtifactKeyToOverlayData) {
         EmplaceOrCrash(
@@ -970,18 +987,18 @@ bool TJobFSSecretary::HasPreparedLayer(const TArtifactKey& key) const
 
 std::vector<TOverlayData> TJobFSSecretary::GetPreparedRootVolumeOverlayData() const
 {
-    auto overlayDataArray = GetPreparedOverlayData(RootVolumeLayerArtifactKeys_);
-    if (VirtualSandboxData_) {
+    auto overlayDataArray = GetPreparedOverlayData(MergedRootVolumeLayerArtifactKeys_);
+    if (VirtualSandboxOptions_) {
         overlayDataArray.push_back(GetOrCrash(
             PreparedLayers_.ArtifactKeyToOverlayData,
-            VirtualSandboxData_->ArtifactKey));
+            VirtualSandboxOptions_->ArtifactKey));
     }
     return overlayDataArray;
 }
 
 std::vector<TOverlayData> TJobFSSecretary::GetPreparedGpuCheckVolumeOverlayData() const
 {
-    return GetPreparedOverlayData(GpuCheckVolumeLayerArtifactKeys_);
+    return GetPreparedOverlayData(MergedGpuCheckVolumeLayerArtifactKeys_);
 }
 
 std::vector<TOverlayData> TJobFSSecretary::GetPreparedNonRootVolumeOverlayData(const TBaseVolumeParams& params) const
@@ -1001,31 +1018,28 @@ std::vector<TOverlayData> TJobFSSecretary::GetPreparedOverlayData(const std::vec
 
 void TJobFSSecretary::ReleasePreparedLayers()
 {
-    YT_LOG_DEBUG(
-        "Releasing prepared layers (LayerCount: %v)",
-        size(PreparedLayers_.ArtifactKeyToOverlayData));
+    YT_TLOG_DEBUG("Releasing prepared layers")
+        .With("LayerCount", size(PreparedLayers_.ArtifactKeyToOverlayData));
     PreparedLayers_ = {};
 }
 
 void TJobFSSecretary::ReleaseArtifacts()
 {
-    YT_LOG_DEBUG("Releasing artifacts");
+    YT_TLOG_DEBUG("Releasing artifacts");
 
-    for (auto& artifact : Artifacts_) {
-        artifact.Artifact.Reset();
-    }
+    NameToPreparedArtifacts_.clear();
 }
 
 void TJobFSSecretary::OnNewJobStarted(TJobId jobId)
 {
     JobId_ = jobId;
-    Logger = BaseLogger_.WithTag("JobId: %v", jobId);
+    Logger = BaseLogger_.WithTag("JobId", jobId);
 
-    RootVolumeDiskQuotaEnabled_ = false;
+    RbindRootVolumeDisabled_ = false;
     DockerImageId_.reset();
     // Verify that root volume is reusable if it's still present.
     // Non-reusable root volume should have been released via ReleaseRootVolumeIfNeeded().
-    YT_VERIFY(!RootVolume_ || RootVolumeReusingAllowed_);
+    YT_VERIFY(!RootVolume_ || Description_->RootVolumeAllowReusing);
     GpuCheckVolume_.Reset();
     NbdDeviceIds_.clear();
 
@@ -1033,15 +1047,15 @@ void TJobFSSecretary::OnNewJobStarted(TJobId jobId)
     // Non-reusable volumes should have been released via ReleaseNonReusableNonRootVolumes().
     for (const auto& [volumeId, volume] : NonRootVolumes_) {
         auto paramsIt = std::find_if(
-            NonRootVolumeParams_.begin(),
-            NonRootVolumeParams_.end(),
+            Description_->NonRootVolumeParams.begin(),
+            Description_->NonRootVolumeParams.end(),
             [&volumeId = volumeId] (const TBaseVolumeParamsPtr& params) {
                 return params->VolumeId == volumeId;
             });
-        YT_VERIFY(paramsIt != NonRootVolumeParams_.end() && (*paramsIt)->AllowReusing);
+        YT_VERIFY(paramsIt != Description_->NonRootVolumeParams.end() && (*paramsIt)->AllowReusing);
     }
 
-    VirtualSandboxData_.reset();
+    VirtualSandboxOptions_.reset();
     HasVirtualSandboxArtifacts_ = false;
 }
 

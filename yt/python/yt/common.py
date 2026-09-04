@@ -143,7 +143,10 @@ class YtError(Exception):
         def find_recursive(error):
             # error may be Python dict; if so, transform it to YtError.
             if not isinstance(error, YtError):
-                error = YtError(**error)
+                try:
+                    error = YtError(**error)
+                except TypeError:
+                    return None
 
             if predicate(error):
                 return error
@@ -396,6 +399,10 @@ class YtError(Exception):
     def is_command_not_supported(self):
         """Command is not supported/Command is not supported by api."""
         return self.contains_text("is not supported")
+
+    def is_flow_view_keeper_not_initialized(self):
+        """Flow controller has not built its flow view yet."""
+        return self.contains_code(3302)
 
 
 class YtResponseError(YtError):

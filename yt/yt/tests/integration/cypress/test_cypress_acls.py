@@ -2108,6 +2108,34 @@ class TestCypressAcls(CheckPermissionBase):
         # full_read should also grant full_read.
         copy("//tmp/t", "//tmp/t_copy", authenticated_user="restricted")
 
+    @authors("babenko")
+    def test_full_read_covers_columns_of_foreign_aces(self):
+        # A columnar ACE mentioning a column but not matching the user used to leave
+        # that column's action undefined, which crashes the client.
+        create_user("u")
+        create_user("other")
+
+        create(
+            "table",
+            "//tmp/t",
+            attributes={
+                "schema": [
+                    {"name": "public", "type": "string"},
+                    {"name": "private", "type": "int64"},
+                ],
+                "acl": [
+                    make_ace("allow", "u", "full_read"),
+                    make_ace("allow", "other", "read", columns=["private"]),
+                ],
+                "inherit_acl": False,
+            }
+        )
+
+        response = check_permission("u", "read", "//tmp/t", columns=["public", "private"])
+        assert response["action"] == "allow"
+        assert response["columns"][0]["action"] == "allow"
+        assert response["columns"][1]["action"] == "allow"
+
     @authors("coteeq")
     def test_full_read_and_deny_read(self):
         create_user("u")
@@ -2733,6 +2761,51 @@ class TestRowAcls(YTEnvSetup):
 
         # Request as root.
         get("//tmp/t/@row_count")
+
+    @authors("coteeq")
+    @pytest.mark.parametrize("mode", ["move", "copy"])
+    def test_copy(self, mode):
+        create_user("rls_introducer")
+        create_user("u")
+
+        create("map_node", "//tmp/dir")
+        set(
+            "//tmp/dir/@acl",
+            [
+                make_ace("allow", "u", ["write", "remove"]),
+                make_rl_ace("rls_introducer", "col1 = 4"),
+                make_ace("allow", "u", "full_read"),
+            ],
+        )
+        set("//tmp/dir/@inherit_acl", False)
+
+        create(
+            "table",
+            "//tmp/dir/src",
+            attributes={
+                "schema": [
+                    {"name": "col1", "type": "int64"},
+                    {"name": "col2", "type": "string"},
+                ],
+                "optimize_for": "lookup",
+            },
+        )
+        write_table("//tmp/dir/src", self._rows(*range(2, 10)))
+
+        # Existing destination makes Copy run through TTableNodeProxy.
+        create(
+            "table",
+            "//tmp/dir/dst",
+        )
+
+        action = {
+            "move": move,
+            "copy": copy,
+        }[mode]
+
+        action("//tmp/dir/src", "//tmp/dir/dst", force=True, authenticated_user="u")
+
+        assert self._read("u", path="//tmp/dir/dst") == self._rows(*range(2, 10))
 
 
 @authors("danilalexeev")

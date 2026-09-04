@@ -1,6 +1,7 @@
 import yt.logger as logger
 import yt.yson as yson
 from yt.admin._experimental import warn_experimental, EXPERIMENTAL_HELP_SUFFIX
+from yt.admin.helpers import confirm
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,7 +73,7 @@ class RemoteFile:
 
 
 class K8sExecutor:
-    def __init__(self, namespace: str):
+    def __init__(self, namespace: Optional[str] = None):
         try:
             from kubernetes import client, config, stream
         except ImportError as e:
@@ -82,11 +83,23 @@ class K8sExecutor:
                 f"Install it with: {install_hint('kubernetes')}"
             ) from e
 
-        self.namespace = namespace
         try:
             config.load_kube_config()
+            if namespace is None:
+                try:
+                    _, active_context = config.list_kube_config_contexts()
+                    namespace = (active_context or {}).get("context", {}).get("namespace")
+                except config.ConfigException:
+                    pass
         except config.ConfigException:
             config.load_incluster_config()
+            if namespace is None:
+                try:
+                    with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace") as f:
+                        namespace = f.read().strip()
+                except OSError:
+                    pass
+        self.namespace = namespace or "default"
 
         self._v1_api = client.CoreV1Api()
         self._custom_objects_api = client.CustomObjectsApi()
@@ -338,9 +351,8 @@ class LogDownloader:
             logger.info("No logs matched criteria.")
             return
 
-        if not cfg.yes:
-            if input("Download? [y/N]: ").lower() not in ("y", "yes"):
-                return
+        if not confirm("Download?", assume_yes=cfg.yes):
+            return
         self._download_logs(files_map, cfg.output, cfg.exec_slot_index, cfg.grep)
 
     def _log_statistics(self, pod_name: str, pod_log_size: int, filtered_log_files: List[RemoteFile]) -> None:
@@ -466,7 +478,7 @@ else:
 
 def _add_logs_k8s_arguments(parser) -> None:
     current_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    parser.add_argument("-n", "--namespace", type=str, default="default", help="Kubernetes namespace")
+    parser.add_argument("-n", "--namespace", type=str, default=None, help="Kubernetes namespace (default: from kubeconfig or 'default')")
     parser.add_argument("cluster_name", type=str, help="YTsaurus cluster name (see: kubectl get ytsaurus)")
     parser.add_argument("component_name", type=str, choices=COMPONENTS_MAP.keys(), help="Component name")
     parser.add_argument("group_name", nargs="?", default="default", help="Component group name")

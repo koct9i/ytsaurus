@@ -20,6 +20,7 @@ PEERDIR(
     yt/yt/ytlib
     yt/yt/library/clickhouse_discovery
     yt/yt/library/clickhouse_functions
+    yt/yt/library/cypress_election
     yt/yt/library/orchid
     yt/yt/library/monitoring
     yt/yt/library/tracing/jaeger
@@ -56,7 +57,7 @@ SRCS(
     columnar_conversion.cpp
     computed_columns.cpp
     config_repository.cpp
-    cypress_config_repository.cpp
+    cypress_object_repository.cpp
     config.cpp
     conversion.cpp
     custom_data_types.cpp
@@ -77,6 +78,7 @@ SRCS(
     launcher_compatibility.cpp
     logger.cpp
     logging_transform.cpp
+    materialized_view_coordinator.cpp
     memory_watchdog.cpp
     object_lock.cpp
     poco_config.cpp
@@ -103,11 +105,13 @@ SRCS(
     storage_subquery.cpp
     storage_system_clique.cpp
     storage_system_log_table_exporter.cpp
+    storage_yt_materialized_view.cpp
     storages_yt_nodes.cpp
     subquery.cpp
     subquery_spec.cpp
     table.cpp
     table_function_yt_list_log_tables.cpp
+    table_function_yt_list_queue_exports.cpp
     table_function_yt_node_attributes.cpp
     table_function_yt_secondary_query.cpp
     table_function_yt_tables.cpp

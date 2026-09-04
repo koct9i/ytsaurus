@@ -3,8 +3,9 @@
 #include <yt/yt/ytlib/push_based_shuffle_client/session_provider.h>
 #include <yt/yt/ytlib/push_based_shuffle_client/shuffle_writer.h>
 
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_session_pool.h>
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_writer.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_pool.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_writer.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/statistics.h>
 
 #include <yt/yt/ytlib/chunk_client/session_id.h>
 
@@ -27,6 +28,7 @@
 #include <library/cpp/yt/threading/spin_lock.h>
 
 #include <deque>
+#include <functional>
 
 namespace NYT::NPushBasedShuffleClient {
 
@@ -42,7 +44,7 @@ using namespace NTableClient;
 // Test-only factory: takes an injectable callback for constructing
 // IDistributedChunkWriter so tests can substitute a fake. Defined in
 // yt/yt/ytlib/push_based_shuffle_client/shuffle_writer.cpp.
-using TCreateDistributedChunkWriterCallback = TCallback<
+using TCreateDistributedChunkWriterCallback = std::function<
     IDistributedChunkWriterPtr(TNodeDescriptor, TSessionId)>;
 
 IPushBasedShuffleWriterPtr CreatePushBasedShuffleWriterForTesting(
@@ -50,7 +52,7 @@ IPushBasedShuffleWriterPtr CreatePushBasedShuffleWriterForTesting(
     IPartitionWriteSessionProviderPtr sessionProvider,
     IPartitionerPtr partitioner,
     TCreateDistributedChunkWriterCallback createDistributedChunkWriter,
-    i32 mapperId,
+    i32 writerId,
     IInvokerPtr invoker);
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -166,10 +168,13 @@ public:
         : SessionId_(sessionId)
     { }
 
-    TFuture<void> WriteRecord(TSharedRef record) override
+    TFuture<void> WriteRecord(
+        TSharedRef record,
+        TDistributedChunkSessionWriteStatistics statistics) override
     {
         auto guard = Guard(Lock_);
         Records_.push_back(std::move(record));
+        Statistics_.push_back(statistics);
         auto promise = NewPromise<void>();
         Promises_.push_back(promise);
         TryFulfillUnderLock();
@@ -196,6 +201,12 @@ public:
         return Records_;
     }
 
+    std::vector<TDistributedChunkSessionWriteStatistics> GetStatistics() const
+    {
+        auto guard = Guard(Lock_);
+        return Statistics_;
+    }
+
     int GetUnackedCount() const
     {
         auto guard = Guard(Lock_);
@@ -212,6 +223,7 @@ private:
     const TSessionId SessionId_;
     YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
     std::vector<TSharedRef> Records_;
+    std::vector<TDistributedChunkSessionWriteStatistics> Statistics_;
     std::vector<TPromise<void>> Promises_;
     std::deque<TError> Responses_;
 
@@ -243,7 +255,7 @@ public:
     IPushBasedShuffleWriterPtr CreateWriter(
         int partitionCount,
         i64 memoryBudget = 1_MB,
-        i32 mapperId = 17,
+        i32 writerId = 17,
         std::optional<double> buildersBudgetFraction = std::nullopt)
     {
         auto config = New<TShuffleWriterConfig>();
@@ -269,7 +281,7 @@ public:
             Provider_,
             std::move(partitioner),
             std::move(createDistributedChunkWriter),
-            mapperId,
+            writerId,
             ActionQueue_->GetInvoker());
     }
 
@@ -277,6 +289,17 @@ public:
     {
         WaitFor(ActionQueue_->Suspend(/*immediately*/ false))
             .ThrowOnError();
+        ActionQueue_->Resume();
+    }
+
+    void SuspendInvoker()
+    {
+        WaitFor(ActionQueue_->Suspend(/*immediately*/ true))
+            .ThrowOnError();
+    }
+
+    void ResumeInvoker()
+    {
         ActionQueue_->Resume();
     }
 
@@ -326,6 +349,21 @@ TEST(TPushBasedShuffleWriterTest, EmptyCloseSucceedsImmediately)
     EXPECT_TRUE(h.GetChunkWriters().empty());
 }
 
+TEST(TPushBasedShuffleWriterTest, CloseCompletesAfterWriterIsReleased)
+{
+    TWriterHarness h;
+    auto writer = h.CreateWriter(/*partitionCount*/ 1);
+    h.SuspendInvoker();
+
+    auto closeFuture = writer->Close();
+    writer.Reset();
+
+    EXPECT_FALSE(closeFuture.IsSet());
+    h.ResumeInvoker();
+    WaitFor(closeFuture)
+        .ThrowOnError();
+}
+
 TEST(TPushBasedShuffleWriterTest, SingleRowSinglePartitionFlushesOnClose)
 {
     TWriterHarness h;
@@ -350,6 +388,17 @@ TEST(TPushBasedShuffleWriterTest, SingleRowSinglePartitionFlushesOnClose)
 
     EXPECT_EQ(std::ssize(chunkWriter->GetRecords()), 1);
     EXPECT_EQ(chunkWriter->GetUnackedCount(), 1);
+
+    auto records = chunkWriter->GetRecords();
+    auto recordStatistics = chunkWriter->GetStatistics();
+    const auto& record = records[0];
+    const auto& statistics = recordStatistics[0];
+    auto decompressed = DecompressShuffleRecord(record, NCompression::ECodec::None);
+    EXPECT_EQ(statistics.RowCount, 1);
+    EXPECT_EQ(statistics.DataWeight, GetDataWeight(rows[0]));
+    EXPECT_EQ(
+        statistics.UncompressedDataSize,
+        static_cast<i64>(sizeof(TRecordHeader) + GetByteSize(decompressed.UncompressedPayload)));
 
     chunkWriter->Ack();
     h.DrainInvoker();
@@ -482,7 +531,7 @@ TEST(TPushBasedShuffleWriterTest, WriteFutureDeferredWhenInFlightBudgetFull)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 128_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.8);
 
     std::vector<TUnversionedRow> rows;
@@ -562,6 +611,7 @@ TEST(TPushBasedShuffleWriterTest, ResendOnNewSessionAfterWriteRecordFailure)
 
     auto writer2 = h.GetChunkWriters().at(session2.SessionId);
     EXPECT_EQ(std::ssize(writer2->GetRecords()), 1) << "record should be resent on session 2";
+    EXPECT_EQ(writer2->GetStatistics(), writer1->GetStatistics());
 
     writer2->Ack();
     h.DrainInvoker();
@@ -584,7 +634,7 @@ TEST(TPushBasedShuffleWriterTest, SweepInFlightAtSessionResolved)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 200_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.4);
 
     // 5 000 rows at ~17 bytes/row (GetCapacity) ≈ 84 KB > 80 KB builder budget →
@@ -723,7 +773,7 @@ TEST(TPushBasedShuffleWriterTest, MaxSendAttemptsExhaustedWithMultipleRecords)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 200_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.4);
 
     // First batch — triggers eviction, record A goes to Pending.
@@ -812,7 +862,7 @@ TEST(TPushBasedShuffleWriterTest, StaleAckAfterSweepIsNoOp)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 200_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.4);
 
     std::vector<TUnversionedRow> batch0;
@@ -885,7 +935,7 @@ TEST(TPushBasedShuffleWriterTest, ConcurrentFailuresRetireSessionOnce)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 200_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.4);
 
     std::vector<TUnversionedRow> batch0;
@@ -962,7 +1012,7 @@ TEST(TPushBasedShuffleWriterTest, SuccessAckOnDyingSessionNotDuplicated)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 200_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.4);
 
     std::vector<TUnversionedRow> batch0;
@@ -1047,7 +1097,7 @@ TEST(TPushBasedShuffleWriterTest, EvictionUsesBufferedDataNotCapacity)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 256_KB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.0625);
 
     // Grow the high-data partition first (well within the flat-capacity zone),
@@ -1118,7 +1168,7 @@ TEST(TPushBasedShuffleWriterTest, EvictionHeapEvictsHighDataPartitionsAtScale)
     auto writer = h.CreateWriter(
         PartitionCount,
         /*memoryBudget*/ 2_MB,
-        /*mapperId*/ 17,
+        /*writerId*/ 17,
         /*buildersBudgetFraction*/ 0.0967);
 
     // Grow every high-data builder first (distinct in-quantum sizes), then add

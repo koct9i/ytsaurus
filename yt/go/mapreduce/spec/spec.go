@@ -57,6 +57,9 @@ type UserScript struct {
 
 	NetworkProject string `yson:"network_project,omitempty"`
 
+	InterruptionSignal    string `yson:"interruption_signal,omitempty"`
+	SignalRootProcessOnly bool   `yson:"signal_root_process_only,omitempty"`
+
 	EnablePorto            string         `yson:"enable_porto,omitempty"`
 	UsePortoMemoryTracking *bool          `yson:"use_porto_memory_tracking,omitempty"`
 	UseSmapsMemoryTracker  *bool          `yson:"use_smaps_memory_tracker,omitempty"`
@@ -221,6 +224,10 @@ type Spec struct {
 	ClusterName    string `yson:"cluster_name,omitempty"`
 	NetworkName    string `yson:"network_name,omitempty"`
 	CopyAttributes *bool  `yson:"copy_attributes,omitempty"`
+
+	// AllowUnfrozenInputTables enables best-effort remote copy of dynamic input
+	// tables whose tablets are neither frozen nor unmounted.
+	AllowUnfrozenInputTables bool `yson:"allow_unfrozen_input_tables,omitempty"`
 
 	IntermediateDataReplicationFactor int     `yson:"intermediate_data_replication_factor,omitempty"`
 	IntermediateDataAccount           string  `yson:"intermediate_data_account,omitempty"`

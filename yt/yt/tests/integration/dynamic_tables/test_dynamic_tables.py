@@ -754,8 +754,10 @@ class DynamicTablesSingleCellBase(DynamicTablesBase):
         set("//tmp/t2/@profiling_mode", "tag")
         assert get("//tmp/t2/@profiling_mode") == "tag"
 
-    @authors("navasardianna")
+    @authors("ifsmirnov")
     def test_update_content_revision(self):
+        if self.USE_SEQUOIA:
+            pytest.skip("YT-29373: Sequoia content revision should be handled separately")
         set("//sys/@config/tablet_manager/update_table_content_revision_on_heartbeat", True)
 
         sync_create_cells(1)
@@ -768,17 +770,23 @@ class DynamicTablesSingleCellBase(DynamicTablesBase):
         driver = get_driver(1 if self.NUM_SECONDARY_MASTER_CELLS > 0 else 0)
         table_id = get("//tmp/t/@id")
 
+        for i in range(0, 3):
+            # Waiting for all content revision updates to reach the master.
+            time.sleep(2)
+            old_content_revision_native = get(f"#{table_id}/@content_revision")
+            old_content_revision_external = get(f"#{table_id}/@content_revision", driver=driver)
+            insert_rows("//tmp/t", [{"key": i, "value": "0"}])
+            wait(lambda: get(f"#{table_id}/@content_revision") != old_content_revision_native)
+            wait(lambda: get(f"#{table_id}/@content_revision", driver=driver) != old_content_revision_external)
+
         # Waiting for all content revision updates to reach the master.
         time.sleep(2)
 
-        for i in range(0, 3):
-            old_content_revision = get(f"#{table_id}/@content_revision", driver=driver)
-            insert_rows("//tmp/t", [{"key": i, "value": "0"}])
-            wait(lambda: get(f"#{table_id}/@content_revision", driver=driver) != old_content_revision)
-
-        content_revision = get(f"#{table_id}/@content_revision", driver=driver)
+        content_revision_native = get(f"#{table_id}/@content_revision")
+        content_revision_external = get(f"#{table_id}/@content_revision", driver=driver)
         time.sleep(3)
-        assert get(f"#{table_id}/@content_revision", driver=driver) == content_revision
+        assert get(f"#{table_id}/@content_revision") == content_revision_native
+        assert get(f"#{table_id}/@content_revision", driver=driver) == content_revision_external
 
     @authors("akozhikhov")
     def test_inherited_profiling_mode_without_tag(self):
@@ -4299,6 +4307,58 @@ class TestDynamicTablesSequoia(TestDynamicTablesShardedTx):
     }
 
 
+class TestDynamicTablesSequoiaAndMasterJournalReplicas(TestDynamicTablesMulticell):
+    ENABLE_MULTIDAEMON = False  # There are component restarts.
+    USE_SEQUOIA = True
+
+    DELTA_DYNAMIC_MASTER_CONFIG = {
+        "chunk_manager": {
+            "replica_approve_timeout": 5000,
+            "sequoia_chunk_replicas": {
+                "enable": True,
+                "enable_sequoia_chunk_refresh": True,
+                "schedule_chunk_seal_in_sequoia_refresh": True,
+                "sequoia_chunk_refresh_period": 100,
+                "batch_chunk_confirmation": True,
+                "journal_chunk_replicas": {
+                    "store_in_sequoia": True,
+                    "replicas_percentage": 100,
+                    "fetch_replicas_from_sequoia": True,
+                    "store_sequoia_replicas_on_master": True,
+                    "store_sequoia_replicas_on_master_percentage": 100,
+                    "validate_sequoia_replicas_fetch": True,
+                    "allow_extra_master_replicas_during_validation": False,
+                },
+            },
+        },
+    }
+
+
+class TestDynamicTablesOnlySequoiaJournalReplicas(TestDynamicTablesSequoiaAndMasterJournalReplicas):
+    ENABLE_MULTIDAEMON = False  # There are component restarts.
+
+    DELTA_DYNAMIC_MASTER_CONFIG = {
+        "chunk_manager": {
+            "replica_approve_timeout": 5000,
+            "sequoia_chunk_replicas": {
+                "enable": True,
+                "enable_sequoia_chunk_refresh": True,
+                "schedule_chunk_seal_in_sequoia_refresh": True,
+                "sequoia_chunk_refresh_period": 100,
+                "batch_chunk_confirmation": True,
+                "journal_chunk_replicas": {
+                    "store_in_sequoia": True,
+                    "replicas_percentage": 100,
+                    "fetch_replicas_from_sequoia": True,
+                    "store_sequoia_replicas_on_master": False,
+                    "process_removed_sequoia_replicas_on_master": False,
+                    "validate_sequoia_replicas_fetch": False,
+                },
+            },
+        },
+    }
+
+
 ##################################################################
 
 
@@ -4439,11 +4499,17 @@ class TestTabletOrchid(DynamicTablesBase):
         actual = lookup_rows("//tmp/t", [{"key": i} for i in range(100, 200, 2)], use_lookup_cache=True)
         assert_items_equal(actual, expected)
 
-        def check_zero_passive():
+        # NB: @chunk_ids appears at the master before the node adds the chunk store and its backing
+        # store; passive memory is already zero in that window, so it alone is not a valid barrier.
+        def check_flush_applied_at_node():
             memory_stats = get_stats()
-            return memory_stats["total"]["tablet_dynamic"]["passive"] == 0
+            total = memory_stats["total"]
+            return (
+                total["tablet_dynamic"]["passive"] == 0 and
+                total["tablet_dynamic"]["backing"] > 0 and
+                total["tablet_static"]["usage"] > 0)
 
-        wait(check_zero_passive)
+        wait(check_flush_applied_at_node)
 
         memory_stats = get_stats()
         total = memory_stats["total"]

@@ -279,10 +279,10 @@ TPickReplicaSession::TResult TPickReplicaSession::Execute(
             TReplicaSynchronicityList replicas;
             std::tie(cluster, replicas) = PickClusterAndReplicas(PickViableClusters(config));
 
-            YT_LOG_DEBUG("Fallback to replicas (Cluster: %v, Replicas: %v, Attempt: %v)",
-                cluster,
-                replicas,
-                retryCount);
+            YT_TLOG_DEBUG("Fallback to replicas")
+                .With("Cluster", cluster)
+                .With("Replicas", replicas)
+                .With("Attempt", retryCount);
 
             PatchQuery(AstQuery_, replicas);
 
@@ -291,10 +291,12 @@ TPickReplicaSession::TResult TPickReplicaSession::Execute(
             return callback(cluster, queryString, BaseOptions_);
         } catch (const TErrorException& ex) {
 
-            YT_LOG_DEBUG(ex, "Fallback to replicas failed (Attempt: %v)", retryCount);
+            YT_TLOG_DEBUG("Fallback to replicas failed")
+                .With("Attempt", retryCount)
+                .With(ex);
 
             error = ex.Error();
-            error <<= TErrorAttribute("replica_cluster", cluster);
+            error.Add("replica_cluster", cluster);
             if (auto banDirective = TReplicaBanDirective::FromError(error);
                 banDirective.Mode == EBanMode::Replica &&
                 banDirective.ReplicaId)
@@ -393,7 +395,7 @@ TClusterScoreMap TPickReplicaSession::PickViableClusters(
                 NTabletClient::EErrorCode::NoInSyncReplicas,
                 "No cluster contains in-sync replicas for table %v",
                 TableInfos_[index]->Path)
-                << TErrorAttribute("banned_replicas", bannedReplicaIds);
+                .With("banned_replicas", bannedReplicaIds);
 
             *error.MutableInnerErrors() = std::move(replicaErrors);
 
@@ -413,7 +415,7 @@ TClusterScoreMap TPickReplicaSession::PickViableClusters(
             MakeFormattableView(TableInfos_, [] (TStringBuilderBase* builder, const TTableMountInfoPtr& tableInfo) {
                 builder->AppendString(tableInfo->Path);
             }))
-            << TErrorAttribute("banned_replicas", flatBannedReplicaIds);
+            .With("banned_replicas", flatBannedReplicaIds);
 
         *error.MutableInnerErrors() = std::move(flatReplicaErrors);
 
@@ -433,7 +435,8 @@ TClusterScoreMap TPickReplicaSession::PickViableClusters(
         }
     }
 
-    YT_LOG_DEBUG("Picked viable clusters (Clusters: %v)", viableClusters);
+    YT_TLOG_DEBUG("Picked viable clusters")
+        .With("Clusters", viableClusters);
 
     return viableClusters;
 }
@@ -457,7 +460,7 @@ std::pair<std::string, TReplicaSynchronicityList> TPickReplicaSession::PickClust
             }
 
             for (const auto& [cluster, bestScore] : tableScores) {
-                GetOrCrash(viableClusters, cluster) += bestScore;
+                GetOrCrash(viableClusters, cluster).Underlying() += bestScore.Underlying();
             }
         }
     }
@@ -567,15 +570,15 @@ IPickReplicaSessionPtr CreatePickReplicaSession(
     auto replicas = WaitFor(AllSucceeded(std::move(futureReplicas)))
         .ValueOrThrow();
 
-    YT_LOG_DEBUG("Picking replicas (TablePaths: %v, RequireSyncReplicas: %v, ReplicaSynchronicities: %v, Timestamp: %v)",
-        MakeFormattableView(tableInfos, [] (TStringBuilderBase* builder, const TTableMountInfoPtr& tableInfo) {
+    YT_TLOG_DEBUG("Picking replicas")
+        .With("TablePaths", MakeFormattableView(tableInfos, [] (TStringBuilderBase* builder, const TTableMountInfoPtr& tableInfo) {
             builder->AppendString(tableInfo->Path);
-        }),
-        MakeFormattableView(tableHints, [] (TStringBuilderBase* builder, const NAst::TTableHintPtr& tableHint) {
+        }))
+        .With("RequireSyncReplicas", MakeFormattableView(tableHints, [] (TStringBuilderBase* builder, const NAst::TTableHintPtr& tableHint) {
             builder->AppendFormat("%v", tableHint->RequireSyncReplica);
-        }),
-        replicas,
-        timestamp);
+        }))
+        .With("ReplicaSynchronicities", replicas)
+        .With("Timestamp", timestamp);
 
     return New<TPickReplicaSession>(
         std::move(replicas),

@@ -51,6 +51,15 @@ DEFINE_ENUM(EGpuCheckType,
 
 ////////////////////////////////////////////////////////////////////////////////
 
+//! Tmpfs volume as requested by the job spec.
+struct TTmpfsVolumeSpec
+{
+    i64 Size = 0;
+    std::string Path;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TJob
     : public TRefCounted
 {
@@ -163,7 +172,7 @@ public:
 
     void SetCoreInfos(NControllerAgent::TCoreInfos value);
 
-    const NJobAgent::TArtifactCacheStatistics& GetArtifactCacheStatistics() const;
+    const NJobAgent::TArtifactStatistics& GetArtifactStatistics() const;
 
     NYson::TYsonString GetStatistics() const;
     NChunkClient::NProto::TDataStatistics GetTotalInputDataStatistics() const;
@@ -268,7 +277,7 @@ public:
     i64 GetJobProxyHeartbeatEpoch() const;
     bool UpdateJobProxyHearbeatEpoch(i64 epoch);
 
-    const std::vector<NScheduler::TTmpfsVolumeConfigPtr>& GetTmpfsVolumeInfos() const noexcept;
+    const std::vector<TTmpfsVolumeSpec>& GetTmpfsVolumeSpecs() const noexcept;
 
     bool HasUserJobSpec() const noexcept;
 
@@ -313,7 +322,7 @@ private:
 
     const bool HasUserJobSpec_;
 
-    const std::vector<NScheduler::TTmpfsVolumeConfigPtr> TmpfsVolumeInfos_;
+    const std::vector<TTmpfsVolumeSpec> TmpfsVolumeSpecs_;
 
     THashSet<std::string> RequestedMonitoringSensors_;
 
@@ -427,7 +436,7 @@ private:
     TNetworkAttributes NetworkAttributes_;
 
     // Artifact statistics.
-    NJobAgent::TArtifactCacheStatistics ArtifactCacheStatistics_;
+    NJobAgent::TArtifactStatistics ArtifactStatistics_;
 
     std::vector<TFuture<void>> ArtifactPrepareFutures_;
 
@@ -450,6 +459,11 @@ private:
     const IJobInputCachePtr JobInputCache_;
 
     TJobFSSecretaryPtr FSSecretary_;
+
+    //! Interrupts this job on an NBD device error. Subscribed to each of the job's
+    //! NBD devices once its artifacts are prepared; the same instance is used to
+    //! unsubscribe on cleanup.
+    TCallback<void(const TError&)> NbdErrorInterrupter_;
 
     bool HasJobTrace_ = false;
     bool HasGpuCheckStderr_ = false;
@@ -546,6 +560,7 @@ private:
     // Finalization.
     void Cleanup();
 
+    void SubscribeJobToNbdDevices();
     void UnsubscribeJobFromNbdDevices();
 
     // Preparation.
@@ -558,7 +573,7 @@ private:
 
     TNetworkAttributes BuildNetworkAttributes(NControllerAgent::TNetworkProject networkProject) const;
 
-    TArtifactDownloadOptions MakeArtifactDownloadOptions() const;
+    TArtifactDownloadOptions MakeArtifactDownloadOptions();
 
     // Start async artifacts download.
     TFuture<std::vector<TArtifactPtr>> DownloadArtifacts();
@@ -583,7 +598,10 @@ private:
 
     void UpdateIOStatistics(const TStatistics& statistics);
 
-    void UpdateArtifactStatistics(i64 compressedDataSize, bool cacheHit);
+    void UpdateArtifactStatistics(
+        i64 compressedDataSize,
+        bool cacheHit,
+        bool isLayer);
 
     std::vector<TShellCommandConfigPtr> GetSetupCommands();
 
@@ -631,7 +649,7 @@ private:
 
     void DeduceAndSetFinishedJobState();
 
-    static std::vector<NScheduler::TTmpfsVolumeConfigPtr> ParseTmpfsVolumeInfos(
+    static std::vector<TTmpfsVolumeSpec> ParseTmpfsVolumeSpecs(
         const NControllerAgent::NProto::TUserJobSpec* maybeUserJobSpec);
 };
 

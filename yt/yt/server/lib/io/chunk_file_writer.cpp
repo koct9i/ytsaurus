@@ -1,6 +1,7 @@
 #include "chunk_file_writer.h"
 #include "io_engine.h"
 #include "private.h"
+#include "helpers.h"
 
 #include <yt/yt/ytlib/chunk_client/chunk_meta_extensions.h>
 #include <yt/yt/ytlib/chunk_client/deferred_chunk_meta.h>
@@ -36,21 +37,27 @@ constinit const auto Logger = IOLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TSerializedBlocksRequest SerializeBlocks(i64 startOffset, const std::vector<TBlock>& blocks, NChunkClient::NProto::TBlocksExt& blocksExt)
+TSerializedBlocksRequest SerializeBlocks(
+    i64 startOffset,
+    const std::vector<TBlock>& blocks,
+    NChunkClient::NProto::TBlocksExt& blocksExt,
+    const TSharedRef& tailBuffer)
 {
     TSerializedBlocksRequest request;
 
     request.StartOffset = startOffset;
     request.EndOffset = request.StartOffset;
 
-    request.Buffers.reserve(blocks.size());
+    const bool hasTailBuffer = !tailBuffer.empty();
+    request.Buffers.reserve(blocks.size() + hasTailBuffer);
+    if (hasTailBuffer) {
+        request.Buffers.push_back(tailBuffer);
+    }
 
     for (const auto& block : blocks) {
         auto error = block.CheckChecksum();
-        YT_LOG_FATAL_UNLESS(
-            error.IsOK(),
-            error,
-            "Block checksum mismatch during file writing");
+        YT_TLOG_FATAL_UNLESS(error.IsOK(), "Block checksum mismatch during file writing")
+            .With(error);
 
         auto* blockInfo = blocksExt.add_blocks();
         blockInfo->set_offset(request.EndOffset);
@@ -60,6 +67,8 @@ TSerializedBlocksRequest SerializeBlocks(i64 startOffset, const std::vector<TBlo
         request.EndOffset += block.Size();
         request.Buffers.push_back(block.Data);
     }
+
+    request.StartOffset -= std::ssize(tailBuffer);
 
     return request;
 }
@@ -98,6 +107,33 @@ TSharedMutableRef SerializeChunkMeta(TChunkId chunkId, const TRefCountedChunkMet
     return buffer;
 }
 
+namespace {
+
+TSharedRef CopySuffix(const std::vector<TSharedRef>& buffers, i64 size)
+{
+    if (size == 0) {
+        return {};
+    }
+
+    struct TDirectIOTailBufferTag
+    { };
+
+    YT_VERIFY(static_cast<i64>(GetByteSize(buffers)) >= size);
+    auto result = TSharedMutableRef::Allocate<TDirectIOTailBufferTag>(size, {.InitializeStorage = false});
+    auto* current = result.End();
+
+    for (auto it = buffers.rbegin(); it != buffers.rend() && current != result.Begin(); ++it) {
+        auto sizeToCopy = std::min<i64>(it->Size(), current - result.Begin());
+        current -= sizeToCopy;
+        std::copy(it->End() - sizeToCopy, it->End(), current);
+    }
+
+    YT_VERIFY(current == result.Begin());
+    return result;
+}
+
+} // namespace
+
 //////////////////////////////////////////////////////////////////////////////
 
 TChunkFileWriter::TChunkFileWriter(
@@ -111,6 +147,7 @@ TChunkFileWriter::TChunkFileWriter(
     , FileName_(std::move(fileName))
     , SyncOnClose_(syncOnClose)
     , UseDirectIO_(useDirectIO)
+    , DirectIOBlockSize_(IOEngine_->GetBlockSize())
 {
     BlocksExt_.set_sync_on_close(SyncOnClose_);
 }
@@ -118,10 +155,15 @@ TChunkFileWriter::TChunkFileWriter(
 TFlags<EOpenModeFlag> TChunkFileWriter::GetFileMode() const
 {
     auto flags = FileMode;
-    if (UseDirectIO_) {
+    if (ShouldUseDirectIOForWrites()) {
         flags |= DirectAligned;
     }
     return flags;
+}
+
+bool TChunkFileWriter::ShouldUseDirectIOForWrites() const
+{
+    return ShouldUseDirectIO(IOEngine_->UseDirectIOForWrites(), UseDirectIO_);
 }
 
 void TChunkFileWriter::TryLockDataFile(TPromise<void> promise)
@@ -138,8 +180,8 @@ void TChunkFileWriter::TryLockDataFile(TPromise<void> promise)
         return;
     }
 
-    YT_LOG_WARNING("Error locking chunk data file, retrying (Path: %v)",
-        FileName_);
+    YT_TLOG_WARNING("Error locking chunk data file, retrying")
+        .With("Path", FileName_);
 
     TDelayedExecutor::Submit(
         BIND(&TChunkFileWriter::TryLockDataFile, MakeStrong(this), promise),
@@ -202,7 +244,7 @@ TFuture<void> TChunkFileWriter::Open()
                 SetFailed(error);
                 THROW_ERROR_EXCEPTION("Failed to open chunk data file %v",
                     FileName_)
-                    << error;
+                    .With(error);
             }
 
             State_.store(EState::Ready);
@@ -233,9 +275,10 @@ bool TChunkFileWriter::WriteBlock(
     const IChunkWriter::TWriteBlocksOptions& options,
     const TWorkloadDescriptor& workloadDescriptor,
     const TBlock& block,
-    TFairShareSlotId fairShareSlotId)
+    TFairShareSlotId fairShareSlotId,
+    std::optional<TIOFairShareState> fairShareState)
 {
-    return WriteBlocks(options, workloadDescriptor, {block}, fairShareSlotId);
+    return WriteBlocks(options, workloadDescriptor, {block}, fairShareSlotId, fairShareState);
 }
 
 bool TChunkFileWriter::WriteBlocks(
@@ -250,14 +293,22 @@ bool TChunkFileWriter::WriteBlocks(
     const IChunkWriter::TWriteBlocksOptions& options,
     const TWorkloadDescriptor& workloadDescriptor,
     const std::vector<TBlock>& blocks,
-    TFairShareSlotId fairShareSlotId)
+    TFairShareSlotId fairShareSlotId,
+    std::optional<TIOFairShareState> fairShareState)
 {
     if (auto error = TryChangeState(EState::Ready, EState::WritingBlocks); !error.IsOK()) {
         ReadyEvent_ = MakeFuture<void>(std::move(error));
         return false;
     }
 
-    auto writeRequest = SerializeBlocks(DataSize_, blocks, BlocksExt_);
+    const bool useDirectIO = DataFile_->IsOpenForDirectIO();
+    auto writeRequest = SerializeBlocks(DataSize_, blocks, BlocksExt_, TailBuffer_);
+    YT_VERIFY(!useDirectIO || writeRequest.StartOffset % DirectIOBlockSize_ == 0);
+
+    const auto ioWriteSize = writeRequest.EndOffset - writeRequest.StartOffset;
+    auto newTailBuffer = useDirectIO
+        ? CopySuffix(writeRequest.Buffers, writeRequest.EndOffset % DirectIOBlockSize_)
+        : TSharedRef{};
 
     ReadyEvent_ =
         IOEngine_->Write({
@@ -266,26 +317,33 @@ bool TChunkFileWriter::WriteBlocks(
             std::move(writeRequest.Buffers),
             SyncOnClose_,
             fairShareSlotId,
+            fairShareState,
         },
         workloadDescriptor.Category)
         .Apply(BIND([
             this,
             this_ = MakeStrong(this),
             newDataSize = writeRequest.EndOffset,
+            useDirectIO,
+            ioWriteSize,
+            newTailBuffer = std::move(newTailBuffer),
             blockCount = blocks.size(),
             chunkWriterStatistics = options.ClientOptions.ChunkWriterStatistics
-        ] (const TErrorOr<TWriteResponse>& rspOrError) {
+        ] (const TErrorOr<TWriteResponse>& rspOrError) mutable {
             YT_VERIFY(State_.load() == EState::WritingBlocks);
 
             if (!rspOrError.IsOK()) {
                 SetFailed(rspOrError);
                 THROW_ERROR_EXCEPTION("Failed to write chunk data file %v",
                     FileName_)
-                    << rspOrError;
+                    .With(rspOrError);
             }
 
             const auto& rsp = rspOrError.Value();
-            YT_VERIFY(newDataSize - DataSize_ == rsp.WrittenBytes);
+            const auto expectedWrittenBytes = useDirectIO
+                ? AlignUp(ioWriteSize, DirectIOBlockSize_)
+                : ioWriteSize;
+            YT_VERIFY(rsp.WrittenBytes == expectedWrittenBytes);
 
             chunkWriterStatistics->DataBytesWrittenToDisk.fetch_add(rsp.WrittenBytes, std::memory_order::relaxed);
             chunkWriterStatistics->DataBlocksWrittenToDisk.fetch_add(blockCount, std::memory_order::relaxed);
@@ -293,6 +351,7 @@ bool TChunkFileWriter::WriteBlocks(
             chunkWriterStatistics->DataIOSyncRequests.fetch_add(rsp.IOSyncRequests, std::memory_order::relaxed);
 
             DataSize_ = newDataSize;
+            TailBuffer_ = std::move(newTailBuffer);
             State_.store(EState::Ready);
         }).AsyncVia(IOEngine_->GetAuxPoolInvoker()));
 
@@ -318,7 +377,8 @@ TFuture<void> TChunkFileWriter::Close(
     const IChunkWriter::TWriteBlocksOptions& options,
     const TWorkloadDescriptor& workloadDescriptor,
     const TDeferredChunkMetaPtr& chunkMeta,
-    TFairShareSlotId fairShareSlotId)
+    TFairShareSlotId fairShareSlotId,
+    std::optional<TIOFairShareState> fairShareState)
 {
     if (auto error = TryChangeState(EState::Ready, EState::Closing); !error.IsOK()) {
         return MakeFuture<void>(std::move(error));
@@ -346,12 +406,14 @@ TFuture<void> TChunkFileWriter::Close(
             this_ = MakeStrong(this),
             workloadDescriptor,
             fairShareSlotId = fairShareSlotId,
+            fairShareState = fairShareState,
             chunkWriterStatistics = options.ClientOptions.ChunkWriterStatistics
         ] (const TIOEngineHandlePtr& chunkMetaFile) {
             YT_VERIFY(State_.load() == EState::Closing);
 
             auto buffer = SerializeChunkMeta(ChunkId_, ChunkMeta_);
             MetaDataSize_ = buffer.size();
+            const bool useDirectIO = chunkMetaFile->IsOpenForDirectIO();
 
             return
                 IOEngine_->Write({
@@ -360,14 +422,19 @@ TFuture<void> TChunkFileWriter::Close(
                     {std::move(buffer)},
                     SyncOnClose_,
                     fairShareSlotId,
+                    fairShareState,
                 },
                 workloadDescriptor.Category)
                 .Apply(BIND([
                     this,
                     this_ = MakeStrong(this),
+                    useDirectIO,
                     chunkWriterStatistics
                 ] (const TWriteResponse& rsp) {
-                    YT_VERIFY(MetaDataSize_ == rsp.WrittenBytes);
+                    auto expectedWrittenBytes = useDirectIO
+                        ? AlignUp(MetaDataSize_, DirectIOBlockSize_)
+                        : MetaDataSize_;
+                    YT_VERIFY(rsp.WrittenBytes == expectedWrittenBytes);
 
                     chunkWriterStatistics->MetaBytesWrittenToDisk.fetch_add(rsp.WrittenBytes, std::memory_order::relaxed);
                     chunkWriterStatistics->MetaIOWriteRequests.fetch_add(rsp.IOWriteRequests, std::memory_order::relaxed);
@@ -417,7 +484,7 @@ TFuture<void> TChunkFileWriter::Close(
                 SetFailed(error);
                 THROW_ERROR_EXCEPTION("Failed to close chunk data file %v",
                     FileName_)
-                    << error;
+                    .With(error);
             }
 
             ChunkInfo_.set_disk_space(DataSize_ + MetaDataSize_);

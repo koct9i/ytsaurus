@@ -20,6 +20,7 @@
 #include <yt/yt/core/concurrency/scheduler_api.h>
 #include <yt/yt/core/concurrency/thread_pool.h>
 
+#include <yt/yt/core/ytree/composite_map.h>
 #include <yt/yt/core/ytree/service_combiner.h>
 #include <yt/yt/core/ytree/virtual.h>
 
@@ -46,10 +47,10 @@ using NYT::ToProto;
 
 namespace {
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "JobTracker");
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, JobTrackerProfiler, ControllerAgentProfiler().WithPrefix("/job_tracker"));
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, NodeHeartbeatProfiler, JobTrackerProfiler().WithPrefix("/node_heartbeat"));
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, SettleJobRequestProfiler, JobTrackerProfiler().WithPrefix("/settle_job"));
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "JobTracker");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, JobTrackerProfiler, ControllerAgentProfiler().WithPrefix("/job_tracker"));
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, NodeHeartbeatProfiler, JobTrackerProfiler().WithPrefix("/node_heartbeat"));
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, SettleJobRequestProfiler, JobTrackerProfiler().WithPrefix("/settle_job"));
 
 EJobStage JobStageFromJobState(EJobState jobState) noexcept
 {
@@ -728,7 +729,7 @@ TJobTracker::TInBarrier::TInBarrier(const TOutBarrier& outBarrier)
     , OutBarrierCreationTime_(outBarrier.CreatedAt_)
 { }
 
-template <CInvocable<void(const TError&)> TCallback>
+template <NMpl::CInvocable<void(const TError&)> TCallback>
 void TJobTracker::TInBarrier::Wait(TCallback&& onCanceled) const
 {
     if (Future_.IsSet()) {
@@ -743,7 +744,8 @@ void TJobTracker::TInBarrier::Wait(TCallback&& onCanceled) const
         if (error.GetCode() == NYT::EErrorCode::Canceled) {
             std::forward<TCallback>(onCanceled)(error);
         } else {
-            YT_LOG_ALERT(error, "Unexpected exception while waiting for in barrier");
+            YT_TLOG_ALERT("Unexpected exception while waiting for in barrier")
+                .With(error);
         }
     });
     Future_.Subscribe(std::move(callback));
@@ -905,10 +907,8 @@ template <class TEvent>
 TEvent& TJobTracker::TAllocationInfo::GetEventOrCrash(TNonNullPtr<TSchedulerToAgentAllocationEvent> event)
 {
     auto* typedEvent = std::get_if<TEvent>(&event->EventSummary);
-    YT_LOG_FATAL_UNLESS(
-        typedEvent,
-        "Unexpected allocation event type (Event: %v)",
-        *event);
+    YT_TLOG_FATAL_UNLESS(typedEvent, "Unexpected allocation event type")
+        .With("Event", *event);
     return *typedEvent;
 }
 
@@ -935,14 +935,12 @@ void TJobTracker::TAllocationInfo::FinishAndClearJobs() noexcept
 
 void TJobTracker::TAllocationInfo::Finish(TSchedulerToAgentAllocationEvent&& event)
 {
-    YT_LOG_FATAL_IF(
-        Finished_ || PostponedAllocationEvent_,
-        "Event happened to already finished allocation (AllocationId: %v, Finished: %v, CurrentPostponedEvent: %v, NodeId: %v, NewEvent: %v)",
-        AllocationId,
-        Finished_,
-        PostponedAllocationEvent_,
-        NodeIdFromAllocationId(AllocationId),
-        event);
+    YT_TLOG_FATAL_IF(Finished_ || PostponedAllocationEvent_, "Event happened to already finished allocation")
+        .With("AllocationId", AllocationId)
+        .With("Finished", Finished_)
+        .With("CurrentPostponedEvent", PostponedAllocationEvent_)
+        .With("NodeId", NodeIdFromAllocationId(AllocationId))
+        .With("NewEvent", event);
 
     Finished_ = true;
     PostponedAllocationEvent_ = std::move(event);
@@ -1075,10 +1073,10 @@ void TJobTracker::ProcessHeartbeat(const TJobTracker::TCtxHeartbeatPtr& context)
             (*clusterToNetworkBandwidthAvailability)[TClusterName(clusterName)] = availability.is_available();
         }
 
-        YT_LOG_DEBUG("Received cluster network bandwidth availability from leader (NetworkAvailability: %v, NodeId: %v, NodeAddress: %v)",
-            *clusterToNetworkBandwidthAvailability,
-            nodeId,
-            nodeDescriptor.GetDefaultAddress());
+        YT_TLOG_DEBUG("Received cluster network bandwidth availability from leader")
+            .With("NetworkAvailability", *clusterToNetworkBandwidthAvailability)
+            .With("NodeId", nodeId)
+            .With("NodeAddress", nodeDescriptor.GetDefaultAddress());
     }
 
     ProfileHeartbeatRequest(request);
@@ -1123,10 +1121,9 @@ void TJobTracker::ProcessHeartbeat(const TJobTracker::TCtxHeartbeatPtr& context)
 
     THeartbeatProcessingContext heartbeatProcessingContext{
         .RpcContext = context,
-        .Logger = NControllerAgent::Logger().WithTag(
-            "NodeId: %v, NodeAddress: %v",
-            nodeId,
-            nodeDescriptor.GetDefaultAddress()),
+        .Logger = NControllerAgent::Logger()
+            .WithTag("NodeId", nodeId)
+            .WithTag("NodeAddress", nodeDescriptor.GetDefaultAddress()),
         .NodeAddress = nodeDescriptor.GetDefaultAddress(),
         .NodeId = nodeId,
         .IncarnationId = incarnationId,
@@ -1186,13 +1183,12 @@ void TJobTracker::SettleJob(const TJobTracker::TCtxSettleJobPtr& context)
         NControllerAgent::EErrorCode::AgentDisconnected,
         "Controller agent disconnected");
 
-    auto Logger = NControllerAgent::Logger().WithTag(
-        "NodeId: %v, NodeAddress: %v, OperationId: %v, AllocationId: %v, LastJobId: %v",
-        nodeId,
-        nodeDescriptor.GetDefaultAddress(),
-        operationId,
-        allocationId,
-        lastJobId);
+    auto Logger = NControllerAgent::Logger()
+        .WithTag("NodeId", nodeId)
+        .WithTag("NodeAddress", nodeDescriptor.GetDefaultAddress())
+        .WithTag("OperationId", operationId)
+        .WithTag("AllocationId", allocationId)
+        .WithTag("LastJobId", lastJobId);
 
     TErrorOr<TJobStartInfo> jobInfoOrError;
 
@@ -1274,21 +1270,21 @@ void TJobTracker::SettleJob(const TJobTracker::TCtxSettleJobPtr& context)
 
         auto* nodeInfo = FindNodeInfo(nodeId);
         if (!nodeInfo) {
-            YT_LOG_INFO("Node is not registered in job tracker; skip settle job request");
+            YT_TLOG_INFO("Node is not registered in job tracker; skip settle job request");
 
             THROW_ERROR_EXCEPTION("Node is not registered in job tracker")
-                << TErrorAttribute("incarnation_id", IncarnationId_);
+                .With("incarnation_id", IncarnationId_);
         }
 
         auto* allocationInfo = nodeInfo->Jobs.FindAllocation(allocationId);
         if (!allocationInfo) {
-            YT_LOG_INFO("Allocation is unknown; skip settle job request");
+            YT_TLOG_INFO("Allocation is unknown; skip settle job request");
 
             THROW_ERROR_EXCEPTION("No such allocation %v", allocationId);
         }
 
         if (allocationInfo->IsFinished()) {
-            YT_LOG_INFO("Allocation is already finished; skip settle job request");
+            YT_TLOG_INFO("Allocation is already finished; skip settle job request");
 
             THROW_ERROR_EXCEPTION("Allocation %v is already finished", allocationId);
         }
@@ -1297,7 +1293,7 @@ void TJobTracker::SettleJob(const TJobTracker::TCtxSettleJobPtr& context)
 
         auto operationIt = RegisteredOperations_.find(operationId);
         if (operationIt == std::end(RegisteredOperations_)) {
-            YT_LOG_INFO("Operation is not registered in job tracker; skip settle job request");
+            YT_TLOG_INFO("Operation is not registered in job tracker; skip settle job request");
 
             THROW_ERROR_EXCEPTION("No such operation %v", operationId);
         }
@@ -1306,19 +1302,19 @@ void TJobTracker::SettleJob(const TJobTracker::TCtxSettleJobPtr& context)
 
         auto operationController = operationInfo.OperationController.Lock();
         if (!operationController) {
-            YT_LOG_INFO("Operation controller is already reset, skip settle job request");
+            YT_TLOG_INFO("Operation controller is already reset, skip settle job request");
 
             THROW_ERROR_EXCEPTION("Operation %v controller is already reset", operationId);
         }
 
         if (!operationInfo.JobsReady) {
-            YT_LOG_INFO("Operation jobs are not ready yet, skip settle job request");
+            YT_TLOG_INFO("Operation jobs are not ready yet, skip settle job request");
 
             THROW_ERROR_EXCEPTION("Operation %v jobs are not ready yet", operationId);
         }
 
         if (operationInfo.Suspended) {
-            YT_LOG_INFO("Operation is suspended, skip SettleJob request");
+            YT_TLOG_INFO("Operation is suspended, skip SettleJob request");
 
             THROW_ERROR_EXCEPTION("Operation %v is suspended", operationId);
         }
@@ -1344,23 +1340,23 @@ void TJobTracker::SettleJob(const TJobTracker::TCtxSettleJobPtr& context)
         // NB(pogorelov): Node may be unregistered concurrently.
         nodeInfo = FindNodeInfo(nodeId);
         if (!nodeInfo) {
-            YT_LOG_INFO("Node has been unregistered from job tracker during settle job request processing");
+            YT_TLOG_INFO("Node has been unregistered from job tracker during settle job request processing");
 
             THROW_ERROR_EXCEPTION("Node has been unregistered from job tracker during settle job request processing")
-                << TErrorAttribute("incarnation_id", IncarnationId_);
+                .With("incarnation_id", IncarnationId_);
         }
 
         // NB(pogorelov): Allocation may finish concurrently.
         allocationInfo = nodeInfo->Jobs.FindAllocation(allocationId);
         if (!allocationInfo) {
             // Means that allocation has finished concurrently. Such a job will be aborted in controller.
-            YT_LOG_INFO("Allocation is unknown at the end of request processing; skip settle job request");
+            YT_TLOG_INFO("Allocation is unknown at the end of request processing; skip settle job request");
 
             THROW_ERROR_EXCEPTION("No such allocation %v", allocationId);
         }
 
         if (allocationInfo->IsFinished()) {
-            YT_LOG_INFO("Allocation is already finished; skip settle job request");
+            YT_TLOG_INFO("Allocation is already finished; skip settle job request");
 
             THROW_ERROR_EXCEPTION("Allocation %v is already finished", allocationId);
         }
@@ -1372,9 +1368,8 @@ void TJobTracker::SettleJob(const TJobTracker::TCtxSettleJobPtr& context)
         auto error = !jobInfoOrError.IsOK()
             ? static_cast<TError>(jobInfoOrError)
             : TError("Controller returned empty job spec (has controller crashed?)");
-        YT_LOG_INFO(
-            error,
-            "Failed to extract job spec");
+        YT_TLOG_INFO("Failed to extract job spec")
+            .With(error);
 
         ToProto(response->mutable_error(), error);
 
@@ -1558,7 +1553,7 @@ NYTree::IYPathServicePtr TJobTracker::CreateOrchidService() const
 {
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
-    auto service = New<TCompositeMapService>();
+    auto service = CreateCompositeMapService();
 
     service->AddChild("nodes", New<TJobTrackerNodeOrchidService>(this));
 
@@ -1684,10 +1679,9 @@ void TJobTracker::DoProcessUnconfirmedJobsInHeartbeat(
 
             const auto& Logger = context.OperationLogger;
 
-            YT_LOG_INFO(
-                "Job unconfirmed; aborting it (JobId: %v, AllocationId: %v)",
-                jobId,
-                allocation.AllocationId);
+            YT_TLOG_INFO("Job unconfirmed; aborting it")
+                .With("JobId", jobId)
+                .With("AllocationId", allocation.AllocationId);
 
             if (context.OperationController) {
                 context.JobsToAbort.push_back(TJobToAbort{
@@ -1701,10 +1695,9 @@ void TJobTracker::DoProcessUnconfirmedJobsInHeartbeat(
             if (auto allocationInfo = EraseAllocationIfNeeded(nodeJobs, allocationIt);
                 allocationInfo && allocationInfo->GetPostponedEvent())
             {
-                YT_LOG_INFO(
-                    "Processing postponed allocation event (AllocationId: %v, AllocationEvent: %v)",
-                    allocationInfo->AllocationId,
-                    allocationInfo->GetPostponedEvent());
+                YT_TLOG_INFO("Processing postponed allocation event")
+                    .With("AllocationId", allocationInfo->AllocationId)
+                    .With("AllocationEvent", allocationInfo->GetPostponedEvent());
 
                 if (context.OperationController) {
                     context.AddAllocationEvent(allocationInfo->ConsumePostponedEventOrCrash());
@@ -1733,11 +1726,10 @@ THashSet<TJobId> TJobTracker::DoProcessAbortedAndReleasedJobsInHeartbeat(
     for (const auto& [jobId, jobToAbort] : nodeJobs.JobsToAbort) {
         EmplaceOrCrash(jobsToSkip, jobId);
 
-        YT_LOG_INFO(
-            "Request node to abort job (JobId: %v, AbortReason: %v, RequestNewJob: %v)",
-            jobId,
-            jobToAbort.AbortReason,
-            jobToAbort.RequestNewJob);
+        YT_TLOG_INFO("Request node to abort job")
+            .With("JobId", jobId)
+            .With("AbortReason", jobToAbort.AbortReason)
+            .With("RequestNewJob", jobToAbort.RequestNewJob);
         NProto::ToProto(
             response->add_jobs_to_abort(),
             jobToAbort);
@@ -1757,10 +1749,9 @@ THashSet<TJobId> TJobTracker::DoProcessAbortedAndReleasedJobsInHeartbeat(
 
             releasedJobs.push_back(jobId);
 
-            YT_LOG_INFO(
-                "Request node to remove job (JobId: %v, ReleaseFlags: %v)",
-                jobId,
-                releaseFlags);
+            YT_TLOG_INFO("Request node to remove job")
+                .With("JobId", jobId)
+                .With("ReleaseFlags", releaseFlags);
             ToProto(
                 response->add_jobs_to_remove(),
                 TJobToRelease{
@@ -1832,9 +1823,7 @@ void TJobTracker::DoProcessJobInfosInHeartbeat(
                 continue;
             }
 
-            auto Logger = operationUpdatesProcessingContext.OperationLogger.WithTag(
-                "JobId: %v",
-                jobId);
+            auto Logger = operationUpdatesProcessingContext.OperationLogger.WithTag("JobId", jobId);
 
             const auto newJobStage = JobStageFromJobState(jobSummary.JobSummary->State);
 
@@ -1881,10 +1870,9 @@ void TJobTracker::DoProcessJobInfosInHeartbeat(
 
             increaseJobMessageSizes(/*isKnownJob:*/ false);
 
-            YT_LOG_INFO(
-                "Request node to %v unknown job (JobState: %v)",
-                shouldAbortJob ? "abort" : "remove",
-                jobSummary.JobSummary->State);
+            YT_TLOG_INFO("Requesting node to discard unknown job")
+                .With("Action", shouldAbortJob ? "abort" : "remove")
+                .With("JobState", jobSummary.JobSummary->State);
 
             ++heartbeatCounters.UnknownJobCount;
 
@@ -1921,26 +1909,24 @@ void TJobTracker::DoProcessJobInfosInHeartbeat(
         if (auto& operationInfo = operationIt->second;
             !operationInfo.JobsReady)
         {
-            YT_LOG_INFO(
-                "Operation jobs are not ready yet; skip handling stored job (JobId: %v, OperationId: %v)",
-                storedJobInfo.JobId,
-                storedJobInfo.OperationId);
+            YT_TLOG_INFO("Operation jobs are not ready yet; skip handling stored job")
+                .With("JobId", storedJobInfo.JobId)
+                .With("OperationId", storedJobInfo.OperationId);
             continue;
         }
 
         auto allocationIt = nodeJobs.Allocations.find(AllocationIdFromJobId(storedJobInfo.JobId));
         if (allocationIt != end(nodeJobs.Allocations) && allocationIt->second.HasJob(storedJobInfo.JobId)) {
             const auto& allocation = allocationIt->second;
-            YT_LOG_FATAL_IF(
+            YT_TLOG_FATAL_IF(
                 allocation.HasRunningJob(storedJobInfo.JobId) && allocation.GetRunningJob()->Confirmed,
-                "Stored job confirmed but considered running (JobId: %v, OperationId: %v)",
-                storedJobInfo.JobId,
-                storedJobInfo.OperationId);
+                "Stored job confirmed but considered running")
+                .With("JobId", storedJobInfo.JobId)
+                .With("OperationId", storedJobInfo.OperationId);
 
-            YT_LOG_DEBUG(
-                "Node reported known stored job (OperationId: %v, JobId: %v)",
-                storedJobInfo.OperationId,
-                storedJobInfo.JobId);
+            YT_TLOG_DEBUG("Node reported known stored job")
+                .With("OperationId", storedJobInfo.OperationId)
+                .With("JobId", storedJobInfo.JobId);
             ToProto(
                 response->add_jobs_to_store(),
                 TJobToStore{
@@ -1948,10 +1934,9 @@ void TJobTracker::DoProcessJobInfosInHeartbeat(
                 });
         } else {
             // Job is not running, tell the node to remove it.
-            YT_LOG_DEBUG(
-                "Node reported unknown stored job, requesting removal (OperationId: %v, JobId: %v)",
-                storedJobInfo.OperationId,
-                storedJobInfo.JobId);
+            YT_TLOG_DEBUG("Node reported unknown stored job, requesting removal")
+                .With("OperationId", storedJobInfo.OperationId)
+                .With("JobId", storedJobInfo.JobId);
             ToProto(
                 response->add_jobs_to_remove(),
                 TJobToRelease{
@@ -2010,11 +1995,10 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
                     return;
                 }
 
-                YT_LOG_INFO(
-                    "Job disappeared from node, aborting it (JobId: %v, OperationId: %v, Since: %v)",
-                    jobInfo.JobId,
-                    allocation.OperationId,
-                    jobInfo.DisappearedFromNodeSince);
+                YT_TLOG_INFO("Job disappeared from node, aborting it")
+                    .With("JobId", jobInfo.JobId)
+                    .With("OperationId", allocation.OperationId)
+                    .With("Since", jobInfo.DisappearedFromNodeSince);
 
                 ++heartbeatCounters.DisappearedFromNodeJobAbortCount;
 
@@ -2035,11 +2019,10 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
                     context.AddAllocationEvent(allocation.ConsumePostponedEventOrCrash());
                     addAllocationToTryToErase(allocationIt, context.OperationInfo);
                 } else {
-                    YT_LOG_WARNING(
-                        "Allocation without postponed event has disapeared from node, looks like heartbeats to scheduler are too slow (JobId: %v, AllocationId: %v, OperationId: %v)",
-                        jobInfo.JobId,
-                        allocationId,
-                        allocation.OperationId);
+                    YT_TLOG_WARNING("Allocation without postponed event has disapeared from node, looks like heartbeats to scheduler are too slow")
+                        .With("JobId", jobInfo.JobId)
+                        .With("AllocationId", allocationId)
+                        .With("OperationId", allocation.OperationId);
                 }
             }();
         }
@@ -2048,9 +2031,8 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
             runningJob && !runningJob->Confirmed) {
             auto jobId = runningJob->JobId;
 
-            YT_LOG_DEBUG(
-                "Request node to confirm job (JobId: %v)",
-                jobId);
+            YT_TLOG_DEBUG("Request node to confirm job")
+                .With("JobId", jobId);
             ToProto(response->add_jobs_to_confirm(), TJobToConfirm{jobId});
         }
 
@@ -2065,11 +2047,10 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
                 auto& Logger = context.OperationLogger;
 
                 if (const auto& runningJob = allocation.GetRunningJob(); runningJob && runningJob->Confirmed) {
-                    YT_LOG_INFO(
-                        "Aborting job since allocation aborted (JobId: %v, AllocationId: %v, AbortReason: %v)",
-                        runningJob->JobId,
-                        AllocationIdFromJobId(runningJob->JobId),
-                        abortedAllocationInfo->AbortReason);
+                    YT_TLOG_INFO("Aborting job since allocation aborted")
+                        .With("JobId", runningJob->JobId)
+                        .With("AllocationId", AllocationIdFromJobId(runningJob->JobId))
+                        .With("AbortReason", abortedAllocationInfo->AbortReason);
 
                     context.JobsToAbort.push_back(TJobToAbort{
                         .JobId = runningJob->JobId,
@@ -2087,14 +2068,12 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
                 }
 
                 if (auto& runningJob = allocation.GetRunningJob(); runningJob && !runningJob->Confirmed) {
-                    YT_LOG_DEBUG(
-                        "Aborted allocation event postponed again since allocation has confirming jobs (AllocationId: %v)",
-                        allocationId);
+                    YT_TLOG_DEBUG("Aborted allocation event postponed again since allocation has confirming jobs")
+                        .With("AllocationId", allocationId);
                 } else {
-                    YT_LOG_INFO(
-                        "Processing postponed allocation abort (AllocationId: %v, AbortReason: %v)",
-                        allocationId,
-                        abortedAllocationInfo->AbortReason);
+                    YT_TLOG_INFO("Processing postponed allocation abort")
+                        .With("AllocationId", allocationId)
+                        .With("AbortReason", abortedAllocationInfo->AbortReason);
 
                     YT_VERIFY(!allocation.GetRunningJob());
 
@@ -2103,13 +2082,11 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
                 }
             } else {
                 if (const auto& runningJob = allocation.GetRunningJob()) {
-                    YT_LOG_DEBUG(
-                        "Finished allocation event processing postponed again since allocation has running or confirming jobs "
-                        "(AllocationId: %v, JobId: %v, JobConfirmed: %v, OperationId: %v)",
-                        allocationId,
-                        runningJob->JobId,
-                        runningJob->Confirmed,
-                        allocation.OperationId);
+                    YT_TLOG_DEBUG("Finished allocation event processing postponed again since allocation has running or confirming jobs")
+                        .With("AllocationId", allocationId)
+                        .With("JobId", runningJob->JobId)
+                        .With("JobConfirmed", runningJob->Confirmed)
+                        .With("OperationId", allocation.OperationId);
                 } else {
                     auto& context = AddOperationUpdatesProcessingContext(
                         operationIdToUpdatesProcessingContext,
@@ -2117,9 +2094,8 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
                         heartbeatProcessingResult,
                         allocation.OperationId);
                     auto& Logger = context.OperationLogger;
-                    YT_LOG_INFO(
-                        "Processing finished allocation event (AllocationId: %v)",
-                        allocationId);
+                    YT_TLOG_INFO("Processing finished allocation event")
+                        .With("AllocationId", allocationId);
 
                     context.FinishedAllocations.push_back(allocation.ConsumePostponedEventOrCrash<TFinishedAllocationSummary>());
                     addAllocationToTryToErase(allocationIt, context.OperationInfo);
@@ -2134,11 +2110,9 @@ void TJobTracker::DoProcessAllocationsInHeartbeat(
         for (auto allocationIt : allocationIterators) {
             auto allocationInfo = EraseAllocationIfNeeded(nodeJobs, allocationIt, operationInfo);
 
-            YT_LOG_FATAL_IF(
-                allocationInfo && allocationInfo->GetPostponedEvent(),
-                "Erased allocation had postponed allocation event (AllocationId: %v, Event: %v)",
-                allocationInfo->AllocationId,
-                allocationInfo->GetPostponedEvent());
+            YT_TLOG_FATAL_IF(allocationInfo && allocationInfo->GetPostponedEvent(), "Erased allocation had postponed allocation event")
+                .With("AllocationId", allocationInfo->AllocationId)
+                .With("Event", allocationInfo->GetPostponedEvent());
         }
     }
 }
@@ -2161,22 +2135,19 @@ TJobTracker::TOperationUpdatesProcessingContext& TJobTracker::AddOperationUpdate
         if (createBarrier && operationUpdatesProcessingContext.ContextProcessedBarrier.IsEmpty()) {
             operationUpdatesProcessingContext.ContextProcessedBarrier.Init();
 
-            YT_LOG_DEBUG(
-                "Added context processing barrier (Barrier: %v)",
-                operationUpdatesProcessingContext.ContextProcessedBarrier);
+            YT_TLOG_DEBUG("Added context processing barrier")
+                .With("Barrier", operationUpdatesProcessingContext.ContextProcessedBarrier);
         }
         return operationUpdatesProcessingContext;
     }
 
-    operationUpdatesProcessingContext.OperationLogger = heartbeatProcessingContext->Logger.WithTag(
-        "OperationId: %v",
-        operationId);
+    operationUpdatesProcessingContext.OperationLogger = heartbeatProcessingContext->Logger.WithTag("OperationId", operationId);
 
     const auto& Logger = operationUpdatesProcessingContext.OperationLogger;
 
     auto operationIt = RegisteredOperations_.find(operationId);
     if (operationIt == std::end(RegisteredOperations_)) {
-        YT_LOG_INFO("Operation is not registered at job tracker; skip handling job infos from node");
+        YT_TLOG_INFO("Operation is not registered at job tracker; skip handling job infos from node");
 
         ToProto(response->add_unknown_operation_ids(), operationId);
 
@@ -2190,14 +2161,14 @@ TJobTracker::TOperationUpdatesProcessingContext& TJobTracker::AddOperationUpdate
     operationUpdatesProcessingContext.OperationInfo = &operationInfo;
 
     if (!operationInfo.JobsReady) {
-        YT_LOG_INFO("Operation jobs are not ready yet; skip handling job infos from node");
+        YT_TLOG_INFO("Operation jobs are not ready yet; skip handling job infos from node");
 
         return operationUpdatesProcessingContext;
     }
 
     auto operationController = operationInfo.OperationController.Lock();
     if (!operationController) {
-        YT_LOG_INFO("Operation controller is already reset; skip handling job infos from node");
+        YT_TLOG_INFO("Operation controller is already reset; skip handling job infos from node");
 
         return operationUpdatesProcessingContext;
     }
@@ -2207,9 +2178,8 @@ TJobTracker::TOperationUpdatesProcessingContext& TJobTracker::AddOperationUpdate
     if (createBarrier) {
         operationUpdatesProcessingContext.ContextProcessedBarrier.Init();
 
-        YT_LOG_DEBUG(
-            "Created context processing barrier (Barrier: %v)",
-            operationUpdatesProcessingContext.ContextProcessedBarrier);
+        YT_TLOG_DEBUG("Created context processing barrier")
+            .With("Barrier", operationUpdatesProcessingContext.ContextProcessedBarrier);
     }
 
     return operationUpdatesProcessingContext;
@@ -2269,9 +2239,8 @@ bool TJobTracker::HandleRunningJobInfo(
     const auto& runningJob = *allocation.GetRunningJob();
 
     if (allocation.ConfirmRunningJob()) {
-        YT_LOG_DEBUG(
-            "Job confirmed (JobStage: %v)",
-            newJobStage);
+        YT_TLOG_DEBUG("Job confirmed")
+            .With("JobStage", newJobStage);
 
         ++heartbeatCounters->ConfirmedJobCount;
     }
@@ -2299,7 +2268,7 @@ bool TJobTracker::HandleRunningJobInfo(
             });
 
         if (shouldSkipRunningJobEvents) {
-            YT_LOG_INFO("Skipping running job summary because operation controller invoker is overloaded");
+            YT_TLOG_INFO("Skipping running job summary because operation controller invoker is overloaded");
             ++heartbeatCounters->ThrottledRunningJobEventCount;
 
             return /*wasHandled*/ false;
@@ -2317,13 +2286,13 @@ bool TJobTracker::HandleRunningJobInfo(
     Visit(
         requestedActionInfo,
         [&] (TNoActionRequested) {
-            YT_LOG_DEBUG("Received finished job info");
+            YT_TLOG_DEBUG("Received finished job info");
         },
         [&] (const TInterruptionRequestOptions& /*requestOptions*/) {
-            YT_LOG_DEBUG("Job is already finished; interruption request ignored");
+            YT_TLOG_DEBUG("Job is already finished; interruption request ignored");
         },
         [&] (const TGracefulAbortRequestOptions& /*requestOptions*/) {
-            YT_LOG_DEBUG("Job is already finished; graceful abort request ignored");
+            YT_TLOG_DEBUG("Job is already finished; graceful abort request ignored");
         });
 
     ToProto(
@@ -2355,10 +2324,9 @@ bool TJobTracker::HandleFinishedJobInfo(
     if (newJobStage < EJobStage::Finished) {
         ++heartbeatCounters->StaleRunningJobCount;
 
-        YT_LOG_DEBUG(
-            "Stale job info received (CurrentJobStage: %v, ReceivedJobState: %v)",
-            EJobStage::Finished,
-            newJobStage);
+        YT_TLOG_DEBUG("Stale job info received")
+            .With("CurrentJobStage", EJobStage::Finished)
+            .With("ReceivedJobState", newJobStage);
 
         return /*wasHandled*/ true;
     }
@@ -2371,8 +2339,7 @@ bool TJobTracker::HandleFinishedJobInfo(
             .JobId = jobId,
         });
 
-    YT_LOG_DEBUG(
-        "Finished job info received again, do not process it in operation controller");
+    YT_TLOG_DEBUG("Finished job info received again, do not process it in operation controller");
 
     return /*wasHandled*/ true;
 }
@@ -2386,10 +2353,9 @@ void TJobTracker::ProcessInterruptionRequest(
 {
     YT_ASSERT_INVOKER_AFFINITY(GetCancelableInvoker());
 
-    YT_LOG_INFO(
-        "Request node to interrupt job (InterruptionReason: %v, InterruptionTimeout: %v)",
-        requestOptions.Reason,
-        requestOptions.Timeout);
+    YT_TLOG_INFO("Request node to interrupt job")
+        .With("InterruptionReason", requestOptions.Reason)
+        .With("InterruptionTimeout", requestOptions.Timeout);
 
     ++heartbeatCounters->JobInterruptionRequestCount;
 
@@ -2408,7 +2374,7 @@ void TJobTracker::ProcessGracefulAbortRequest(
 {
     YT_ASSERT_INVOKER_AFFINITY(GetCancelableInvoker());
 
-    YT_LOG_INFO("Request node to gracefully abort job");
+    YT_TLOG_INFO("Request node to gracefully abort job");
 
     ++heartbeatCounters->JobFailureRequestCount;
 
@@ -2426,9 +2392,8 @@ void TJobTracker::WaitForNewSettleJobBarrier(TAllocationInfo& allocationInfo, co
     YT_ASSERT_INVOKER_AFFINITY(GetCancelableInvoker());
 
     if (const auto& newJobSettlingBarrier = allocationInfo.GetNewJobSettlingBarrier()) {
-        YT_LOG_DEBUG(
-            "Waiting for new job settling barrier (Barrier: %v)",
-            newJobSettlingBarrier);
+        YT_TLOG_DEBUG("Waiting for new job settling barrier")
+            .With("Barrier", newJobSettlingBarrier);
 
         class TBarierAwaiter
         {
@@ -2446,9 +2411,8 @@ void TJobTracker::WaitForNewSettleJobBarrier(TAllocationInfo& allocationInfo, co
                 AccountWaitingOnBarrier(/*created*/ true);
 
                 Barrier_.Wait(/*onCanceled*/ [jobTracker = &JobTracker_, Logger = this->Logger] (const TError& error) {
-                    YT_LOG_DEBUG(
-                        error,
-                        "Cancelled new job settling barrier");
+                    YT_TLOG_DEBUG("Cancelled new job settling barrier")
+                        .With(error);
                     jobTracker->CancelledSettleJobRequestWaitingOnBarrierCount_.Increment();
                 });
             }
@@ -2489,9 +2453,8 @@ void TJobTracker::DoRegisterOperation(
 {
     YT_ASSERT_INVOKER_AFFINITY(GetCancelableInvoker());
 
-    YT_LOG_INFO(
-        "Registering operation (OperationId: %v)",
-        operationId);
+    YT_TLOG_INFO("Registering operation")
+        .With("OperationId", operationId);
 
     EmplaceOrCrash(
         RegisteredOperations_,
@@ -2507,9 +2470,8 @@ void TJobTracker::DoUnregisterOperation(TOperationId operationId)
 {
     YT_ASSERT_INVOKER_AFFINITY(GetCancelableInvoker());
 
-    YT_LOG_INFO(
-        "Unregistering operation (OperationId: %v)",
-        operationId);
+    YT_TLOG_INFO("Unregistering operation")
+        .With("OperationId", operationId);
 
     auto operationIt = GetIteratorOrCrash(RegisteredOperations_, operationId);
     YT_VERIFY(operationIt != std::end(RegisteredOperations_));
@@ -2523,11 +2485,9 @@ void TJobTracker::DoUnregisterOperation(TOperationId operationId)
         auto allocationIt = GetIteratorOrCrash(nodeInfo.Jobs.Allocations, allocationId);
 
         auto& allocation = allocationIt->second;
-        YT_LOG_FATAL_IF(
-            !allocation.IsEmpty(),
-            "Non empty allocation on allocation unregistration (AllocationId: %v, OperationId: %v)",
-            allocationId,
-            operationId);
+        YT_TLOG_FATAL_IF(!allocation.IsEmpty(), "Non empty allocation on allocation unregistration")
+            .With("AllocationId", allocationId)
+            .With("OperationId", operationId);
 
         nodeInfo.Jobs.Allocations.erase(allocationIt);
     }
@@ -2542,12 +2502,11 @@ void TJobTracker::DoRegisterAllocation(TStartedAllocationInfo allocationInfo, TO
     auto nodeId = NodeIdFromAllocationId(allocationInfo.AllocationId);
     auto& nodeInfo = GetOrRegisterNode(nodeId, allocationInfo.NodeAddress);
 
-    YT_LOG_INFO(
-        "Allocation registered (AllocationId: %v, OperationId: %v, NodeId: %v, NodeAddress: %v)",
-        allocationInfo.AllocationId,
-        operationId,
-        nodeId,
-        nodeInfo.NodeAddress);
+    YT_TLOG_INFO("Allocation registered")
+        .With("AllocationId", allocationInfo.AllocationId)
+        .With("OperationId", operationId)
+        .With("NodeId", nodeId)
+        .With("NodeAddress", nodeInfo.NodeAddress);
 
     EmplaceOrCrash(
         nodeInfo.Jobs.Allocations,
@@ -2565,51 +2524,45 @@ void TJobTracker::DoRegisterJob(TStartedJobInfo jobInfo, TOperationId operationI
     auto nodeId = NodeIdFromJobId(jobInfo.JobId);
     auto* node = FindNodeInfo(nodeId);
     if (!node) {
-        YT_LOG_INFO(
-            "Trying to register job on unknown node; ignored (JobId: %v, NodeId: %v, NodeAddress: %v)",
-            jobInfo.JobId,
-            nodeId,
-            GetNodeAddressForLogging(nodeId));
+        YT_TLOG_INFO("Trying to register job on unknown node; ignored")
+            .With("JobId", jobInfo.JobId)
+            .With("NodeId", nodeId)
+            .With("NodeAddress", GetNodeAddressForLogging(nodeId));
         return;
     }
 
     auto* allocation = node->Jobs.FindAllocation(AllocationIdFromJobId(jobInfo.JobId));
     if (!allocation) {
-        YT_LOG_INFO(
-            "Trying to register job in unknown allocation; ignored (JobId: %v, AllocationId: %v, NodeId: %v, NodeAddress: %v)",
-            jobInfo.JobId,
-            AllocationIdFromJobId(jobInfo.JobId),
-            nodeId,
-            node->NodeAddress);
+        YT_TLOG_INFO("Trying to register job in unknown allocation; ignored")
+            .With("JobId", jobInfo.JobId)
+            .With("AllocationId", AllocationIdFromJobId(jobInfo.JobId))
+            .With("NodeId", nodeId)
+            .With("NodeAddress", node->NodeAddress);
         return;
     }
 
     if (allocation->IsFinished()) {
-        YT_LOG_INFO(
-            "Trying to register job in finished allocation; ignored (JobId: %v, AllocationId: %v, NodeId: %v, NodeAddress: %v)",
-            jobInfo.JobId,
-            AllocationIdFromJobId(jobInfo.JobId),
-            nodeId,
-            node->NodeAddress);
+        YT_TLOG_INFO("Trying to register job in finished allocation; ignored")
+            .With("JobId", jobInfo.JobId)
+            .With("AllocationId", AllocationIdFromJobId(jobInfo.JobId))
+            .With("NodeId", nodeId)
+            .With("NodeAddress", node->NodeAddress);
         return;
     }
 
-    YT_LOG_FATAL_IF(
-        allocation->GetRunningJob(),
-        "Trying to register job in allocation that already has running job (JobId: %v, PreviousJobId: %v, AllocationId: %v, NodeId: %v, NodeAddress: %v)",
-        jobInfo.JobId,
-        allocation->GetRunningJob()->JobId,
-        AllocationIdFromJobId(jobInfo.JobId),
-        nodeId,
-        node->NodeAddress);
+    YT_TLOG_FATAL_IF(allocation->GetRunningJob(), "Trying to register job in allocation that already has running job")
+        .With("JobId", jobInfo.JobId)
+        .With("PreviousJobId", allocation->GetRunningJob()->JobId)
+        .With("AllocationId", AllocationIdFromJobId(jobInfo.JobId))
+        .With("NodeId", nodeId)
+        .With("NodeAddress", node->NodeAddress);
 
-    YT_LOG_INFO(
-        "Job registered (JobId: %v, AllocationId: %v, OperationId: %v, NodeId: %v, NodeAddress: %v)",
-        jobInfo.JobId,
-        AllocationIdFromJobId(jobInfo.JobId),
-        operationId,
-        nodeId,
-        node->NodeAddress);
+    YT_TLOG_INFO("Job registered")
+        .With("JobId", jobInfo.JobId)
+        .With("AllocationId", AllocationIdFromJobId(jobInfo.JobId))
+        .With("OperationId", operationId)
+        .With("NodeId", nodeId)
+        .With("NodeAddress", node->NodeAddress);
 
     allocation->StartJob(
         jobInfo.JobId,
@@ -2622,9 +2575,8 @@ void TJobTracker::DoSuspendOperation(TOperationId operationId)
 
     auto operationIt = RegisteredOperations_.find(operationId);
     if (operationIt == std::end(RegisteredOperations_)) {
-        YT_LOG_DEBUG(
-            "Suspend requested for operation that is not registered in job tracker, ignored (OperationId: %v)",
-            operationId);
+        YT_TLOG_DEBUG("Suspend requested for operation that is not registered in job tracker, ignored")
+            .With("OperationId", operationId);
         return;
     }
 
@@ -2633,10 +2585,12 @@ void TJobTracker::DoSuspendOperation(TOperationId operationId)
     operationInfo.Suspended = true;
 
     if (wasSuspended) {
-        YT_LOG_WARNING("Suspending operation already suspended in job tracker (OperationId: %v)", operationId);
+        YT_TLOG_WARNING("Suspending operation already suspended in job tracker")
+            .With("OperationId", operationId);
         return;
     }
-    YT_LOG_DEBUG("Operation suspended in job tracker (OperationId: %v)", operationId);
+    YT_TLOG_DEBUG("Operation suspended in job tracker")
+        .With("OperationId", operationId);
 }
 
 void TJobTracker::DoResumeOperation(TOperationId operationId)
@@ -2645,9 +2599,8 @@ void TJobTracker::DoResumeOperation(TOperationId operationId)
 
     auto operationIt = RegisteredOperations_.find(operationId);
     if (operationIt == std::end(RegisteredOperations_)) {
-        YT_LOG_DEBUG(
-            "Resume requested for operation that is not registered in job tracker, ignored (OperationId: %v)",
-            operationId);
+        YT_TLOG_DEBUG("Resume requested for operation that is not registered in job tracker, ignored")
+            .With("OperationId", operationId);
         return;
     }
 
@@ -2657,10 +2610,12 @@ void TJobTracker::DoResumeOperation(TOperationId operationId)
     operationInfo.Suspended = false;
 
     if (!wasSuspended) {
-        YT_LOG_WARNING("Resuming operation not suspended in job tracker (OperationId: %v)", operationId);
+        YT_TLOG_WARNING("Resuming operation not suspended in job tracker")
+            .With("OperationId", operationId);
         return;
     }
-    YT_LOG_DEBUG("Operation resumed in job tracker (OperationId: %v)", operationId);
+    YT_TLOG_DEBUG("Operation resumed in job tracker")
+        .With("OperationId", operationId);
 }
 
 void TJobTracker::DoRevive(
@@ -2682,12 +2637,11 @@ void TJobTracker::DoRevive(
 
         auto jobIdSample = CreateJobIdSampleForLogging(allocations, loggingJobSampleMaxSize);
 
-        YT_LOG_INFO(
-            "Reviving jobs (OperationId: %v, JobCount: %v, JobIdSample: %v, SampleMaxSize: %v)",
-            operationId,
-            std::size(allocations),
-            jobIdSample,
-            loggingJobSampleMaxSize);
+        YT_TLOG_INFO("Reviving jobs")
+            .With("OperationId", operationId)
+            .With("JobCount", std::size(allocations))
+            .With("JobIdSample", jobIdSample)
+            .With("SampleMaxSize", loggingJobSampleMaxSize);
     }
 
     std::vector<TJobId> jobIds;
@@ -2716,12 +2670,10 @@ void TJobTracker::DoRevive(
         EmplaceOrCrash(trackedAllocationIds, allocationInfo.AllocationId);
     }
 
-    YT_LOG_FATAL_IF(
-        !std::empty(operationInfo.TrackedAllocationIds),
-        "Reviving jobs of operation that already has allocations (OperationId: %v, RegisteredJobIds: %v, NewJobIds: %v)",
-        operationId,
-        operationInfo.TrackedAllocationIds,
-        jobIds);
+    YT_TLOG_FATAL_IF(!std::empty(operationInfo.TrackedAllocationIds), "Reviving jobs of operation that already has allocations")
+        .With("OperationId", operationId)
+        .With("RegisteredJobIds", operationInfo.TrackedAllocationIds)
+        .With("NewJobIds", jobIds);
 
     operationInfo.TrackedAllocationIds = std::move(trackedAllocationIds);
 
@@ -2750,12 +2702,11 @@ void TJobTracker::DoReleaseJobs(
 
         std::vector<TJobId> jobIdSample = CreateJobIdSampleForLogging(jobs, loggingJobSampleMaxSize);
 
-        YT_LOG_DEBUG(
-            "Add jobs to release (OperationId: %v, JobCount: %v, JobIdSample: %v, SampleMaxSize: %v)",
-            operationId,
-            std::size(jobs),
-            jobIdSample,
-            loggingJobSampleMaxSize);
+        YT_TLOG_DEBUG("Add jobs to release")
+            .With("OperationId", operationId)
+            .With("JobCount", std::size(jobs))
+            .With("JobIdSample", jobIdSample)
+            .With("SampleMaxSize", loggingJobSampleMaxSize);
     }
 
     THashMap<TNodeId, THashMap<TAllocationId, std::vector<TJobToRelease>>> grouppedJobsToRelease;
@@ -2768,7 +2719,7 @@ void TJobTracker::DoReleaseJobs(
     }
 
     TOperationUpdatesProcessingContext context{.OperationId = operationId,};
-    context.OperationLogger = Logger().WithTag("OperationId: %v", operationId);
+    context.OperationLogger = Logger().WithTag("OperationId", operationId);
     context.OperationInfo = &GetOrCrash(RegisteredOperations_, operationId);
     context.OperationController = context.OperationInfo->OperationController.Lock();
 
@@ -2779,12 +2730,11 @@ void TJobTracker::DoReleaseJobs(
             for (const auto& [_, jobsToRelease] : allocationIdToJobsToRelease) {
                 releasedJobCount += std::ssize(jobsToRelease);
             }
-            YT_LOG_DEBUG(
-                "Skip jobs to release for node that is not connected (OperationId: %v, NodeId: %v, NodeAddress: %v, ReleasedJobCount: %v)",
-                operationId,
-                nodeId,
-                GetNodeAddressForLogging(nodeId),
-                releasedJobCount);
+            YT_TLOG_DEBUG("Skip jobs to release for node that is not connected")
+                .With("OperationId", operationId)
+                .With("NodeId", nodeId)
+                .With("NodeAddress", GetNodeAddressForLogging(nodeId))
+                .With("ReleasedJobCount", releasedJobCount);
             continue;
         }
 
@@ -2839,13 +2789,12 @@ void TJobTracker::RequestJobAbortion(
 
     auto* nodeInfo = FindNodeInfo(nodeId);
     if (!nodeInfo) {
-        YT_LOG_INFO(
-            "Node is not registered, skip job abortion request (JobId: %v, NodeId: %v, NodeAddress: %v, Reason: %v, OperationId: %v)",
-            jobId,
-            nodeId,
-            GetNodeAddressForLogging(nodeId),
-            reason,
-            operationId);
+        YT_TLOG_INFO("Node is not registered, skip job abortion request")
+            .With("JobId", jobId)
+            .With("NodeId", nodeId)
+            .With("NodeAddress", GetNodeAddressForLogging(nodeId))
+            .With("Reason", reason)
+            .With("OperationId", operationId);
         return;
     }
 
@@ -2853,7 +2802,7 @@ void TJobTracker::RequestJobAbortion(
     const auto& nodeAddress = nodeInfo->NodeAddress;
 
     TOperationUpdatesProcessingContext context{.OperationId = operationId,};
-    context.OperationLogger = Logger().WithTag("OperationId: %v", operationId);
+    context.OperationLogger = Logger().WithTag("OperationId", operationId);
     context.OperationInfo = &GetOrCrash(RegisteredOperations_, operationId);
     context.OperationController = context.OperationInfo->OperationController.Lock();
 
@@ -2867,39 +2816,36 @@ void TJobTracker::RequestJobAbortion(
             if (allocation.HasRunningJob(jobId)) {
                 bool jobConfirmed = allocation.GetRunningJob()->Confirmed;
                 allocation.EraseRunningJobOrCrash();
-                YT_LOG_INFO(
-                    "Running job abort requested (AllocationId: %v, JobId: %v, JobConfirmed: %v, AbortReason: %v, NodeId: %v, NodeAddress: %v)",
-                    AllocationIdFromJobId(jobId),
-                    jobId,
-                    jobConfirmed,
-                    reason,
-                    nodeId,
-                    nodeAddress);
+                YT_TLOG_INFO("Running job abort requested")
+                    .With("AllocationId", AllocationIdFromJobId(jobId))
+                    .With("JobId", jobId)
+                    .With("JobConfirmed", jobConfirmed)
+                    .With("AbortReason", reason)
+                    .With("NodeId", nodeId)
+                    .With("NodeAddress", nodeAddress);
 
                 if (auto allocationInfo = EraseAllocationIfNeeded(nodeJobs, allocationIt);
                     allocationInfo && allocationInfo->GetPostponedEvent())
                 {
-                    YT_LOG_INFO("Processing postponed allocation event (AllocationId: %v)", allocationInfo->AllocationId);
+                    YT_TLOG_INFO("Processing postponed allocation event")
+                        .With("AllocationId", allocationInfo->AllocationId);
 
                     context.AddAllocationEvent(allocationInfo->ConsumePostponedEventOrCrash());
                 }
             } else {
-                YT_LOG_DEBUG(
-                    "Requested to abort already finished job (AllocationId: %v, JobId: %v)",
-                    AllocationIdFromJobId(jobId),
-                    jobId);
+                YT_TLOG_DEBUG("Requested to abort already finished job")
+                    .With("AllocationId", AllocationIdFromJobId(jobId))
+                    .With("JobId", jobId);
             }
         } else {
-            YT_LOG_DEBUG(
-                "Requested to abort unknown job (AllocationId: %v, JobId: %v)",
-                AllocationIdFromJobId(jobId),
-                jobId);
+            YT_TLOG_DEBUG("Requested to abort unknown job")
+                .With("AllocationId", AllocationIdFromJobId(jobId))
+                .With("JobId", jobId);
         }
     } else {
-        YT_LOG_DEBUG(
-            "Requested to abort job from unknown allocation (AllocationId: %v, JobId: %v)",
-            AllocationIdFromJobId(jobId),
-            jobId);
+        YT_TLOG_DEBUG("Requested to abort job from unknown allocation")
+            .With("AllocationId", AllocationIdFromJobId(jobId))
+            .With("JobId", jobId);
     }
 
     // NB(pogorelov): AbortJobOnNode may be called twice on operation finishing.
@@ -2925,12 +2871,11 @@ std::optional<TJobTracker::TAllocationInfo> TJobTracker::EraseAllocationIfNeeded
     auto operationId = allocation.OperationId;
 
     if (allocation.ShouldBeRemoved()) {
-        YT_LOG_INFO(
-            "Removing allocation (OperationId: %v, AllocationId: %v, PostponedEvent: %v, Barrier: %v)",
-            operationId,
-            allocationId,
-            allocation.GetPostponedEvent(),
-            allocation.GetNewJobSettlingBarrier());
+        YT_TLOG_INFO("Removing allocation")
+            .With("OperationId", operationId)
+            .With("AllocationId", allocationId)
+            .With("PostponedEvent", allocation.GetPostponedEvent())
+            .With("Barrier", allocation.GetNewJobSettlingBarrier());
 
         auto result = std::move(allocation);
 
@@ -2960,14 +2905,12 @@ void TJobTracker::TryRequestJobAction(
 
     auto* nodeInfo = FindNodeInfo(nodeId);
     if (!nodeInfo) {
-        YT_LOG_INFO(
-            "Node is not registered, skip action request "
-            "(ActionName: %v, JobId: %v, NodeId: %v, NodeAddress: %v, OperationId: %v)",
-            actionName,
-            jobId,
-            nodeId,
-            GetNodeAddressForLogging(nodeId),
-            operationId);
+        YT_TLOG_INFO("Node is not registered, skip action request")
+            .With("ActionName", actionName)
+            .With("JobId", jobId)
+            .With("NodeId", nodeId)
+            .With("NodeAddress", GetNodeAddressForLogging(nodeId))
+            .With("OperationId", operationId);
         return;
     }
 
@@ -2977,25 +2920,22 @@ void TJobTracker::TryRequestJobAction(
     auto* allocation = nodeJobs.FindAllocation(jobId);
 
     if (allocation && allocation->HasRunningJob(jobId)) {
-        YT_LOG_INFO(
-            "Requesting action (ActionName: %v, JobId: %v, JobConfirmed: %v, OperationId: %v, NodeId: %v, NodeAddress: %v)",
-            actionName,
-            jobId,
-            allocation->GetRunningJob()->Confirmed,
-            operationId,
-            nodeId,
-            nodeAddress);
+        YT_TLOG_INFO("Requesting action")
+            .With("ActionName", actionName)
+            .With("JobId", jobId)
+            .With("JobConfirmed", allocation->GetRunningJob()->Confirmed)
+            .With("OperationId", operationId)
+            .With("NodeId", nodeId)
+            .With("NodeAddress", nodeAddress);
 
         action(allocation->GetMutableRunningJobRequestedActionInfo());
     } else {
-        YT_LOG_DEBUG(
-            "Requesting action to job that is not running; ignored "
-            "(ActionName: %v, JobId: %v, OperationId: %v, NodeId: %v, NodeAddress: %v)",
-            actionName,
-            jobId,
-            operationId,
-            nodeId,
-            nodeAddress);
+        YT_TLOG_DEBUG("Requesting action to job that is not running; ignored")
+            .With("ActionName", actionName)
+            .With("JobId", jobId)
+            .With("OperationId", operationId)
+            .With("NodeId", nodeId)
+            .With("NodeAddress", nodeAddress);
     }
 }
 
@@ -3033,15 +2973,13 @@ void TJobTracker::DoRequestJobInterruption(
         },
         [&] (const TInterruptionRequestOptions& requestOptions) {
             if (timeout < requestOptions.Timeout) {
-                YT_LOG_INFO(
-                    "Updating interruption request "
-                    "(JobId: %v, OperationId: %v, OldTimeout: %v, OldReason: %v, NewTimeout: %v, NewReason: %v)",
-                    jobId,
-                    operationId,
-                    requestOptions.Timeout,
-                    requestOptions.Reason,
-                    timeout,
-                    reason);
+                YT_TLOG_INFO("Updating interruption request")
+                    .With("JobId", jobId)
+                    .With("OperationId", operationId)
+                    .With("OldTimeout", requestOptions.Timeout)
+                    .With("OldReason", requestOptions.Reason)
+                    .With("NewTimeout", timeout)
+                    .With("NewReason", reason);
 
                 requestedActionInfo = TInterruptionRequestOptions{
                     .Reason = reason,
@@ -3051,16 +2989,14 @@ void TJobTracker::DoRequestJobInterruption(
                 return;
             }
 
-            YT_LOG_DEBUG(
-                "Job interruption is already requested with lower timeout; skip new request (JobId: %v, OperationId: %v)",
-                jobId,
-                operationId);
+            YT_TLOG_DEBUG("Job interruption is already requested with lower timeout; skip new request")
+                .With("JobId", jobId)
+                .With("OperationId", operationId);
         },
         [&] (TGracefulAbortRequestOptions& /*requestOptions*/) {
-            YT_LOG_FATAL(
-                "Unexpected interruption request after graceful abort request (JobId: %v, OperationId: %v)",
-                jobId,
-                operationId);
+            YT_TLOG_FATAL("Unexpected interruption request after graceful abort request")
+                .With("JobId", jobId)
+                .With("OperationId", operationId);
         });
 }
 
@@ -3097,10 +3033,9 @@ void TJobTracker::DoRequestJobGracefulAbort(
             };
         },
         [&] (const TInterruptionRequestOptions& /*requestOptions*/) {
-            YT_LOG_INFO(
-                "Request job graceful abort despite interruption request (JobId: %v, OperationId: %v)",
-                jobId,
-                operationId);
+            YT_TLOG_INFO("Request job graceful abort despite interruption request")
+                .With("JobId", jobId)
+                .With("OperationId", operationId);
 
             requestedActionInfo = TGracefulAbortRequestOptions{
                 .Reason = reason,
@@ -3138,20 +3073,18 @@ TJobTracker::TNodeInfo& TJobTracker::RegisterNode(TNodeId nodeId, const std::str
 
     auto registrationId = TGuid::Create();
 
-    YT_LOG_INFO(
-        "Register node (NodeId: %v, NodeAddress: %v, RegistrationId: %v, DisconnectionTimeout: %v)",
-        nodeId,
-        nodeAddress,
-        registrationId,
-        comesFromRevival ? Config_->RevivalNodeDisconnectionTimeout : Config_->NodeDisconnectionTimeout);
+    YT_TLOG_INFO("Register node")
+        .With("NodeId", nodeId)
+        .With("NodeAddress", nodeAddress)
+        .With("RegistrationId", registrationId)
+        .With("DisconnectionTimeout", comesFromRevival ? Config_->RevivalNodeDisconnectionTimeout : Config_->NodeDisconnectionTimeout);
 
     if (auto nodeIdIt = NodeAddressToNodeId_.find(nodeAddress); nodeIdIt != std::end(NodeAddressToNodeId_)) {
         auto oldNodeId = nodeIdIt->second;
-        YT_LOG_WARNING(
-            "Node with the same address is already registered, unregister old node and register new (NodeAddress: %v, NewNodeId: %v, OldNodeId: %v)",
-            nodeAddress,
-            nodeId,
-            nodeIdIt->second);
+        YT_TLOG_WARNING("Node with the same address is already registered, unregister old node and register new")
+            .With("NodeAddress", nodeAddress)
+            .With("NewNodeId", nodeId)
+            .With("OldNodeId", nodeIdIt->second);
 
         UnregisterNode(oldNodeId, nodeAddress);
     }
@@ -3187,21 +3120,19 @@ TJobTracker::TNodeInfo& TJobTracker::UpdateOrRegisterNode(TNodeId nodeId, const 
         auto& nodeInfo = nodeIt->second;
         auto& savedAddress = nodeInfo.NodeAddress;
         if (savedAddress != nodeAddress) {
-            YT_LOG_WARNING(
-                "Node address has changed, unregister old node and register new (OldAddress: %v, NewAddress: %v)",
-                savedAddress,
-                nodeAddress);
+            YT_TLOG_WARNING("Node address has changed, unregister old node and register new")
+                .With("OldAddress", savedAddress)
+                .With("NewAddress", nodeAddress);
 
             UnregisterNode(nodeId, savedAddress);
             return RegisterNode(nodeId, nodeAddress);
         }
 
-        YT_LOG_DEBUG(
-            "Updating node lease (NodeId: %v, NodeAddress: %v, RegistrationId: %v, DisconnectionTimeout: %v)",
-            nodeId,
-            nodeAddress,
-            nodeInfo.RegistrationId,
-            Config_->NodeDisconnectionTimeout);
+        YT_TLOG_DEBUG("Updating node lease")
+            .With("NodeId", nodeId)
+            .With("NodeAddress", nodeAddress)
+            .With("RegistrationId", nodeInfo.RegistrationId)
+            .With("DisconnectionTimeout", Config_->NodeDisconnectionTimeout);
 
         TLeaseManager::RenewLease(nodeInfo.Lease, Config_->NodeDisconnectionTimeout);
 
@@ -3217,10 +3148,9 @@ void TJobTracker::UnregisterNode(TNodeId nodeId, const std::string& nodeAddress,
 
     auto nodeIt = RegisteredNodes_.find(nodeId);
     if (nodeIt == std::end(RegisteredNodes_)) {
-        YT_LOG_DEBUG(
-            "Node is already unregistered (NodeId: %v, NodeAddress: %v)",
-            nodeId,
-            nodeAddress);
+        YT_TLOG_DEBUG("Node is already unregistered")
+            .With("NodeId", nodeId)
+            .With("NodeAddress", nodeAddress);
 
         return;
     }
@@ -3229,14 +3159,12 @@ void TJobTracker::UnregisterNode(TNodeId nodeId, const std::string& nodeAddress,
 
     if (maybeNodeRegistrationId) {
         if (maybeNodeRegistrationId != nodeInfo.RegistrationId) {
-            YT_LOG_DEBUG(
-                "Node unregistration skipped because of registration id mismatch "
-                "(NodeId: %v, OldRegistrationId: %v, OldAddress: %v, ActualRegistrationId: %v, ActualAddress: %v)",
-                nodeId,
-                maybeNodeRegistrationId,
-                nodeAddress,
-                nodeInfo.RegistrationId,
-                nodeInfo.NodeAddress);
+            YT_TLOG_DEBUG("Node unregistration skipped because of registration id mismatch")
+                .With("NodeId", nodeId)
+                .With("OldRegistrationId", maybeNodeRegistrationId)
+                .With("OldAddress", nodeAddress)
+                .With("ActualRegistrationId", nodeInfo.RegistrationId)
+                .With("ActualAddress", nodeInfo.NodeAddress);
 
             return;
         }
@@ -3247,11 +3175,10 @@ void TJobTracker::UnregisterNode(TNodeId nodeId, const std::string& nodeAddress,
     auto& nodeJobs = nodeInfo.Jobs;
     YT_VERIFY(nodeAddress == nodeInfo.NodeAddress);
 
-    YT_LOG_INFO(
-        "Unregistering node (NodeId: %v, NodeAddress: %v, RegistrationId: %v)",
-        nodeId,
-        nodeAddress,
-        nodeInfo.RegistrationId);
+    YT_TLOG_INFO("Unregistering node")
+        .With("NodeId", nodeId)
+        .With("NodeAddress", nodeAddress)
+        .With("RegistrationId", nodeInfo.RegistrationId);
 
     {
         THashMap<TOperationId, TOperationUpdatesProcessingContext> operationIdToContext;
@@ -3263,7 +3190,7 @@ void TJobTracker::UnregisterNode(TNodeId nodeId, const std::string& nodeAddress,
             if (inserted) {
                 auto& context = it->second;
                 context.OperationInfo = &GetOrCrash(RegisteredOperations_, allocation.OperationId);
-                context.OperationLogger = Logger().WithTag("OperationId: %v", allocation.OperationId);
+                context.OperationLogger = Logger().WithTag("OperationId", allocation.OperationId);
                 context.OperationController = context.OperationInfo->OperationController.Lock();
             }
 
@@ -3272,13 +3199,12 @@ void TJobTracker::UnregisterNode(TNodeId nodeId, const std::string& nodeAddress,
 
             if (const auto& runningJob = allocation.GetRunningJob()) {
                 auto jobId = runningJob->JobId;
-                YT_LOG_INFO(
-                    "Aborting job since node is unregistering (AllocationId: %v, JobId: %v, JobConfirmed: %v, NodeId: %v, NodeAddress: %v)",
-                    AllocationIdFromJobId(jobId),
-                    jobId,
-                    runningJob->Confirmed,
-                    nodeId,
-                    nodeAddress);
+                YT_TLOG_INFO("Aborting job since node is unregistering")
+                    .With("AllocationId", AllocationIdFromJobId(jobId))
+                    .With("JobId", jobId)
+                    .With("JobConfirmed", runningJob->Confirmed)
+                    .With("NodeId", nodeId)
+                    .With("NodeAddress", nodeAddress);
                 context.JobsToAbort.push_back(
                     TJobToAbort{
                         .JobId = jobId,
@@ -3287,20 +3213,18 @@ void TJobTracker::UnregisterNode(TNodeId nodeId, const std::string& nodeAddress,
             }
 
             if (allocation.GetPostponedEvent()) {
-                YT_LOG_INFO(
-                    "Processing postponed allocation event since node unregistered (AllocationId: %v, Event: %v, NodeId: %v, NodeAddress: %v)",
-                    allocationId,
-                    allocation.GetPostponedEvent(),
-                    nodeId,
-                    nodeAddress);
+                YT_TLOG_INFO("Processing postponed allocation event since node unregistered")
+                    .With("AllocationId", allocationId)
+                    .With("Event", allocation.GetPostponedEvent())
+                    .With("NodeId", nodeId)
+                    .With("NodeAddress", nodeAddress);
                 context.AddAllocationEvent(allocation.ConsumePostponedEventOrCrash());
             } else {
-                YT_LOG_INFO(
-                    "Aborting allocation since node unregistered (AllocationId: %v, Event: %v, NodeId: %v, NodeAddress: %v)",
-                    allocationId,
-                    allocation.GetPostponedEvent(),
-                    nodeId,
-                    nodeAddress);
+                YT_TLOG_INFO("Aborting allocation since node unregistered")
+                    .With("AllocationId", allocationId)
+                    .With("Event", allocation.GetPostponedEvent())
+                    .With("NodeId", nodeId)
+                    .With("NodeAddress", nodeAddress);
                 context.AbortedAllocations.push_back(
                     TAbortedAllocationSummary{
                         .OperationId = allocation.OperationId,
@@ -3342,10 +3266,9 @@ TJobTracker::TNodeInfo* TJobTracker::FindNodeInfo(TNodeId nodeId)
 // So we use registrationId to prevent new node unregistration on old lease expiration (CloseLease is racy).
 void TJobTracker::OnNodeHeartbeatLeaseExpired(TGuid registrationId, TNodeId nodeId, const std::string& nodeAddress)
 {
-    YT_LOG_DEBUG(
-        "Node heartbeat lease expired, unregister node (NodeId: %v, NodeAddress: %v)",
-        nodeId,
-        nodeAddress);
+    YT_TLOG_DEBUG("Node heartbeat lease expired, unregister node")
+        .With("NodeId", nodeId)
+        .With("NodeAddress", nodeAddress);
 
     UnregisterNode(nodeId, nodeAddress, registrationId);
 }
@@ -3362,18 +3285,15 @@ void TJobTracker::ProcessAllocationEvents(
     }
 
     TOperationUpdatesProcessingContext context{.OperationId = operationId};
-    context.OperationLogger = NControllerAgent::Logger().WithTag("OperationId: %v", operationId);
+    context.OperationLogger = NControllerAgent::Logger().WithTag("OperationId", operationId);
     const auto& Logger = context.OperationLogger;
 
     auto logOperationIsNotRunningEvent = [&] (const auto& operationStatus) {
-        YT_LOG_INFO(
-            "Received allocation events of operation that is %v; ignore it"
-            " (OperationId: %v, IncarnationId: %v, FinishedAllocationCount: %v, AbortedAllocationCount: %v)",
-            operationStatus,
-            operationId,
-            IncarnationId_,
-            std::size(finishedAllocations),
-            std::size(abortedAllocations));
+        YT_TLOG_INFO("Received allocation events of an operation that is not running; ignoring them")
+            .With("OperationStatus", operationStatus)
+            .With("IncarnationId", IncarnationId_)
+            .With("FinishedAllocationCount", std::size(finishedAllocations))
+            .With("AbortedAllocationCount", std::size(abortedAllocations));
     };
 
     auto operationIt = RegisteredOperations_.find(operationId);
@@ -3393,21 +3313,19 @@ void TJobTracker::ProcessAllocationEvents(
         return;
     }
 
-    YT_LOG_FATAL_UNLESS(
-        operationInfo.JobsReady,
-        "Unexpected allocation events during revival (IncarnationId: %v, AllocationIds: %v)",
-        IncarnationId_,
-        [&] {
-            std::vector<TAllocationId> allocationIds;
-            for (const auto& abortedAllocationSummary : abortedAllocations) {
-                allocationIds.push_back(abortedAllocationSummary.Id);
-            }
+    YT_TLOG_FATAL_UNLESS(operationInfo.JobsReady, "Unexpected allocation events during revival")
+        .With("IncarnationId", IncarnationId_)
+        .With("AllocationIds", [&] {
+                std::vector<TAllocationId> allocationIds;
+                for (const auto& abortedAllocationSummary : abortedAllocations) {
+                    allocationIds.push_back(abortedAllocationSummary.Id);
+                }
 
-            for (const auto& finishedAllocationSummary : finishedAllocations) {
-                allocationIds.push_back(finishedAllocationSummary.Id);
-            }
+                for (const auto& finishedAllocationSummary : finishedAllocations) {
+                    allocationIds.push_back(finishedAllocationSummary.Id);
+                }
 
-            return allocationIds;
+                return allocationIds;
         }());
 
     // NB(pogorelov): We postpone non-empty allocation event processing until the next node heartbeat to not loose job result and respect job revival.
@@ -3419,7 +3337,7 @@ void TJobTracker::ProcessAllocationEvents(
 
 template <
     class TAllocationEvent,
-    CInvocable<void(
+    NMpl::CInvocable<void(
         TStringBuf reason,
         TAllocationEvent event,
         TJobTracker::TNodeInfo* nodeInfo,
@@ -3456,13 +3374,11 @@ void TJobTracker::ProcessAllocationEvent(
         return;
     }
 
-    YT_LOG_INFO(
-        "Event happened to allocation on online node; postpone event processing until node heartbeat"
-        " (AllocationId: %v, NodeId: %v, NodeAddress: %v, Event: %v)",
-        allocation.AllocationId,
-        nodeId,
-        GetNodeAddressForLogging(nodeId),
-        allocation.GetPostponedEvent());
+    YT_TLOG_INFO("Event happened to allocation on online node; postpone event processing until node heartbeat")
+        .With("AllocationId", allocation.AllocationId)
+        .With("NodeId", nodeId)
+        .With("NodeAddress", GetNodeAddressForLogging(nodeId))
+        .With("Event", allocation.GetPostponedEvent());
 }
 
 void TJobTracker::ProcessFinishedAllocations(
@@ -3484,13 +3400,11 @@ void TJobTracker::ProcessFinishedAllocations(
             TNodeInfo* nodeInfo,
             std::optional<TNodeJobs::TAllocationIterator> maybeAllocationIt)
         {
-            YT_LOG_INFO(
-                "%v; send finished allocation event to operation controller"
-                " (AllocationId: %v, NodeId: %v, NodeAddress: %v)",
-                message,
-                event.Id,
-                nodeId,
-                GetNodeAddressForLogging(nodeId));
+            YT_TLOG_INFO("Sending finished allocation event to operation controller")
+                .With("Reason", message)
+                .With("AllocationId", event.Id)
+                .With("NodeId", nodeId)
+                .With("NodeAddress", GetNodeAddressForLogging(nodeId));
             operationUpdatesProcessingContext.FinishedAllocations.push_back(std::move(event));
 
             if (nodeInfo && maybeAllocationIt) {
@@ -3525,15 +3439,13 @@ void TJobTracker::ProcessAbortedAllocations(
             TNodeInfo* nodeInfo,
             std::optional<TNodeJobs::TAllocationIterator> maybeAllocationIt)
         {
-            YT_LOG_INFO(
-                "%v; send aborted allocation event to operation controller"
-                " (AllocationId: %v, NodeId: %v, NodeAddress: %v, AbortReason: %v, AbortionError: %v)",
-                message,
-                event.Id,
-                nodeId,
-                GetNodeAddressForLogging(nodeId),
-                event.AbortReason,
-                event.Error);
+            YT_TLOG_INFO("Sending aborted allocation event to operation controller")
+                .With("Reason", message)
+                .With("AllocationId", event.Id)
+                .With("NodeId", nodeId)
+                .With("NodeAddress", GetNodeAddressForLogging(nodeId))
+                .With("AbortReason", event.AbortReason)
+                .With("AbortionError", event.Error);
 
             operationUpdatesProcessingContext.AbortedAllocations.push_back(std::move(event));
 
@@ -3569,9 +3481,8 @@ void TJobTracker::AbortUnconfirmedJobs(TOperationId operationId, std::vector<TJo
 
     auto operationIt = RegisteredOperations_.find(operationId);
     if (operationIt == end(RegisteredOperations_)) {
-        YT_LOG_DEBUG(
-            "Operation is already finished, skip unconfirmed jobs abortion (OperationId: %v)",
-            operationId);
+        YT_TLOG_DEBUG("Operation is already finished, skip unconfirmed jobs abortion")
+            .With("OperationId", operationId);
 
         return;
     }
@@ -3583,11 +3494,10 @@ void TJobTracker::AbortUnconfirmedJobs(TOperationId operationId, std::vector<TJo
 
         auto* nodeInfo = FindNodeInfo(nodeId);
         if (!nodeInfo) {
-            YT_LOG_DEBUG(
-                "Node is already disconnected, skip unconfirmed jobs abortion (JobId: %v, NodeId: %v, NodeAddress: %v)",
-                jobId,
-                nodeId,
-                GetNodeAddressForLogging(nodeId));
+            YT_TLOG_DEBUG("Node is already disconnected, skip unconfirmed jobs abortion")
+                .With("JobId", jobId)
+                .With("NodeId", nodeId)
+                .With("NodeAddress", GetNodeAddressForLogging(nodeId));
 
             continue;
         }
@@ -3609,18 +3519,17 @@ void TJobTracker::AbortUnconfirmedJobs(TOperationId operationId, std::vector<TJo
 
             // NB(pogorelov): Do not process postponed allocation event here, it will be processed in the next heartbeat.
 
-            YT_LOG_INFO(
-                "Job was not confirmed within timeout, abort it (JobId: %v, OperationId: %v, NodeId: %v, NodeAddress: %v)",
-                jobId,
-                operationId,
-                nodeId,
-                nodeAddress);
+            YT_TLOG_INFO("Job was not confirmed within timeout, abort it")
+                .With("JobId", jobId)
+                .With("OperationId", operationId)
+                .With("NodeId", nodeId)
+                .With("NodeAddress", nodeAddress);
 
             auto [it, inserted] = operationIdToContext.emplace(allocation.OperationId, TOperationUpdatesProcessingContext{.OperationId = allocation.OperationId});
             auto& context = it->second;
             if (inserted) {
                 context.OperationInfo = &GetOrCrash(RegisteredOperations_, allocation.OperationId);
-                context.OperationLogger = Logger().WithTag("OperationId: %v", allocation.OperationId);
+                context.OperationLogger = Logger().WithTag("OperationId", allocation.OperationId);
                 context.OperationController = context.OperationInfo->OperationController.Lock();
             }
 
@@ -3647,8 +3556,7 @@ void TJobTracker::ProcessOperationContext(TOperationUpdatesProcessingContext con
     const auto& Logger = context.OperationLogger;
 
     if (!context.OperationInfo || !context.OperationController) {
-        YT_LOG_INFO(
-            "Operation is not running, skip event processing");
+        YT_TLOG_INFO("Operation is not running, skip event processing");
 
         return;
     }
@@ -3666,9 +3574,8 @@ void TJobTracker::ProcessOperationContext(TOperationUpdatesProcessingContext con
                 const auto& Logger = operationUpdatesProcessingContext.OperationLogger;
 
                 if (!operationUpdatesProcessingContext.ContextProcessedBarrier.IsEmpty()) {
-                    YT_LOG_DEBUG(
-                        "Releasing context processing barrier (Barrier: %v)",
-                        operationUpdatesProcessingContext.ContextProcessedBarrier);
+                    YT_TLOG_DEBUG("Releasing context processing barrier")
+                        .With("Barrier", operationUpdatesProcessingContext.ContextProcessedBarrier);
 
                     operationUpdatesProcessingContext.ContextProcessedBarrier.Release();
                 }
@@ -3682,11 +3589,10 @@ void TJobTracker::ProcessOperationContext(TOperationUpdatesProcessingContext con
                     try {
                         operationUpdatesProcessingContext.OperationController->OnJobInfoReceivedFromNode(std::move(jobSummary));
                     } catch (const std::exception& ex) {
-                        YT_LOG_FATAL(
-                            ex,
-                            "Failed to process job info from node (JobId: %v, JobState: %v)",
-                            jobId,
-                            jobState);
+                        YT_TLOG_FATAL("Failed to process job info from node")
+                            .With("JobId", jobId)
+                            .With("JobState", jobState)
+                            .With(ex);
                     }
                 }
 
@@ -3698,12 +3604,10 @@ void TJobTracker::ProcessOperationContext(TOperationUpdatesProcessingContext con
                             jobToAbort.JobId,
                             jobToAbort.AbortReason);
                     } catch (const std::exception& ex) {
-                        YT_LOG_FATAL(
-                            ex,
-                            "Failed to abort job in operation controller"
-                            " (JobId: %v, AbortReason: %v)",
-                            jobId,
-                            abortReason);
+                        YT_TLOG_FATAL("Failed to abort job in operation controller")
+                            .With("JobId", jobId)
+                            .With("AbortReason", abortReason)
+                            .With(ex);
                     }
                 }
 
@@ -3714,12 +3618,10 @@ void TJobTracker::ProcessOperationContext(TOperationUpdatesProcessingContext con
                         operationUpdatesProcessingContext.OperationController->OnAllocationAborted(
                             std::move(abortedAllocation));
                     } catch (const std::exception& ex) {
-                        YT_LOG_FATAL(
-                            ex,
-                            "Failed to abort allocation in operation controller"
-                            " (AllocationId: %v, AbortReason: %v)",
-                            allocationId,
-                            abortReason);
+                        YT_TLOG_FATAL("Failed to abort allocation in operation controller")
+                            .With("AllocationId", allocationId)
+                            .With("AbortReason", abortReason)
+                            .With(ex);
                     }
                 }
 
@@ -3730,11 +3632,9 @@ void TJobTracker::ProcessOperationContext(TOperationUpdatesProcessingContext con
                         operationUpdatesProcessingContext.OperationController->OnAllocationFinished(
                             std::move(finishedAllocation));
                     } catch (const std::exception& ex) {
-                        YT_LOG_FATAL(
-                            ex,
-                            "Failed to process finished allocation in operation controller"
-                            " (AllocationId: %v)",
-                            allocationId);
+                        YT_TLOG_FATAL("Failed to process finished allocation in operation controller")
+                            .With("AllocationId", allocationId)
+                            .With(ex);
                     }
                 }
             }));
@@ -3784,7 +3684,7 @@ void TJobTracker::DoInitialize(IInvokerPtr cancelableInvoker)
 {
     YT_ASSERT_INVOKER_AFFINITY(GetInvoker());
 
-    YT_LOG_INFO("Initialize state");
+    YT_TLOG_INFO("Initialize state");
 
     YT_VERIFY(!CancelableInvoker_.Exchange(cancelableInvoker));
 }
@@ -3795,7 +3695,8 @@ void TJobTracker::SetIncarnationId(TIncarnationId incarnationId)
 
     YT_VERIFY(!IncarnationId_);
 
-    YT_LOG_INFO("Set new incarnation (IncarnationId: %v)", incarnationId);
+    YT_TLOG_INFO("Set new incarnation")
+        .With("IncarnationId", incarnationId);
 
     IncarnationId_ = incarnationId;
 }
@@ -3804,10 +3705,10 @@ void TJobTracker::DoCleanup()
 {
     YT_ASSERT_INVOKER_AFFINITY(GetInvoker());
 
-    YT_LOG_INFO("Cleanup state");
+    YT_TLOG_INFO("Cleanup state");
 
     if (auto invoker = CancelableInvoker_.Exchange(IInvokerPtr{}); !invoker) {
-        YT_LOG_INFO("Job tracker is not initialized, skip cleanup");
+        YT_TLOG_INFO("Job tracker is not initialized, skip cleanup");
         return;
     }
 

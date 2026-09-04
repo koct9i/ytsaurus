@@ -52,7 +52,7 @@
 
 #include <yt/yt/library/program/config.h>
 
-#include <yt/yt/library/tracing/jaeger/tracer.h>
+#include <yt/yt/library/tracing/jaeger/config.h>
 
 #include <yt/yt/client/object_client/helpers.h>
 
@@ -423,6 +423,8 @@ void TDynamicClusterConfig::Register(TRegistrar registrar)
     registrar.Parameter("enable_descending_sort_order", &TThis::EnableDescendingSortOrder)
         .Default(false);
     registrar.Parameter("enable_descending_sort_order_dynamic", &TThis::EnableDescendingSortOrderDynamic)
+        .Default(false);
+    registrar.Parameter("enable_aggregate_state_type", &TThis::EnableAggregateStateType)
         .Default(false);
 
     // Column renaming and removal.

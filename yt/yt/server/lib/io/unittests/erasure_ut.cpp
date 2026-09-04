@@ -60,7 +60,11 @@ public:
         if (FailMetaRequests_ && TryFail()) {
             return MakeFuture<TRefCountedChunkMetaPtr>(TError("Failed to read meta"));
         }
-        return Underlying_->GetMeta(options.ClientOptions, {}, partitionTags);
+        return Underlying_->GetMeta(
+            options.ClientOptions,
+            /*fairShareSlotId*/ {},
+            /*fairShareState*/ {},
+            partitionTags);
     }
 
     TChunkId GetChunkId() const override
@@ -159,7 +163,7 @@ TEST(TErasureCodingTest, RandomText)
         data.push_back(static_cast<char>('a' + (std::abs(std::rand()) % 26)));
     }
 
-    for (auto codecId : TEnumTraits<ECodec>::GetDomainValues()) {
+    for (auto codecId : TEnumTraits<ECodec>::GetUniqueDomainValues()) {
         if (codecId == ECodec::None) {
             continue;
         }

@@ -6,8 +6,14 @@
 #include "secondary_query_header.h"
 #include "format.h"
 
+#include <Columns/ColumnString.h>
+
+#include <Core/ColumnWithTypeAndName.h>
 #include <Core/Settings.h>
 
+#include <DataTypes/DataTypeString.h>
+
+#include <Parsers/ASTExplainQuery.h>
 #include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTSelectQuery.h>
 
@@ -246,6 +252,7 @@ DB::Pipe CreateRemoteSource(
     }
 
     bool isInsert = queryAst->as<DB::ASTInsertQuery>();
+    bool isExplain = queryAst->as<DB::ASTExplainQuery>();
 
     std::optional<DB::RemoteQueryExecutor::Extension> extension;
     if (taskIterator) {
@@ -290,9 +297,9 @@ DB::Pipe CreateRemoteSource(
 
     auto serializedQueryHeader = ConvertToYsonString(queryHeader, EYsonFormat::Text).ToString();
 
-    YT_LOG_INFO("Subquery header for secondary query constructed (RemoteQueryId: %v, SecondaryQueryHeader: %v)",
-        remoteQueryId,
-        serializedQueryHeader);
+    YT_TLOG_INFO("Subquery header for secondary query constructed")
+        .With("RemoteQueryId", remoteQueryId)
+        .With("SecondaryQueryHeader", serializedQueryHeader);
     remoteQueryExecutor->setQueryId(serializedQueryHeader);
 
     // XXX(max42): should we use this?
@@ -304,7 +311,7 @@ DB::Pipe CreateRemoteSource(
     bool addExtremes = false;
     bool asyncRead = false;
     bool asyncQuerySending = false;
-    if (!isInsert && processingStage == DB::QueryProcessingStage::Complete) {
+    if (!isExplain && !isInsert && processingStage == DB::QueryProcessingStage::Complete) {
         addTotals = queryAst->as<DB::ASTSelectQuery &>().group_by_with_totals;
         addExtremes = context->getSettingsRef()[DB::Setting::extremes];
     }
@@ -333,9 +340,9 @@ DB::Pipe CreateRemoteSource(
     pipe.addSimpleTransform([&] (const DB::Block& header) {
         return std::make_shared<TLoggingTransform>(
             header,
-            queryContext->Logger.WithTag("RemoteQueryId: %v, RemoteNode: %v",
-                remoteQueryId,
-                remoteNode->GetName().ToString()));
+            queryContext->Logger
+                .WithTag("RemoteQueryId", remoteQueryId)
+                .WithTag("RemoteNode", remoteNode->GetName().ToString()));
     });
 
     return pipe;
@@ -367,10 +374,9 @@ void TDistributedQueryExecutor::ModifySecondaryQueries(std::function<void(DB::AS
     for (size_t index = 0; index < DistributeInfo_.SecondaryQueries.size(); ++index) {
         auto& secondaryQuery = DistributeInfo_.SecondaryQueries[index];
         callback(secondaryQuery.Query);
-        YT_LOG_TRACE(
-            "Modified subquery AST (SecondaryQueryIndex: %v, AST: %v)",
-            index,
-            secondaryQuery.Query);
+        YT_TLOG_TRACE("Modified subquery AST")
+            .With("SecondaryQueryIndex", index)
+            .With("AST", secondaryQuery.Query);
     }
 }
 
@@ -380,10 +386,10 @@ void TDistributedQueryExecutor::Fire()
 
     const auto& settings = Context_->getSettingsRef();
 
-    YT_LOG_INFO("Starting distribution (NodeCount: %v, MaxThreads: %v, SubqueryCount: %v)",
-        DistributeInfo_.CliqueNodes.size(),
-        static_cast<ui64>(settings[DB::Setting::max_threads]),
-        ThreadSubqueryCount_);
+    YT_TLOG_INFO("Starting distribution")
+        .With("NodeCount", DistributeInfo_.CliqueNodes.size())
+        .With("MaxThreads", static_cast<ui64>(settings[DB::Setting::max_threads]))
+        .With("SubqueryCount", ThreadSubqueryCount_);
 
     // Wait for creation of query read transaction (if it's initialized asynchronously)
     // and save its id/timestamp before distribution to be able to read
@@ -400,8 +406,15 @@ void TDistributedQueryExecutor::Fire()
 
     YT_VERIFY(!DistributeInfo_.SecondaryQueries.empty());
     bool isInsert = DistributeInfo_.SecondaryQueries[0].Query->as<DB::ASTInsertQuery>();
+    bool isExplain = DistributeInfo_.SecondaryQueries[0].Query->as<DB::ASTExplainQuery>();
     DB::Block blockHeader;
-    if (!isInsert) {
+    if (isExplain) {
+        blockHeader = DB::Block{DB::ColumnWithTypeAndName{
+            DB::ColumnString::create(),
+            std::make_shared<DB::DataTypeString>(),
+            "explain",
+        }};
+    } else if (!isInsert) {
         auto queryTree = QueryAnalysisResult_->QueryTree;
         blockHeader = DB::InterpreterSelectQueryAnalyzer::getSampleBlock(
             queryTree,
@@ -415,10 +428,9 @@ void TDistributedQueryExecutor::Fire()
         const auto& cliqueNode = DistributeInfo_.CliqueNodes[index % DistributeInfo_.CliqueNodes.size()];
         const auto& secondaryQuery = DistributeInfo_.SecondaryQueries[index];
 
-        YT_LOG_DEBUG(
-            "Firing subquery (SubqueryIndex: %v, Node: %v)",
-            index,
-            cliqueNode->GetName().ToString());
+        YT_TLOG_DEBUG("Firing subquery")
+            .With("SubqueryIndex", index)
+            .With("Node", cliqueNode->GetName().ToString());
 
         auto remoteQueryId = TQueryId::Create();
 
@@ -434,7 +446,7 @@ void TDistributedQueryExecutor::Fire()
             Logger,
             DistributeInfo_.TaskIterator);
 
-        if (!isInsert && !DB::blocksHaveEqualStructure(blockHeader, DistributeInfo_.OutputHeader)) {
+        if (!isExplain && !isInsert && !DB::blocksHaveEqualStructure(blockHeader, DistributeInfo_.OutputHeader)) {
             auto renameActionsDAG = DB::ActionsDAG::makeConvertingActions(
                 blockHeader.getColumnsWithTypeAndName(),
                 DistributeInfo_.OutputHeader.getColumnsWithTypeAndName(),
@@ -491,9 +503,9 @@ DB::QueryPipelineBuilderPtr TDistributedQueryExecutor::ExtractPipeline(std::func
 
         void onFinish() override
         {
-            YT_LOG_DEBUG("All subqueries finished, calling commit callback");
+            YT_TLOG_DEBUG("All subqueries finished, calling commit callback");
             CommitCallback_();
-            YT_LOG_DEBUG("Commit callback succeeded");
+            YT_TLOG_DEBUG("Commit callback succeeded");
         }
 
         std::string getName() const override

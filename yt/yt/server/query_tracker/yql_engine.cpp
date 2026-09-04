@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "handler_base.h"
+#include "helpers.h"
 
 #include <yt/yt/ytlib/query_tracker_client/records/query.record.h>
 
@@ -33,6 +34,7 @@ using namespace NYqlClient;
 using namespace NYqlClient::NProto;
 using namespace NYson;
 using namespace NConcurrency;
+using namespace NSecurityClient;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -52,6 +54,7 @@ struct TYqlSettings
 {
     std::optional<std::string> Stage;
     EExecuteMode ExecuteMode;
+    EQueryType QueryType;
 
     REGISTER_YSON_STRUCT(TYqlSettings);
 
@@ -61,6 +64,8 @@ struct TYqlSettings
             .Optional();
         registrar.Parameter("execution_mode", &TThis::ExecuteMode)
             .Default(EExecuteMode::Run);
+        registrar.Parameter("query_type", &TThis::QueryType)
+            .Default(EQueryType::Regular);
     }
 };
 
@@ -87,9 +92,8 @@ public:
         const TYqlEngineConfigPtr& config,
         const NQueryTrackerClient::NRecords::TActiveQuery& activeQuery,
         const NApi::NNative::IConnectionPtr& connection,
-        const IInvokerPtr& controlInvoker,
-        const TDuration notIndexedQueriesTTL)
-        : TQueryHandlerBase(stateClient, stateRoot, controlInvoker, config, activeQuery, notIndexedQueriesTTL)
+        const IInvokerPtr& controlInvoker)
+        : TQueryHandlerBase(stateClient, stateRoot, controlInvoker, config, activeQuery)
         , Query_(activeQuery.Query)
         , Config_(config)
         , Files_(ConvertTo<std::optional<std::vector<TQueryFilePtr>>>(activeQuery.Files).value_or(std::vector<TQueryFilePtr>()))
@@ -97,6 +101,7 @@ public:
         , Settings_(ConvertTo<TYqlSettingsPtr>(SettingsNode_))
         , Stage_(Settings_->Stage.value_or(Config_->Stage))
         , ExecuteMode_(Settings_->ExecuteMode)
+        , QueryType_(Settings_->QueryType)
         , Secrets_(MakeSecrets(activeQuery.Secrets))
         , ProgressGetterExecutor_(New<TPeriodicExecutor>(controlInvoker, BIND(&TYqlQueryHandler::GetProgress, MakeWeak(this)), Config_->QueryProgressGetPeriod))
     { }
@@ -108,6 +113,28 @@ public:
 
     void Start() override
     {
+        if (QueryType_ != EQueryType::Regular) {
+            if (IsIndexed_) {
+                THROW_ERROR_EXCEPTION("Query of type %Qlv must not be indexed", QueryType_);
+            }
+
+            auto accessControlObjectList = ConvertTo<std::optional<std::vector<std::string>>>(AccessControlObjects_);
+            if (!accessControlObjectList || accessControlObjectList->size() != 1 || (*accessControlObjectList)[0] != AdminAccessControlObjectName) {
+                THROW_ERROR_EXCEPTION("Query of type %Qlv is expected to have only %Qv access control object set",
+                    QueryType_,
+                    AdminAccessControlObjectName);
+            }
+
+            if (CheckAccessControl(User_, AccessControlObjects_, StateClient_, EPermission::Administer) == ESecurityAction::Deny) {
+                THROW_ERROR_EXCEPTION(NSecurityClient::EErrorCode::AuthorizationError,
+                    "%Qlv permission required to run %Qlv queries",
+                    EPermission::Administer,
+                    QueryType_)
+                    .With("user", User_)
+                    .With("access_control_objects", AccessControlObjects_);
+            }
+        }
+
         auto providerInfo = Connection_->GetYqlAgentChannelProviderOrThrow(Stage_);
         YqlAgentChannelProvider_ = providerInfo.first;
         YqlAgentChannelProviderConfig_ = providerInfo.second;
@@ -151,6 +178,7 @@ private:
     const TYqlSettingsPtr Settings_;
     const std::string Stage_;
     const EExecuteMode ExecuteMode_;
+    const EQueryType QueryType_;
     const IInvokerPtr ProgressInvoker_;
     const std::vector<TQuerySecretPtr> Secrets_;
 
@@ -168,7 +196,8 @@ private:
 
     void TryStart()
     {
-        YT_LOG_DEBUG("Start YQL query attempt (Stage: %v)", Stage_);
+        YT_TLOG_DEBUG("Start YQL query attempt")
+            .With("Stage", Stage_);
         auto yqlServiceChannel = WaitForFast(YqlAgentChannelProvider_->GetChannel(YqlServiceName_))
             .ValueOrThrow();
 
@@ -184,6 +213,7 @@ private:
         yqlRequest->set_query(Query_);
         yqlRequest->set_settings(ToProto(ConvertToYsonString(SettingsNode_)));
         yqlRequest->set_mode(ToProto(ExecuteMode_));
+        yqlRequest->set_query_type(ToProto(QueryType_));
 
         for (const auto& file : Files_) {
             auto* protoFile = yqlRequest->add_files();
@@ -205,13 +235,14 @@ private:
         {
             auto guard = Guard(QueryStateSpinLock_);
             if (QueryState_ != EYqlQueryState::Pending && QueryState_ != EYqlQueryState::Throttled) {
-                YT_LOG_DEBUG("Start YQL query attempt failed, query is not in pending or throttled state (State: %v)", QueryState_);
+                YT_TLOG_DEBUG("Start YQL query attempt failed, query is not in pending or throttled state")
+                    .With("State", QueryState_);
                 return;
             }
 
-            YT_LOG_DEBUG("Start YQL query (Stage: %v, Channel: %v)",
-                Stage_,
-                yqlServiceChannel->GetEndpointDescription());
+            YT_TLOG_DEBUG("Start YQL query")
+                .With("Stage", Stage_)
+                .With("Channel", yqlServiceChannel->GetEndpointDescription());
 
             QueryState_ = EYqlQueryState::Running;
 
@@ -235,7 +266,9 @@ private:
 
         auto rspOrError = WaitFor(req->Invoke());
         if (!rspOrError.IsOK()) {
-            YT_LOG_INFO(rspOrError, "Error getting query progress (QueryId: %v)", QueryId_);
+            YT_TLOG_INFO("Error getting query progress")
+                .With("QueryId", QueryId_)
+                .With(rspOrError);
             return;
         }
 
@@ -278,7 +311,8 @@ private:
             try {
                 TryStart();
             } catch (const std::exception& ex) {
-                YT_LOG_INFO(ex, "Unrecoverable error on query start, finishing query");
+                YT_TLOG_INFO("Unrecoverable error on query start, finishing query")
+                    .With(ex);
                 OnQueryFailed(TError(ex));
             }
             return;
@@ -305,6 +339,14 @@ private:
                 .OptionalItem("yql_ast", optionalAst)
             .EndMap();
         OnProgress(std::move(progress));
+
+        if (rsp->yql_response().has_error()) {
+            auto error = ConvertTo<TError>(TYsonString(rsp->yql_response().error()));
+            OnQueryFailed(TError("Failed to run query")
+                .With("query_id", QueryId_)
+                .With(std::move(error)));
+            return;
+        }
 
         std::vector<TErrorOr<TWireRowset>> wireRowsetOrErrors;
         for (int index = 0; index < rsp->rowset_errors_size(); ++index) {
@@ -346,7 +388,7 @@ public:
 
         auto proxy = CreateProxy(stage);
 
-        YT_LOG_DEBUG("Sending YQLA GetYqlAgentInfo request");
+        YT_TLOG_DEBUG("Sending YQLA GetYqlAgentInfo request");
 
         auto getYqlAgentInfoRequest = proxy.GetYqlAgentInfo();
         getYqlAgentInfoRequest->SetTimeout(TDuration::Seconds(10));
@@ -358,7 +400,9 @@ public:
 
         FromProto(&availableYqlVersions, getYqlAgentInfoResponse->available_yql_versions());
         FromProto(&defaultYqlUIVersion, getYqlAgentInfoResponse->default_ui_yql_version());
-        YT_LOG_DEBUG("GetYqlAgentInfo response recieved (AvailableVersions: %v, DefaultYqlUIVersion: %v)", availableYqlVersions, defaultYqlUIVersion);
+        YT_TLOG_DEBUG("GetYqlAgentInfo response received")
+            .With("AvailableVersions", availableYqlVersions)
+            .With("DefaultYqlUIVersion", defaultYqlUIVersion);
 
         return BuildYsonStringFluently()
             .BeginMap()
@@ -376,7 +420,7 @@ public:
 
         auto proxy = CreateProxy(stage);
 
-        YT_LOG_DEBUG("Sending YQLA GetDeclaredParametersInfo request");
+        YT_TLOG_DEBUG("Sending YQLA GetDeclaredParametersInfo request");
 
         auto getDeclaredParametersInfoRequest = proxy.GetDeclaredParametersInfo();
         getDeclaredParametersInfoRequest->SetTimeout(TDuration::Seconds(10));
@@ -388,23 +432,27 @@ public:
             .ValueOrThrow();
 
         auto declaredParametersInfo = TYsonString(TString(getDeclaredParametersInfoResponse->declared_parameters_info()));
-        YT_LOG_DEBUG("GetYqlAgentInfo response recieved (DeclaredParametersInfo: %v)", declaredParametersInfo);
+        YT_TLOG_DEBUG("GetDeclaredParametersInfo response received")
+            .With("DeclaredParametersInfo", declaredParametersInfo);
 
         static const TYsonString EmptyMap = TYsonString(TString("{}"));
         auto rawParametersNode = ConvertToNode(declaredParametersInfo);
         if (rawParametersNode->GetType() != ENodeType::Map) {
-            YT_LOG_DEBUG("Declared parameters node recieved from YQL facade has incorrect type. Expected map. (NodeType: %v)", rawParametersNode->GetType());
+            YT_TLOG_DEBUG("Declared parameters node received from YQL facade has incorrect type; expected map")
+                .With("NodeType", rawParametersNode->GetType());
             return EmptyMap;
         }
         auto processedParameters = ConvertToNode(EmptyMap)->AsMap();
         for (const auto& [key, valueNode] : rawParametersNode->AsMap()->GetChildren()) {
             if (valueNode->GetType() != ENodeType::List) {
-                YT_LOG_DEBUG("Node with declared parameter info has incorrect type. Expected list. (NodeType: %v)", valueNode->GetType());
+                YT_TLOG_DEBUG("Node with declared parameter info has incorrect type; expected list")
+                    .With("NodeType", valueNode->GetType());
                 continue;
             }
             auto list = valueNode->AsList()->GetChildren();
             if (list.size() != 2 || list[0]->AsString()->GetValue() != "DataType") {
-                YT_LOG_DEBUG("Declared parameter info list has incorrect format. Expected first element to be 'DataType', and second to be parameter type. (ParameterInfoList: %v)", ConvertToYsonString(valueNode));
+                YT_TLOG_DEBUG("Declared parameter info list has incorrect format; expected first element to be 'DataType' and second to be parameter type")
+                    .With("ParameterInfoList", ConvertToYsonString(valueNode));
                 continue;
             }
             processedParameters->AddChild(key, ConvertToNode(list[1]->AsString()->GetValue()));
@@ -445,6 +493,11 @@ public:
         , ProxyEngineProvider_(New<TProxyYqlEngineProvider>(StateClient_, StateRoot_))
     { }
 
+    bool IsSafeToRestartQuery() const override
+    {
+        return false;
+    }
+
     IQueryHandlerPtr StartOrAttachQuery(NRecords::TActiveQuery activeQuery) override
     {
         YT_ASSERT_THREAD_AFFINITY(ControlThread);
@@ -455,16 +508,14 @@ public:
             Config_,
             activeQuery,
             DynamicPointerCast<NNative::IConnection>(StateClient_->GetConnection()),
-            ControlQueue_->GetInvoker(),
-            NotIndexedQueriesTTL_);
+            ControlQueue_->GetInvoker());
     }
 
-    void Reconfigure(const TEngineConfigBasePtr& config, const TDuration notIndexedQueriesTTL) override
+    void Reconfigure(const TEngineConfigBasePtr& config) override
     {
         YT_ASSERT_THREAD_AFFINITY(ControlThread);
 
         Config_ = DynamicPointerCast<TYqlEngineConfig>(config);
-        NotIndexedQueriesTTL_ = notIndexedQueriesTTL;
     }
 
     std::optional<IProxyEngineProviderPtr> GetProxyEngineProvider() override
@@ -478,7 +529,6 @@ private:
     const TActionQueuePtr ControlQueue_;
     const IProxyEngineProviderPtr ProxyEngineProvider_;
     TYqlEngineConfigPtr Config_;
-    TDuration NotIndexedQueriesTTL_;
 
     DECLARE_THREAD_AFFINITY_SLOT(ControlThread);
 };

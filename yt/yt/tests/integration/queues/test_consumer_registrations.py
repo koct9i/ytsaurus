@@ -1030,8 +1030,8 @@ class TestDataApiBase(TestQueueConsumerApiBase, TestQueueAgentBase):
         TestQueueAgentBase._create_consumer(path, mount, without_meta, driver, **kwargs)
 
     @staticmethod
-    def _create_symlink_queue(path):
-        TestDataApiBase._create_queue(f"{path}-original")
+    def _create_symlink_queue(path, **kwargs):
+        TestDataApiBase._create_queue(f"{path}-original", **kwargs)
         link(f"{path}-original", path)
 
     @staticmethod
@@ -1142,7 +1142,8 @@ class TestDataApiSingleCluster(TestDataApiBase):
         TestDataApiBase._create_symlink_queue,
     ])
     def test_pull_queue(self, create_queue):
-        create_queue("//tmp/q")
+        # NB: Disable auto-flush so both rows stay in one store; a single pull reads only one store.
+        create_queue("//tmp/q", dynamic_store_auto_flush_period=YsonEntity())
 
         insert_rows("//tmp/q", [{"data": "foo"}])
         insert_rows("//tmp/q", [{"data": "bar"}])
@@ -1170,7 +1171,8 @@ class TestDataApiSingleCluster(TestDataApiBase):
         TestDataApiBase._create_symlink_consumer,
     ])
     def test_pull_consumer(self, create_consumer):
-        self._create_queue("//tmp/q")
+        # NB: Disable auto-flush so both rows stay in one store; a single pull reads only one store.
+        self._create_queue("//tmp/q", dynamic_store_auto_flush_period=YsonEntity())
         create_consumer("//tmp/c")
 
         insert_rows("//tmp/q", [{"data": "foo"}])
@@ -1866,6 +1868,7 @@ class TestConsumerRegistrationsImplementationSwitch(ReplicatedObjectBase, TestQu
 
         check_registraions(list(select_rows("* from [//sys/queue_agents/consumer_registrations]")), expected_consumers=[], is_row=True)
         check_registraions(list_queue_consumer_registrations(str(queue)), expected_consumers=[])
+        check_registraions(list_queue_consumer_registrations(consumer_path=consumer_path), expected_consumers=[])
         check_registraions(list_queue_consumer_registrations(consumer_path=str(consumer)), expected_consumers=[])
         check_registraions(list_queue_consumer_registrations(consumer_path=str(other_consumer)), expected_consumers={})
 
@@ -1887,6 +1890,7 @@ class TestConsumerRegistrationsImplementationSwitch(ReplicatedObjectBase, TestQu
         register_queue_consumer(str(queue), str(other_consumer), vital=vital)
         check_registraions(list(select_rows("* from [//sys/queue_agents/consumer_registrations]")), expected_consumers=[consumer, other_consumer], is_row=True)
         check_registraions(list_queue_consumer_registrations(str(queue)), expected_consumers=[consumer, other_consumer])
+        check_registraions(list_queue_consumer_registrations(consumer_path=consumer_path), expected_consumers=[consumer, other_consumer])
         check_registraions(list_queue_consumer_registrations(consumer_path=str(consumer)), expected_consumers=[consumer])
         check_registraions(list_queue_consumer_registrations(consumer_path=str(other_consumer)), expected_consumers=[other_consumer])
 
@@ -1898,6 +1902,7 @@ class TestConsumerRegistrationsImplementationSwitch(ReplicatedObjectBase, TestQu
 
         check_registraions(list(select_rows("* from [//sys/queue_agents/consumer_registrations]")), expected_consumers=[other_consumer], is_row=True)
         check_registraions(list_queue_consumer_registrations(str(queue)), expected_consumers=[other_consumer])
+        check_registraions(list_queue_consumer_registrations(consumer_path=consumer_path), expected_consumers=[other_consumer])
         check_registraions(list_queue_consumer_registrations(consumer_path=str(consumer)), expected_consumers={})
         check_registraions(list_queue_consumer_registrations(consumer_path=str(other_consumer)), expected_consumers=[other_consumer])
 
@@ -1905,5 +1910,6 @@ class TestConsumerRegistrationsImplementationSwitch(ReplicatedObjectBase, TestQu
 
         check_registraions(list(select_rows("* from [//sys/queue_agents/consumer_registrations]")), expected_consumers={}, is_row=True)
         check_registraions(list_queue_consumer_registrations(str(queue)), expected_consumers={})
+        check_registraions(list_queue_consumer_registrations(consumer_path=consumer_path), expected_consumers={})
         check_registraions(list_queue_consumer_registrations(consumer_path=str(consumer)), expected_consumers={})
         check_registraions(list_queue_consumer_registrations(consumer_path=str(other_consumer)), expected_consumers={})

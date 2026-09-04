@@ -3,7 +3,7 @@
 
 #include <library/cpp/yt/logging/logger.h>
 
-#include <library/cpp/yt/misc/global.h>
+#include <library/cpp/yt/misc/leaky_global.h>
 
 #include <util/stream/file.h>
 
@@ -15,7 +15,7 @@ namespace NYT::NCGroups {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "CGroups");
+static YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "CGroups");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -54,8 +54,8 @@ THashMap<std::string, i64> ReadAndParseStatFile(const TString& fileName)
         auto [_, emplaced] = statistics.emplace(fields[0], FromString<i64>(fields[1]));
         if (!emplaced) {
             THROW_ERROR_EXCEPTION("Failed to collect CGroup statistics: key already exists")
-                << TErrorAttribute("filename", fileName)
-                << TErrorAttribute("key", fields[0]);
+                .With("filename", fileName)
+                .With("key", fields[0]);
         }
     }
 
@@ -187,17 +187,17 @@ public:
 
         return Location->IsV2
             ? TMemoryStatistics{
-                    .ResidentAnon = statistics["anon"],
-                    .TmpfsUsage = statistics["shmem"],
-                    .MappedFile = statistics["file_mapped"],
-                    .MajorPageFaults = statistics["pgmajfault"],
-                    .Cache = statistics["file"],
-                    .RssHuge = statistics["anon_thp"],
-                    .Dirty = statistics["file_dirty"],
-                    .Writeback = statistics["file_writeback"],
+                .AnonWithSwapCached = statistics["anon"] + statistics["swapcached"],
+                .TmpfsUsage = statistics["shmem"],
+                .MappedFile = statistics["file_mapped"],
+                .MajorPageFaults = statistics["pgmajfault"],
+                .Cache = statistics["file"],
+                .RssHuge = statistics["anon_thp"],
+                .Dirty = statistics["file_dirty"],
+                .Writeback = statistics["file_writeback"],
             }
             : TMemoryStatistics{
-                .ResidentAnon = statistics["total_rss"],
+                .AnonWithSwapCached = statistics["total_rss"],
                 .TmpfsUsage = statistics["total_shmem"],
                 .MappedFile = statistics["total_mapped_file"],
                 .MajorPageFaults = statistics["total_pgmajfault"],
@@ -299,11 +299,28 @@ public:
         return TCpuThrottlingStatistics{
             .NrPeriods = static_cast<ui64>(statistics["nr_periods"]),
             .NrThrottled = static_cast<ui64>(statistics["nr_throttled"]),
-            .ThrottledTime = CpuLocation->IsV2
-                ? TDuration::MicroSeconds(statistics["h_throttled_usec"])
-                : TDuration::MicroSeconds(statistics["h_throttled_time"] / 1000),
+            .ThrottledTime = GetThrottledTime(statistics),
             .WaitTime = GetWaitTime(),
         };
+    }
+
+    // NB(pavook): we prefer the h_throttled_* fields (kernel extension) because they are hierarchical,
+    // i.e. also account for throttling caused by the limits of ancestor cgroups;
+    // on stock kernels we fall back to the standard throttled_* fields of the cgroup itself.
+    TDuration GetThrottledTime(const THashMap<std::string, i64>& statistics) const
+    {
+        if (CpuLocation->IsV2) {
+            if (auto* throttled = statistics.FindPtr("h_throttled_usec")) {
+                return TDuration::MicroSeconds(*throttled);
+            }
+            return TDuration::MicroSeconds(statistics.Value("throttled_usec", 0));
+        }
+
+        // NB: V1 reports throttled time in nanoseconds.
+        if (auto* throttled = statistics.FindPtr("h_throttled_time")) {
+            return TDuration::MicroSeconds(*throttled / 1000);
+        }
+        return TDuration::MicroSeconds(statistics.Value("throttled_time", 0) / 1000);
     }
 
     // NB(pavook): we prefer cpuacct.wait (kernel extension) because it is an honest sum of individual thread wait times,
@@ -442,8 +459,8 @@ public:
         resolved[ECGroupController::CpuAcct] = Cpu_.CpuAcctLocation;
         resolved[ECGroupController::IO] = IO_.Location;
         resolved[ECGroupController::Pids] = Pids_.Location;
-        YT_LOG_INFO("CGroups statistics fetcher initialized (Controllers: %v)",
-            resolved);
+        YT_TLOG_INFO("CGroups statistics fetcher initialized")
+            .With("Controllers", resolved);
     }
 
     bool IsControllerV2(ECGroupController controller) const override
@@ -515,7 +532,9 @@ TString ReadProcFile(const TString& path)
     try {
         return TFileInput(path).ReadAll();
     } catch (const std::exception& ex) {
-        YT_LOG_WARNING("Failed to read %v (Error: %v)", path, ex.what());
+        YT_TLOG_WARNING("Failed to read cgroup statistics")
+            .With("Path", path)
+            .With(ex);
         return {};
     }
 }

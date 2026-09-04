@@ -32,10 +32,10 @@ void TCypressProxyServiceBase::InitContext(TCypressProxyServiceContext<TRequestM
         cellTag,
         kind);
 
-    YT_LOG_ALERT_AND_THROW_UNLESS(
+    YT_TLOG_ALERT_AND_THROW_UNLESS(
         kind == NApi::EMasterChannelKind::Leader || kind == NApi::EMasterChannelKind::Follower,
-        "Unexpected master channel kind received (MasterChannelKind: %v)",
-        kind);
+        "Unexpected master channel kind received")
+        .With("MasterChannelKind", kind);
 
     context->SetTargetMasterCellTag(cellTag);
     context->SetTargetMasterChannelKind(kind);
@@ -48,7 +48,7 @@ NRpc::IChannelPtr TCypressProxyServiceBase::GetTargetMasterPeerChannelOrThrow(TC
     auto cellTag = context->GetTargetMasterCellTag();
 
     const auto& masterCellDirectory = Bootstrap_->GetNativeConnection()->GetMasterCellDirectory();
-    return masterCellDirectory->GetNakedMasterChannelOrThrow(kind, cellTag);
+    return masterCellDirectory->GetNonRetryingMasterChannelOrThrow(kind, cellTag);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

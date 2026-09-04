@@ -1,0 +1,24 @@
+{
+  "info": {
+    "created": "2026-08-28T00:37:48Z",
+    "pr": {
+      "id": 15302532,
+      "author": "baymer",
+      "summary": "DEVTOOLSSUPPORT-94180: убрать pnpm install из TS_PACKAGE"
+    }
+  },
+  "by_platform": {
+    "darwin": {
+      "uri": "sbr:13389096329"
+    },
+    "darwin-arm64": {
+      "uri": "sbr:13389095338"
+    },
+    "linux": {
+      "uri": "sbr:13389098318"
+    },
+    "linux-aarch64": {
+      "uri": "sbr:13389097465"
+    }
+  }
+}

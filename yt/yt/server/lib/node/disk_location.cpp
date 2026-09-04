@@ -82,7 +82,7 @@ TDiskLocation::TDiskLocation(
     std::string id,
     const NLogging::TLogger& logger)
     : Id_(std::move(id))
-    , Logger(logger.WithTag("LocationId: %v", Id_))
+    , Logger(logger.WithTag("LocationId", Id_))
     , StaticConfig_(std::move(config))
     , RuntimeConfig_(StaticConfig_)
 { }
@@ -149,11 +149,9 @@ std::optional<ELocationState> TDiskLocation::ChangeState(
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
     if (!disableReason.IsOK()) {
-        YT_LOG_FATAL_UNLESS(
-            newState == ELocationState::Disabled,
-            disableReason,
-            "Disable reason provided for a non-disable state (NewState: %v)",
-            newState);
+        YT_TLOG_FATAL_UNLESS(newState == ELocationState::Disabled, "Disable reason provided for a non-disable state")
+            .With("NewState", newState)
+            .With(disableReason);
     }
 
     auto guard = NThreading::WriterGuard(StateChangingLock_);
@@ -162,10 +160,9 @@ std::optional<ELocationState> TDiskLocation::ChangeState(
         ELocationState currentState = State_.load();
 
         if (expectedState != currentState) {
-            YT_LOG_WARNING(
-                "Incompatible location state (Expected: %v, Actual: %v)",
-                expectedState,
-                currentState);
+            YT_TLOG_WARNING("Incompatible location state")
+                .With("Expected", expectedState)
+                .With("Actual", currentState);
             return std::nullopt;
         }
     }
@@ -205,7 +202,7 @@ void TDiskLocation::InitializeDiskLocationProfiling(const NProfiling::TProfiler&
 
 void TDiskLocation::ValidateLockFile() const
 {
-    YT_LOG_INFO("Checking lock file");
+    YT_TLOG_INFO("Checking lock file");
 
     auto lockFilePath = NFS::CombinePaths(StaticConfig_->Path, DisabledLockFileName);
     if (!NFS::Exists(lockFilePath)) {
@@ -218,7 +215,7 @@ void TDiskLocation::ValidateLockFile() const
     auto errorData = fileInput.ReadAll();
     if (errorData.empty()) {
         THROW_ERROR_EXCEPTION("Empty lock file found")
-            << TErrorAttribute("lock_file", lockFilePath);
+            .With("lock_file", lockFilePath);
     }
 
     TError error;
@@ -226,17 +223,17 @@ void TDiskLocation::ValidateLockFile() const
         error = ConvertTo<TError>(TYsonString(errorData));
     } catch (const std::exception& ex) {
         THROW_ERROR_EXCEPTION("Error parsing lock file contents")
-            << TErrorAttribute("lock_file", lockFilePath)
-            << ex;
+            .With("lock_file", lockFilePath)
+            .With(ex);
     }
     THROW_ERROR_EXCEPTION("Lock file found")
-        << TErrorAttribute("lock_file", lockFilePath)
-        << error;
+        .With("lock_file", lockFilePath)
+        .With(error);
 }
 
 void TDiskLocation::ValidateMinimumSpace() const
 {
-    YT_LOG_INFO("Checking minimum space");
+    YT_TLOG_INFO("Checking minimum space");
 
     auto config = GetRuntimeConfig();
     if (config->MinDiskSpace) {
@@ -246,8 +243,8 @@ void TDiskLocation::ValidateMinimumSpace() const
             THROW_ERROR_EXCEPTION(
                 "Minimum disk space requirement is not met for location %Qv",
                 Id_)
-                << TErrorAttribute("actual_space", totalSpace)
-                << TErrorAttribute("required_space", minSpace);
+                .With("actual_space", totalSpace)
+                .With("required_space", minSpace);
         }
     }
 }

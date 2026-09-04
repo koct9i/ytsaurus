@@ -319,7 +319,7 @@ TFuture<std::vector<TBlock>> TJobInputCache::ReadBlocks(
     auto annotation = Format(
         "Proxying read via exec node (ChunkId: %v, Blocks: %v)",
         chunkId,
-        FormatBlocks(firstBlockIndex, firstBlockIndex + blockCount - 1));
+        FormatBlockIndexRange(firstBlockIndex, firstBlockIndex + blockCount - 1));
     options.ClientOptions.WorkloadDescriptor.Annotations.push_back(std::move(annotation));
     options.ClientOptions.MemoryUsageTracker = BlockMemoryTracker_;
 
@@ -376,7 +376,7 @@ IChunkReaderPtr TJobInputCache::CreateReaderForChunk(TChunkId chunkId)
 
     if (!spec) {
         THROW_ERROR_EXCEPTION("Chunk spec not found")
-            << TErrorAttribute("chunk_id", chunkId);
+            .With("chunk_id", chunkId);
     }
 
     return CreateRemoteReader(

@@ -15,7 +15,7 @@ from sqlglot.dialects.dialect import (
 )
 from sqlglot.errors import UnsupportedError
 from sqlglot.generator import unsupported_args
-from sqlglot.optimizer.scope import build_scope
+from sqlglot.optimizer.scope import build_scope, find_in_scope
 from sqlglot.parsers.exasol import DATE_UNITS
 
 
@@ -91,7 +91,12 @@ def _add_local_prefix_for_aliases(expression: exp.Expr, dialect: Dialect) -> exp
 def _trunc_sql(
     self: ExasolGenerator, kind: str, expression: exp.DateTrunc | exp.TimestampTrunc
 ) -> str:
-    unit = expression.text("unit")
+    unit_expr = expression.args.get("unit")
+    unit = (
+        self.weekstart_name(unit_expr)
+        if isinstance(unit_expr, exp.WeekStart)
+        else expression.text("unit")
+    )
     node = expression.this.this if isinstance(expression.this, exp.Cast) else expression.this
     expr_sql = self.sql(node)
     if isinstance(node, exp.Literal) and node.is_string:
@@ -245,7 +250,7 @@ def _group_by_all(expression: exp.Expr) -> exp.Expr:
         return expression
 
     if expression.is_star:
-        if any(proj.find(exp.AggFunc) for proj in expression.expressions):
+        if any(find_in_scope(proj, exp.AggFunc) for proj in expression.expressions):
             raise UnsupportedError(
                 "GROUP BY ALL with star projection and aggregates is not supported by Exasol"
             )
@@ -256,7 +261,7 @@ def _group_by_all(expression: exp.Expr) -> exp.Expr:
     group_positions = [
         exp.Literal.number(i)
         for i, proj in enumerate(expression.expressions, start=1)
-        if not proj.find(exp.AggFunc)
+        if not find_in_scope(proj, exp.AggFunc)
     ]
 
     if not group_positions:
@@ -348,9 +353,7 @@ class ExasolGenerator(generator.Generator):
         exp.DateTrunc: _date_trunc_sql,
         exp.DayOfWeek: lambda self, e: f"CAST(TO_CHAR({self.sql(e, 'this')}, 'D') AS INTEGER)",
         exp.DatetimeTrunc: timestamptrunc_sql(),
-        exp.GroupConcat: lambda self, e: groupconcat_sql(
-            self, e, func_name="LISTAGG", within_group=True
-        ),
+        exp.GroupConcat: lambda self, e: groupconcat_sql(self, e, on_overflow=True),
         # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/edit_distance.htm#EDIT_DISTANCE
         exp.Levenshtein: unsupported_args("ins_cost", "del_cost", "sub_cost", "max_dist")(
             rename_func("EDIT_DISTANCE")

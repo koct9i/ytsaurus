@@ -90,7 +90,8 @@ i64 TJournalSession::GetIntermediateEmptyBlockCount() const
 
 TFuture<ISession::TFinishResult> TJournalSession::DoFinish(
     const TRefCountedChunkMetaPtr& /*chunkMeta*/,
-    std::optional<int> blockCount)
+    std::optional<int> blockCount,
+    std::optional<TIOFairShareState> /*fairShareState*/)
 {
     YT_ASSERT_INVOKER_AFFINITY(SessionInvoker_);
 
@@ -129,6 +130,7 @@ TFuture<NIO::TIOCounters> TJournalSession::DoPutBlocks(
     int startBlockIndex,
     std::vector<TBlock> blocks,
     i64 /*cumulativeBlockSize*/,
+    std::optional<TIOFairShareState> /*fairShareState*/,
     bool /*enableCaching*/)
 {
     YT_ASSERT_INVOKER_AFFINITY(SessionInvoker_);
@@ -136,37 +138,43 @@ TFuture<NIO::TIOCounters> TJournalSession::DoPutBlocks(
     int recordCount = Changelog_->GetRecordCount();
 
     if (startBlockIndex > recordCount) {
-        auto error = TError("Missing blocks")
-            << TErrorAttribute("chunk_id", SessionId_.ChunkId)
-            << TErrorAttribute("medium_index", SessionId_.MediumIndex)
-            << TErrorAttribute("start_block_index", recordCount)
-            << TErrorAttribute("end_block_index", startBlockIndex - 1);
+        auto error = TError(NChunkClient::EErrorCode::MissingJournalChunkRecord, "Missing blocks")
+            .With("chunk_id", SessionId_.ChunkId)
+            .With("medium_index", SessionId_.MediumIndex)
+            .With("start_block_index", recordCount)
+            .With("end_block_index", startBlockIndex - 1);
 
         THROW_ERROR error;
     }
 
-    if (startBlockIndex < recordCount) {
-        YT_LOG_DEBUG("Skipped duplicate blocks (ChunkId: %v, Blocks: %v)",
-            SessionId_.ChunkId,
-            FormatBlocks(startBlockIndex, recordCount - 1));
+    int duplicateBlockCount = std::min<int>(recordCount - startBlockIndex, std::ssize(blocks));
+    if (duplicateBlockCount > 0) {
+        YT_TLOG_DEBUG("Skipped duplicate blocks")
+            .With("ChunkId", SessionId_.ChunkId)
+            .With("Blocks", FormatBlockIndexRange(startBlockIndex, startBlockIndex + duplicateBlockCount - 1));
     }
 
     i64 payloadSize = 0;
     std::vector<TSharedRef> records;
-    records.reserve(blocks.size() - recordCount + startBlockIndex);
-    for (int index = recordCount - startBlockIndex;
+    records.reserve(std::ssize(blocks) - duplicateBlockCount);
+    for (int index = duplicateBlockCount;
          index < std::ssize(blocks);
          ++index)
     {
-        if (auto error = blocks[index].CheckChecksum(); !error.IsOK()) {
-            error = TError("Error appending changelog records")
-                << TErrorAttribute("chunk_id", SessionId_.ChunkId)
-                << TErrorAttribute("medium_index", SessionId_.MediumIndex)
-                << TErrorAttribute("changelog_id", Changelog_->GetId())
-                << error;
+        if (auto checksumError = blocks[index].CheckChecksum(); !checksumError.IsOK()) {
+            static constexpr auto Message = "Error appending changelog records"_sb;
 
-            YT_LOG_ALERT(error);
-            THROW_ERROR error;
+            YT_TLOG_ALERT(Message)
+                .With("ChunkId", SessionId_.ChunkId)
+                .With("MediumIndex", SessionId_.MediumIndex)
+                .With("ChangelogId", Changelog_->GetId())
+                .With(checksumError);
+
+            THROW_ERROR_EXCEPTION(Message)
+                .With("chunk_id", SessionId_.ChunkId)
+                .With("medium_index", SessionId_.MediumIndex)
+                .With("changelog_id", Changelog_->GetId())
+                .With(checksumError);
         }
         records.push_back(blocks[index].Data);
         payloadSize += records.back().Size();
@@ -197,6 +205,7 @@ TFuture<TJournalSession::TSendBlocksResult> TJournalSession::DoSendBlocks(
     int /*startBlockIndex*/,
     int /*blockCount*/,
     i64 /*cumulativeBlockSize*/,
+    std::optional<TIOFairShareState> /*fairShareState*/,
     TDuration /*requestTimeout*/,
     bool /*instantReplyOnThrottling*/,
     const TNodeDescriptor& /*target*/)
@@ -213,11 +222,11 @@ TFuture<ISession::TFlushBlocksResult> TJournalSession::DoFlushBlocks(int blockIn
     int recordCount = Changelog_->GetRecordCount();
 
     if (blockIndex > recordCount) {
-        auto error = TError("Missing blocks")
-            << TErrorAttribute("chunk_id", SessionId_.ChunkId)
-            << TErrorAttribute("medium_index", SessionId_.MediumIndex)
-            << TErrorAttribute("start_block_index", recordCount - 1)
-            << TErrorAttribute("end_block_index", blockIndex);
+        auto error = TError(NChunkClient::EErrorCode::MissingJournalChunkRecord, "Missing blocks")
+            .With("chunk_id", SessionId_.ChunkId)
+            .With("medium_index", SessionId_.MediumIndex)
+            .With("start_block_index", recordCount - 1)
+            .With("end_block_index", blockIndex);
 
         THROW_ERROR error;
     }

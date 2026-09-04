@@ -18,7 +18,7 @@
 #include <yt/yt/client/table_client/unversioned_reader.h>
 #include <yt/yt/client/table_client/unversioned_writer.h>
 
-#include <yt/yt/core/misc/range_formatters.h>
+#include <library/cpp/yt/misc/range_formatters.h>
 
 #include <library/cpp/cache/cache.h>
 
@@ -190,7 +190,8 @@ public:
             }
             joinSubquery->Limit = OrderedReadWithPrefetchHint;
 
-            YT_LOG_DEBUG("Evaluating remote subquery (SubqueryId: %v)", joinSubquery->Id);
+            YT_TLOG_DEBUG("Evaluating remote subquery")
+                .With("SubqueryId", joinSubquery->Id);
 
             auto writer = New<TSimpleRowsetWriter>(MemoryChunkProvider_);
 
@@ -228,7 +229,8 @@ public:
 
         auto joinFragment = GetForeignQuery(std::move(keys), std::move(permanentBuffer));
 
-        YT_LOG_DEBUG("Evaluating remote subquery (SubqueryId: %v)", joinFragment.Query->Id);
+        YT_TLOG_DEBUG("Evaluating remote subquery")
+            .With("SubqueryId", joinFragment.Query->Id);
 
         return ExecutePlanAndGetReader(ExecutePlan_, ConsumeSubqueryStatistics_, MemoryChunkProvider_, std::move(joinFragment));
     }
@@ -272,10 +274,10 @@ private:
         }
         keys.resize(missingKeyCount);
 
-        YT_LOG_DEBUG("Collected join rows from cache (MissCount: %v, HitCount: %v, FoundCachedRowCount: %v)",
-            missingKeyCount,
-            keyCount - std::ssize(missingOwningKeys),
-            cachedRows.size());
+        YT_TLOG_DEBUG("Collected join rows from cache")
+            .With("MissCount", missingKeyCount)
+            .With("HitCount", keyCount - std::ssize(missingOwningKeys))
+            .With("FoundCachedRowCount", cachedRows.size());
 
         if (missingOwningKeys.empty()) {
             std::vector<TRow> rows;
@@ -288,7 +290,8 @@ private:
 
         auto joinFragment = GetForeignQuery(std::move(keys), permanentBuffer);
 
-        YT_LOG_DEBUG("Evaluating remote subquery with cache (SubqueryId: %v)", joinFragment.Query->Id);
+        YT_TLOG_DEBUG("Evaluating remote subquery with cache")
+            .With("SubqueryId", joinFragment.Query->Id);
 
         auto writer = New<TSimpleRowsetWriter>(MemoryChunkProvider_);
 
@@ -383,30 +386,10 @@ private:
         auto foreignKeyPrefix = JoinClause_->ForeignKeyPrefix;
         auto newQuery = JoinClause_->GetJoinSubquery();
 
-        auto predicateRefines = false;
+        auto mode = GetJoinSubqueryMode(*JoinClause_, Logger);
 
-        if (JoinClause_->Predicate) {
-            auto keyColumns = JoinClause_->Schema.GetKeyColumns();
-
-            auto dummyInClause = New<TInExpression>(
-                foreignEquations,
-                nullptr);
-
-            auto dummyWhereClause = MakeAndExpression(std::move(dummyInClause), JoinClause_->Predicate);
-
-            auto signature = GetExpressionConstraintSignature(std::move(dummyWhereClause), keyColumns);
-
-            auto score = GetConstraintSignatureScore(signature);
-
-            YT_LOG_DEBUG("Calculated score for join via IN with predicate (Signature: %v, Score: %v)",
-                signature,
-                score);
-
-            predicateRefines = score > static_cast<int>(2 * foreignKeyPrefix);
-        }
-
-        if (foreignKeyPrefix == 0 || predicateRefines) {
-            YT_LOG_DEBUG("Using join via IN clause");
+        if (mode == EJoinSubqueryMode::FullScan || mode == EJoinSubqueryMode::PredicateGuidedScan) {
+            YT_TLOG_DEBUG("Using join via IN clause");
 
             TRowRanges universalRange{{
                 buffer->CaptureRow(NTableClient::MinKey().Get()),
@@ -425,10 +408,10 @@ private:
                 AllComputedColumnsEvaluated(*JoinClause_))
             {
                 if (AllowHeavyRangeInferenceInJoins_) {
-                    YT_LOG_DEBUG("Using heavy range inference in join subquery");
+                    YT_TLOG_DEBUG("Using heavy range inference in join subquery");
                 } else {
                     newQuery->ForceLightRangeInference = true;
-                    YT_LOG_DEBUG("Using light range inference in join subquery");
+                    YT_TLOG_DEBUG("Using light range inference in join subquery");
                 }
             }
 
@@ -440,11 +423,11 @@ private:
                 newQuery->Limit = OrderedReadWithPrefetchHint;
             }
         } else {
-            if (foreignKeyPrefix == foreignEquations.size()) {
-                YT_LOG_DEBUG("Using join via source ranges");
+            if (mode == EJoinSubqueryMode::Lookup) {
+                YT_TLOG_DEBUG("Using join via source ranges");
                 dataSource.Keys = MakeSharedRange(std::move(keys), std::move(buffer));
             } else {
-                YT_LOG_DEBUG("Using join via prefix ranges");
+                YT_TLOG_DEBUG("Using join via prefix ranges");
                 std::vector<TRow> prefixKeys;
                 prefixKeys.reserve(keys.size());
                 for (auto key : keys) {
@@ -544,6 +527,41 @@ DEFINE_REFCOUNTED_TYPE(TJoinSubqueryProfiler)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+EJoinSubqueryMode GetJoinSubqueryMode(const TJoinClause& joinClause, const NLogging::TLogger& Logger)
+{
+    const auto& foreignEquations = joinClause.ForeignEquations;
+    auto foreignKeyPrefix = joinClause.ForeignKeyPrefix;
+
+    bool predicateRefines = false;
+
+    if (joinClause.Predicate) {
+        auto keyColumns = joinClause.Schema.GetKeyColumns();
+
+        auto dummyInClause = New<TInExpression>(foreignEquations, nullptr);
+        auto dummyWhereClause = MakeAndExpression(std::move(dummyInClause), joinClause.Predicate);
+        auto signature = GetExpressionConstraintSignature(std::move(dummyWhereClause), keyColumns);
+        auto score = GetConstraintSignatureScore(signature);
+
+        YT_TLOG_DEBUG("Calculated score for join via IN with predicate")
+            .With("Signature", signature)
+            .With("Score", score);
+
+        predicateRefines = score > static_cast<int>(2 * foreignKeyPrefix);
+    }
+
+    if (foreignKeyPrefix == 0) {
+        return EJoinSubqueryMode::FullScan;
+    } else if (predicateRefines) {
+        return EJoinSubqueryMode::PredicateGuidedScan;
+    } else if (foreignKeyPrefix == foreignEquations.size()) {
+        return EJoinSubqueryMode::Lookup;
+    } else {
+        return EJoinSubqueryMode::PrefixScan;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 IJoinProfilerPtr CreateJoinSubqueryProfiler(
     TConstJoinClausePtr joinClause,
     TExecutePlan executeForeign,
@@ -589,7 +607,8 @@ public:
         std::vector<TRow> joinKeys,
         TRowBufferPtr /*buffer*/) override
     {
-        YT_LOG_DEBUG("Merge join profiler got keys (Keys: %v)", joinKeys);
+        YT_TLOG_DEBUG("Merge join profiler got keys")
+            .With("Keys", joinKeys);
 
         YT_ASSERT(std::is_sorted(joinKeys.begin(), joinKeys.end(), [&] (TRow lhs, TRow rhs) {
             return CompareValueRanges(lhs.FirstNElements(JoinKeySize_), rhs.FirstNElements(JoinKeySize_)) < 0;
@@ -619,7 +638,8 @@ public:
             beginSearch = it;
         }
 
-        YT_LOG_DEBUG("Merge join profiler matched rows (Rows: %v)", matchedRows);
+        YT_TLOG_DEBUG("Merge join profiler matched rows")
+            .With("Rows", matchedRows);
 
         auto batch = CreateBatchFromRows(MakeSharedRange(std::move(matchedRows), ForeignRowset_.GetHolder()));
         return New<TBatchReader>(std::move(batch));
@@ -660,7 +680,8 @@ public:
         std::vector<TRow> joinKeys,
         TRowBufferPtr /*buffer*/) override
     {
-        YT_LOG_DEBUG("Hash table join profiler got keys (Keys: %v)", joinKeys);
+        YT_TLOG_DEBUG("Hash table join profiler got keys")
+            .With("Keys", joinKeys);
 
         std::vector<TRow> matchedRows;
         for (auto joinKey : joinKeys) {
@@ -670,7 +691,8 @@ public:
             }
         }
 
-        YT_LOG_DEBUG("Hash table join profiler matched rows (Rows: %v)", matchedRows);
+        YT_TLOG_DEBUG("Hash table join profiler matched rows")
+            .With("Rows", matchedRows);
 
         auto batch = CreateBatchFromRows(MakeSharedRange(std::move(matchedRows), ForeignRowset_.GetHolder()));
         return New<TBatchReader>(std::move(batch));
@@ -717,7 +739,8 @@ public:
         std::vector<TRow> joinKeys,
         TRowBufferPtr /*buffer*/) override
     {
-        YT_LOG_DEBUG("Hybrid join profiler got keys (Keys: %v)", joinKeys);
+        YT_TLOG_DEBUG("Hybrid join profiler got keys")
+            .With("Keys", joinKeys);
 
         YT_ASSERT(std::is_sorted(joinKeys.begin(), joinKeys.end(), [&] (TRow lhs, TRow rhs) {
             return CompareValueRanges(lhs.FirstNElements(JoinKeySize_), rhs.FirstNElements(JoinKeySize_)) < 0;
@@ -754,7 +777,8 @@ public:
             }
         }
 
-        YT_LOG_DEBUG("Hybrid join profiler matched rows (Rows: %v)", matchedRows);
+        YT_TLOG_DEBUG("Hybrid join profiler matched rows")
+            .With("Rows", matchedRows);
 
         auto batch = CreateBatchFromRows(MakeSharedRange(std::move(matchedRows), ForeignRowset_.GetHolder()));
         return New<TBatchReader>(std::move(batch));
@@ -811,10 +835,10 @@ IJoinProfilerPtr CreateJoinRowsetProfiler(
     int joinKeySize,
     TLogger Logger)
 {
-    YT_LOG_DEBUG("Creating join rowset profiler (ForeignKeyPrefix: %v, JoinKeySize: %v, Rowset: %v)",
-        foreignKeyPrefix,
-        joinKeySize,
-        rowset);
+    YT_TLOG_DEBUG("Creating join rowset profiler")
+        .With("ForeignKeyPrefix", foreignKeyPrefix)
+        .With("JoinKeySize", joinKeySize)
+        .With("Rowset", rowset);
 
     YT_ASSERT(foreignKeyPrefix == 0 || std::is_sorted(rowset.begin(), rowset.end(), [&] (TRow lhs, TRow rhs) {
         return CompareValueRanges(lhs.FirstNElements(foreignKeyPrefix), rhs.FirstNElements(foreignKeyPrefix)) < 0;
@@ -877,7 +901,8 @@ public:
 
         joinSubquery->WhereClause = MakeAndExpression(inClause, joinSubquery->WhereClause);
 
-        YT_LOG_DEBUG("Evaluating hierarchical join subquery (SubqueryId: %v)", joinSubquery->Id);
+        YT_TLOG_DEBUG("Evaluating hierarchical join subquery")
+            .With("SubqueryId", joinSubquery->Id);
 
         return ExecutePlanAndGetReader(
             ExecutePlan_,

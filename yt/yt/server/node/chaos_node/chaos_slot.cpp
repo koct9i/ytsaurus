@@ -37,6 +37,7 @@
 #include <yt/yt/core/concurrency/fair_share_action_queue.h>
 #include <yt/yt/core/concurrency/thread_affinity.h>
 
+#include <yt/yt/core/ytree/composite_map.h>
 #include <yt/yt/core/ytree/virtual.h>
 #include <yt/yt/core/ytree/helpers.h>
 
@@ -106,7 +107,7 @@ public:
         , SnapThreadTagsGuard_(RegisterThreadGuard(
             creationContext.SnapshotThreadName,
             creationContext.BundleNameTags))
-        , Logger(ChaosNodeLogger().WithTag("SlotName: %v", creationContext.AutomatonThreadName))
+        , Logger(ChaosNodeLogger().WithTag("SlotName", creationContext.AutomatonThreadName))
     {
         YT_ASSERT_INVOKER_THREAD_AFFINITY(GetAutomatonInvoker(), AutomatonThread);
 
@@ -120,9 +121,9 @@ public:
         YT_VERIFY(!Occupant_);
 
         Occupant_ = std::move(occupant);
-        Logger.AddTag("CellId: %v, PeerId: %v",
-            Occupant_->GetCellId(),
-            Occupant_->GetPeerId());
+        Logger
+            .AddTag("CellId", Occupant_->GetCellId())
+            .AddTag("PeerId", Occupant_->GetPeerId());
     }
 
     TCellId GetCellId() const override
@@ -259,7 +260,6 @@ public:
         return SnapshotQueue_->GetInvoker();
     }
 
-
     TObjectId GenerateId(EObjectType type) override
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
@@ -301,8 +301,9 @@ public:
             this,
             Bootstrap_);
 
-        auto clockClusterTag = Occupant_->GetOptions()->ClockClusterTag != InvalidCellTag
-            ? Occupant_->GetOptions()->ClockClusterTag
+        auto occupantClockClusterTag = Occupant_->GetOptions()->ClockClusterTag;
+        auto clockClusterTag = occupantClockClusterTag != InvalidCellTag
+            ? occupantClockClusterTag
             : Bootstrap_->GetConnection()->GetClusterTag();
 
         TransactionManager_ = CreateTransactionManager(
@@ -348,11 +349,11 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY(ControlThread);
 
-        ReplicatedTableTracker_.Reset();
-        CoordinatorManager_.Reset();
-        ChaosManager_.Reset();
-        ChaosLeaseManager_.Reset();
-        TransactionManager_.Reset();
+        if (CoordinatorService_) {
+            const auto& rpcServer = Bootstrap_->GetRpcServer();
+            rpcServer->UnregisterService(CoordinatorService_);
+        }
+        CoordinatorService_.Reset();
 
         if (ChaosNodeService_) {
             const auto& rpcServer = Bootstrap_->GetRpcServer();
@@ -360,17 +361,17 @@ public:
         }
         ChaosNodeService_.Reset();
 
-        if (CoordinatorService_) {
-            const auto& rpcServer = Bootstrap_->GetRpcServer();
-            rpcServer->UnregisterService(CoordinatorService_);
-        }
-        CoordinatorService_.Reset();
+        ReplicatedTableTracker_.Reset();
+        TransactionManager_.Reset();
+        CoordinatorManager_.Reset();
+        ChaosLeaseManager_.Reset();
+        ChaosManager_.Reset();
 
         AutomatonThreadTagsGuard_.Release();
         SnapThreadTagsGuard_.Release();
     }
 
-    TCompositeMapServicePtr PopulateOrchidService(TCompositeMapServicePtr orchid) override
+    ICompositeMapServicePtr PopulateOrchidService(ICompositeMapServicePtr orchid) override
     {
         YT_ASSERT_THREAD_AFFINITY(ControlThread);
 
@@ -464,6 +465,8 @@ public:
 
         if (auto it = config->PerBundleConfigs.find(GetCellBundleName()); it != config->PerBundleConfigs.end()) {
             VerboseLoggingEnabled_ = it->second->EnableVerboseLogging;
+        } else {
+            VerboseLoggingEnabled_ = false;
         }
     }
 
@@ -486,9 +489,6 @@ private:
     TResourceTrackerTagsGuard AutomatonThreadTagsGuard_;
     TResourceTrackerTagsGuard SnapThreadTagsGuard_;
 
-    TCellDescriptor CellDescriptor_;
-
-
     IChaosManagerPtr ChaosManager_;
     IChaosLeaseManagerPtr ChaosLeaseManager_;
     ICoordinatorManagerPtr CoordinatorManager_;
@@ -499,8 +499,6 @@ private:
 
     NRpc::IServicePtr ChaosNodeService_;
     NRpc::IServicePtr CoordinatorService_;
-
-    IYPathServicePtr OrchidService_;
 
     std::atomic<bool> VerboseLoggingEnabled_ = false;
 
@@ -544,10 +542,8 @@ IChaosSlotPtr CreateChaosSlot(
     IBootstrap* bootstrap,
     const std::string& cellBundleName)
 {
-    auto creationContext = TChaosSlotCreationContext(slotIndex, cellBundleName);
-
     return New<TChaosSlot>(
-        creationContext,
+        TChaosSlotCreationContext(slotIndex, cellBundleName),
         config,
         bootstrap);
 }

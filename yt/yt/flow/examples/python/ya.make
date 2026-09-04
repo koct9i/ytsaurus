@@ -1,0 +1,12 @@
+RECURSE(
+    async_request
+    batch_compaction
+    docker_vanilla_companion
+    external_state_join
+    retryable_async_request
+    shuffle
+    static_table_join
+    url_downloader
+    wait_click_join
+    word_count
+)

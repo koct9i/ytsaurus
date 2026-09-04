@@ -1305,6 +1305,51 @@ TRANSFORMS[67] = [
                 "account": OPERATIONS_ARCHIVE_ACCOUNT_NAME,
             })),
 ]
+
+TRANSFORMS[68] = [
+    Conversion(
+        "ordered_by_id",
+        table_info=TableInfo(
+            [
+                ("id_hash", "uint64", "farm_hash(id_hi, id_lo)"),
+                ("id_hi", "uint64"),
+                ("id_lo", "uint64"),
+            ], [
+                ("state", "string"),
+                ("authenticated_user", "string"),
+                ("operation_type", "string"),
+                ("progress", "any", {"lock": "controller_agent"}),
+                ("provided_spec", "any"),
+                ("spec", "any"),
+                ("full_spec", "any"),
+                ("experiment_assignments", "any"),
+                ("experiment_assignment_names", "any"),
+                ("brief_progress", "any", {"lock": "controller_agent"}),
+                ("brief_spec", "any"),
+                ("start_time", "int64"),
+                ("finish_time", "int64"),
+                ("filter_factors", "string"),
+                ("result", "any"),
+                ("events", "any"),
+                ("alerts", "any"),
+                ("slot_index", "int64"),
+                ("unrecognized_spec", "any"),
+                ("runtime_parameters", "any"),
+                ("slot_index_per_pool_tree", "any"),
+                ("annotations", "any"),
+                ("task_names", "any"),
+                ("controller_features", "any", {"lock": "controller_features"}),
+                ("alert_events", "any", {"lock": "alert_events"}),
+                ("scheduling_attributes_per_pool_tree", "any"),
+            ],
+            in_memory=False,
+            default_lock="operations_cleaner",
+            attributes={
+                "tablet_cell_bundle": SYS_BUNDLE_NAME,
+                "account": OPERATIONS_ARCHIVE_ACCOUNT_NAME,
+            })),
+]
+
 # NB(renadeen): don't forget to update min_required_archive_version at yt/yt/server/lib/scheduler/config.cpp
 
 
@@ -1314,10 +1359,18 @@ def are_hunks_enabled(client):
 
 
 def is_ttl_column_available(client):
-    host = client.list("//sys/primary_masters")[0]
-    version = client.get(f"//sys/primary_masters/{host}/orchid/build_info/binary_version")
-    version = float(version[:4])
-    return version >= 24.1
+    hosts = client.list("//sys/primary_masters")
+    if not hosts:
+        raise RuntimeError("No primary masters found")
+
+    for index, host in enumerate(hosts):
+        try:
+            version = client.get(f"//sys/primary_masters/{host}/orchid/build_info/binary_version")
+            version = float(version[:4])
+            return version >= 24.1
+        except Exception:
+            if index == len(hosts) - 1:
+                raise
 
 
 def check_operations_archive_version(client, target_version):

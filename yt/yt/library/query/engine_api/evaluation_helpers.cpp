@@ -1,5 +1,6 @@
 #include "evaluation_helpers.h"
 
+#include <yt/yt/library/numeric/util.h>
 #include <yt/yt/library/query/base/helpers.h>
 #include <yt/yt/library/query/base/private.h>
 #include <yt/yt/library/query/base/query.h>
@@ -26,7 +27,7 @@ ui64 TGroupHasher::operator()(const TPIValue* row) const
 
 const TPIValue* TRowComparer::MakeSentinel(ESentinelType type)
 {
-    return std::bit_cast<TPIValue*>(type);
+    return BitCast<TPIValue*>(type);
 }
 
 bool TRowComparer::IsSentinel(const TPIValue* value)

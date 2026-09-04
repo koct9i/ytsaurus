@@ -10,8 +10,6 @@
 
 #include <yt/yt/server/lib/nbd/config.h>
 
-#include <yt/yt/server/lib/signature/components/public.h>
-
 #include <yt/yt/ytlib/chunk_client/public.h>
 
 #include <yt/yt/library/dns_over_rpc/client/config.h>
@@ -19,6 +17,8 @@
 #include <yt/yt/library/gpu/config.h>
 
 #include <yt/yt/library/tracing/jaeger/public.h>
+
+#include <yt/yt/library/signature/components/public.h>
 
 #include <yt/yt/core/concurrency/config.h>
 
@@ -188,8 +188,6 @@ struct TSlotManagerDynamicConfig
     //! Copy artifacts without blocking any of the slot location IO invokers.
     bool EnableAsyncArtifactCopy;
 
-    std::optional<i64> ArtifactPipeSize;
-
     TDuration CopyRateAggregatorHalfLife;
 
     //! Polymorphic job environment configuration.
@@ -228,6 +226,9 @@ struct TVolumeManagerDynamicConfig
 
     //! For testing purpuses.
     bool ThrowOnPrepareVolume;
+
+    //! For testing purposes.
+    bool ThrowOnPrepareLayers;
 
     REGISTER_YSON_STRUCT(TVolumeManagerDynamicConfig);
 
@@ -826,7 +827,6 @@ struct TLogDumpConfig
 
     static void Register(TRegistrar registrar);
 };
-
 
 DEFINE_REFCOUNTED_TYPE(TLogDumpConfig)
 

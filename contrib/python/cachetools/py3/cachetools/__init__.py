@@ -12,7 +12,7 @@ __all__ = (
     "cachedmethod",
 )
 
-__version__ = "7.1.4"
+__version__ = "7.1.7"
 
 import collections
 import collections.abc
@@ -53,8 +53,8 @@ class Cache(collections.abc.MutableMapping):
         if getsizeof:
             self.getsizeof = getsizeof
         if self.getsizeof is not Cache.getsizeof:
-            self.__size = dict()
-        self.__data = dict()
+            self.__size = {}
+        self.__data = {}
         self.__currsize = 0
         self.__maxsize = maxsize
 
@@ -75,15 +75,20 @@ class Cache(collections.abc.MutableMapping):
     def __setitem__(self, key, value):
         maxsize = self.__maxsize
         size = self.getsizeof(value)
+        if size < 0:
+            raise ValueError("value size must be non-negative")
         if size > maxsize:
             raise ValueError("value too large")
-        if key not in self.__data or self.__size[key] < size:
-            while self.__currsize + size > maxsize:
-                self.popitem()
-        if key in self.__data:
-            diffsize = size - self.__size[key]
-        else:
+        if key not in self.__data:
             diffsize = size
+            while self.__currsize + diffsize > maxsize:
+                self.popitem()
+        else:
+            diffsize = size - self.__size[key]
+            while self.__currsize + diffsize > maxsize:
+                self.popitem()
+                if key not in self.__data:
+                    diffsize = size
         self.__data[key] = value
         self.__size[key] = size
         self.__currsize += diffsize
@@ -445,7 +450,7 @@ class TTLCache(_TimedCache):
     """LRU Cache implementation with per-item time-to-live (TTL) value."""
 
     class _Link:
-        __slots__ = ("key", "expires", "next", "prev")
+        __slots__ = ("expires", "key", "next", "prev")
 
         def __init__(self, key=None, expires=None):
             self.key = key
@@ -589,7 +594,7 @@ class TLRUCache(_TimedCache):
 
     @functools.total_ordering
     class _Item:
-        __slots__ = ("key", "expires", "removed")
+        __slots__ = ("expires", "key", "removed")
 
         def __init__(self, key=None, expires=None):
             self.key = key
@@ -627,10 +632,12 @@ class TLRUCache(_TimedCache):
 
     def __setitem__(self, key, value, cache_setitem=Cache.__setitem__):
         with self.timer as time:
+            self.expire(time)
             expires = self.__ttu(key, value, time)
             if not (time < expires):
-                return  # skip expired items
-            self.expire(time)
+                # updating an existing item with an already expired
+                # one should remove the existing item
+                return self.__delitem(key)
             cache_setitem(self, key, value)
         # removing an existing item would break the heap structure, so
         # only mark it as removed for now
@@ -709,6 +716,14 @@ class TLRUCache(_TimedCache):
         value = self.__items[key]
         self.__items.move_to_end(key)
         return value
+
+    def __delitem(self, key, cache_delitem=Cache.__delitem__):
+        try:
+            self.__items.pop(key).removed = True
+        except KeyError:
+            pass
+        else:
+            cache_delitem(self, key)
 
 
 # note that the runtime __name__ is "CacheInfo", as in stdlib:

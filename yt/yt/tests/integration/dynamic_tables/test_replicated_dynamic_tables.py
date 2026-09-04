@@ -2194,6 +2194,52 @@ class TestReplicatedDynamicTables(TestReplicatedDynamicTablesBase):
                 == rows[i:]
             )
 
+    @authors("akozhikhov")
+    def test_start_cumulative_data_weight(self):
+        self._create_cells()
+
+        replica_schema = SIMPLE_SCHEMA_ORDERED + [{"name": "$cumulative_data_weight", "type": "int64"}]
+
+        self._create_replicated_table("//tmp/t", SIMPLE_SCHEMA_ORDERED)
+
+        def _get_cumulative_data_weights(path):
+            return [
+                row["$cumulative_data_weight"]
+                for row in select_rows(
+                    "[$cumulative_data_weight] from [{}]".format(path),
+                    driver=self.replica_driver)
+            ]
+
+        replica_id = create_table_replica("//tmp/t", self.REPLICA_CLUSTER_NAME, "//tmp/r")
+        self._create_replica_table("//tmp/r", replica_id, replica_schema)
+        sync_enable_table_replica(replica_id)
+
+        for i in range(3):
+            insert_rows("//tmp/t", [{"key": i, "value1": str(i)}], require_sync_replica=False)
+
+        wait(lambda: len(_get_cumulative_data_weights("//tmp/r")) == 3)
+        cumulative_data_weights = _get_cumulative_data_weights("//tmp/r")
+
+        # A replica which starts replication from the third row must continue the counter
+        # of the existing replica instead of starting it over from zero.
+        new_replica_id = create_table_replica(
+            "//tmp/t",
+            self.REPLICA_CLUSTER_NAME,
+            "//tmp/new_r",
+            attributes={"start_replication_row_indexes": [2]},
+        )
+        self._create_replica_table(
+            "//tmp/new_r",
+            new_replica_id,
+            replica_schema,
+            tablet_count=1,
+            trimmed_row_counts=[2],
+            cumulative_data_weights=[cumulative_data_weights[1]],
+        )
+        sync_enable_table_replica(new_replica_id)
+
+        wait(lambda: _get_cumulative_data_weights("//tmp/new_r") == cumulative_data_weights[2:])
+
     @authors("babenko")
     @flaky(max_runs=5)
     @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -2628,6 +2674,35 @@ class TestReplicatedDynamicTables(TestReplicatedDynamicTablesBase):
         rows = [{"key": 1, "value1": "1"}]
         with raises_yt_error("Access denied"):
             insert_rows("//tmp/t", rows, authenticated_user="u")
+
+    @authors("smalltownboy")
+    def test_not_allowed_write_to_sync_replica(self):
+        self._create_cells()
+        self._create_replicated_table("//tmp/t")
+        replica_id = create_table_replica("//tmp/t", self.REPLICA_CLUSTER_NAME, "//tmp/r", attributes={"mode": "sync"})
+        self._create_replica_table("//tmp/r", replica_id)
+        sync_enable_table_replica(replica_id)
+
+        rows = [{"key": 0, "value1": "test", "value2": 42}]
+        keys = [{"key": 0}]
+
+        create_user("u")
+        create_user("u", driver=self.replica_driver)
+        set("//tmp/r/@inherit_acl", False, driver=self.replica_driver)
+
+        with pytest.raises(YtError) as ex:
+            insert_rows("//tmp/t", rows, authenticated_user="u")
+
+        error = ex.value.find_matching_error(predicate=lambda e: '"write" permission is not allowed by any matching ACE' in e.message)
+        assert error.attributes.get("replica_cluster") == self.REPLICA_CLUSTER_NAME
+        assert error.attributes.get("replica_path") == "//tmp/r"
+
+        with pytest.raises(YtError) as ex:
+            delete_rows("//tmp/t", keys, authenticated_user="u")
+
+        error = ex.value.find_matching_error(predicate=lambda e: '"write" permission is not allowed by any matching ACE' in e.message)
+        assert error.attributes.get("replica_cluster") == self.REPLICA_CLUSTER_NAME
+        assert error.attributes.get("replica_path") == "//tmp/r"
 
     @authors("suboch")
     def test_not_allowed_lookup_from_sync_replica(self):
@@ -4003,12 +4078,13 @@ class TestErasureReplicatedDynamicTables(TestReplicatedDynamicTablesBase):
 class TestReplicatedWriteRetries(WriteRetriesBase, TestReplicatedDynamicTablesBase):
     NUM_REMOTE_CLUSTERS = 1
 
-    def _prepare_test(self, path, failure_probability, retry_count):
+    def _prepare_test(self, path, failure_probability, retry_count, cell_count=4):
         replica_path = f"{path}_replica"
 
         self._configure_retries(failure_probability, retry_count)
 
-        [primary_cells, replica_cells] = self._create_cells(cell_count=4)
+        self.cell_count = cell_count
+        [primary_cells, replica_cells] = self._create_cells(cell_count=cell_count)
         schema = [
             {"name": "key", "type": "int64", "sort_order": "ascending"},
             {"name": "value", "type": "int64"},
@@ -4051,5 +4127,8 @@ class TestReplicatedWriteRetries(WriteRetriesBase, TestReplicatedDynamicTablesBa
 
     def _verify_rows(self, path, rows):
         replica_path = f"{path}_replica"
-        assert lookup_rows(path, [{"key": 10 * i + 1} for i in range(4)]) == rows
-        assert lookup_rows(replica_path, [{"key": 10 * i + 1} for i in range(4)], driver=self.replica_driver) == rows
+        assert lookup_rows(path, [{"key": 10 * i + 1} for i in range(self.cell_count)]) == rows
+        assert lookup_rows(
+            replica_path,
+            [{"key": 10 * i + 1} for i in range(self.cell_count)],
+            driver=self.replica_driver) == rows

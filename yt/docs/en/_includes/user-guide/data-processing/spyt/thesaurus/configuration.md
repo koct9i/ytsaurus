@@ -16,10 +16,11 @@ Most of the options are available starting with version 1.23.0, unless otherwis
 | `spark.yt.write.typeV3.enabled` (`spark.yt.write.writingTypeV3.enabled` before 1.75.2) | `true` | Writing of tables with a schema in [type_v3](../../../../../user-guide/storage/data-types.md) format instead of `type_v1`. | 1.75.3 |
 | `spark.yt.read.vectorized.capacity` | `1000` | Maximum number of rows in a batch for reading via the `wire` protocol. | - |
 | `spark.yt.read.arrow.enabled` | `true` | Use the `arrow` format to read data (if possible). | - |
-| `spark.hadoop.yt.timeout` | `300 seconds` | Timeout on reads from {{product-name}}. | - |
+| `spark.hadoop.yt.timeout` | `30 seconds` | Timeout on reads from {{product-name}}. | - |
 | `spark.yt.read.typeV3.enabled` (`spark.yt.read.parsingTypeV3.enabled` before 1.75.2) | `true` | Reading of tables with a schema in [type_v3](../../../../../user-guide/storage/data-types.md) format instead of `type_v1`. | 1.75.3 |
 | `spark.yt.read.keyColumnsFilterPushdown.enabled` | `true` | Use Spark query filters to selectively read from {{product-name}}. | - |
 | `spark.yt.read.keyColumnsFilterPushdown.union.enabled` | `false` | Combine all filters into a continuous range for selective reading. | - |
+| `spark.yt.read.keyColumnsFilterPushdown.mergeAdjacent.enabled` | `false` | Merge ranges over consecutive integer key values into a single range. | 2.12.0 |
 | `spark.yt.read.keyColumnsFilterPushdown.ytPathCount.limit` | `100` | Maximum number of table ranges for selective reading. | - |
 | `spark.yt.transaction.timeout` | `5 minutes` | Write operation transaction timeout. | - |
 | `spark.yt.transaction.pingInterval` | `30 seconds` | Pinging interval of a write operation transaction. | - |
@@ -30,7 +31,7 @@ Most of the options are available starting with version 1.23.0, unless otherwis
 | `spark.hadoop.yt.user` | - | {{product-name}} user name. | - |
 | `spark.hadoop.yt.token` | - | {{product-name}} user token. | - |
 | `spark.yt.read.ytPartitioning.enabled` | `true` | Use table partitioning by {{product-name}}. | 1.72.0 |
-| `spark.yt.read.ytPartitioning.compressedSize.enabled` | `false` | Enable data partitioning when reading by the compressed size of the table. | 2.9.1 | - |
+| `spark.yt.read.ytPartitioning.compressedSize.enabled` | `false` | Enable data partitioning when reading by the compressed size of the table. | 2.9.1 |
 | `spark.yt.read.planOptimization.enabled` | `false` | Optimize aggregations and joins on sorted input data. | - |
 | `spark.yt.read.countOptimization.enabled` | `true` | Use metadata for count() operations. | - |
 | `spark.yt.read.keyPartitioningSortedTables.enabled` | `true` | Use sorted table partitioning by key, required to optimize plans. | - |
@@ -41,11 +42,15 @@ Most of the options are available starting with version 1.23.0, unless otherwis
 | `spark.yt.write.distributed.enabled` | `false` | Use distributed API for writing data to {{product-name}}. This method reduces the number of requests to the {{product-name}} master when writing data, but is only applicable to working with static tables. | 2.8.0 |
 | `spark.yt.read.ytOmitInaccessibleRows.enabled` | `true` | Skip inaccessible rows instead of throwing an error. | 2.9.0 |
 | `spark.yt.read.ytOmitInaccessibleColumns.enabled` | `true` | Skip inaccessible columns instead of throwing an error. | 2.9.0 |
+| `spark.ytsaurus.throttling.maxConcurrency` | `100` | Maximum number of concurrent operations in {{product-name}}. A value of `0` removes the limit. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.requests.enabled` | `true` | Retry requests rejected by an overloaded proxy. Applies to clients with a fixed proxy address, including job proxy: clients with proxy discovery retry requests even without this option. Retries responses with the `RequestQueueSizeLimitExceeded`, `RpcRequestQueueSizeLimitExceeded` and `TooManyRequests` codes, as well as network timeouts and connection drops (the latter are retried without a pause). Only unary requests are retried: data reading and writing are stream‑based and are not retried. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.maxRetries` | `3` | Number of times a request is retried after the first failed attempt. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.initialBackoff` | `3 seconds` | Pause before the first retry. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.maxBackoff` | `30 seconds` | Upper limit of the pause, which doubles after each retry. Applies only to the `RequestQueueSizeLimitExceeded` code; other cases are retried using `initialBackoff`. | 2.11.0 |
 
 {wide-content title="Basic options"}
 
 ## Options for launching tasks directly { #direct-submit }
-
 
 | **Parameter** | **Default value** | **Description** | **Starting with version** |
 | ------------ | ------------------------- | ------------ | ------------------ |

@@ -574,6 +574,7 @@ class TestSequoiaInternals(YTEnvSetup):
             get_batch_output(results[1])
 
     @authors("h0pless")
+    @pytest.mark.skip("TODO(h0pless): YT-28786")
     @flaky(max_runs=3)
     @with_additional_threads
     def test_request_throttling(self):
@@ -3180,6 +3181,17 @@ class TestSequoiaClusterDirectoryInitialization(YTEnvSetup):
         # From this point requests to Cypress should work as usual.
 
         self.Env.synchronize()
+
+        def check_path(path):
+            def do_check_path():
+                set(path + "/@my_attr", 1)
+                return True
+
+            return do_check_path
+
+        # Ensure that all of cells are started (they were restarted with sync=False).
+        wait(check_path("/"), ignore_exceptions=True)
+        wait(check_path("//tmp"), ignore_exceptions=True)
 
         # Just check that Sequoia resolve works.
         assert get("//tmp/m/@acl")[0]["subjects"] == ["u-1"]

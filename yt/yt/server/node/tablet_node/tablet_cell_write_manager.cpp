@@ -99,7 +99,7 @@ public:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::TestingFailureBeforeWrite,
                 "Test error before write call execution")
-                << TErrorAttribute("tablet_id", tabletSnapshot->TabletId);
+                .With("tablet_id", tabletSnapshot->TabletId);
         }
 
         const auto& identity = NRpc::GetCurrentAuthenticationIdentity();
@@ -133,21 +133,41 @@ public:
 
         tabletSnapshot->TabletRuntimeData->ModificationTime = NProfiling::GetInstant();
 
-        auto actualizeTablet = [&] {
-            tablet = Host_->GetTabletOrThrow(tabletSnapshot->TabletId);
+        auto actualizeTablet = [&] (bool retryable) {
+            if (tablet = Host_->FindTablet(tabletSnapshot->TabletId); !tablet) {
+                THROW_ERROR_EXCEPTION(
+                    NTabletClient::EErrorCode::NoSuchTablet,
+                    "No such tablet %v",
+                    tabletSnapshot->TabletId)
+                    .With("tablet_id", tabletSnapshot->TabletId)
+                    .With("retryable", retryable);
+            }
+
             tablet->ValidateMountRevision(tabletSnapshot->MountRevision);
             ValidateTabletMounted(tablet);
         };
 
-        actualizeTablet();
+        tabletSnapshot->ValidateServantIsActive(Host_->GetCellDirectory(), /*waitForActivation*/ false)
+            .ThrowOnError();
+        actualizeTablet(/*retryable*/ true);
+
+        if (!tablet->SmoothMovementData().IsWriteToTabletAllowed()) {
+            WaitUntilServantIsWritable(
+                tablet,
+                Host_->GetCellDirectory(),
+                Host_->GetDynamicConfig()->TabletManager->WaitOnReadOnlySmoothMovementStageTimeout);
+            actualizeTablet(/*retryable*/ true);
+            tablet->ValidateServantIsWritable(Host_->GetCellDirectory(), /*retryable*/ true)
+                .ThrowOnError();
+        }
 
         if (atomicity == EAtomicity::Full) {
             const auto& lockManager = tablet->GetLockManager();
             auto error = lockManager->ValidateTransactionConflict(params.TransactionStartTimestamp);
             if (!error.IsOK()) {
                 THROW_ERROR error
-                    << TErrorAttribute("tablet_id", tablet->GetId())
-                    << TErrorAttribute("transaction_id", params.TransactionId);
+                    .With("tablet_id", tablet->GetId())
+                    .With("transaction_id", params.TransactionId);
             }
         }
 
@@ -180,7 +200,7 @@ public:
             // NB: No yielding beyond this point.
             // May access tablet and transaction.
 
-            actualizeTablet();
+            actualizeTablet(/*retryable*/ false);
 
             ValidateTabletStoreLimit(tablet);
 
@@ -190,8 +210,10 @@ public:
             Host_->ValidateMemoryLimit(poolTag);
             ValidateWriteBarrier(replicatorWrite, tablet);
 
+            tablet->ValidateServantIsWritable(Host_->GetCellDirectory())
+                .ThrowOnError();
+
             auto tabletId = tablet->GetId();
-            tablet->SmoothMovementData().ValidateWriteToTablet(tabletId);
 
             TTransaction* transaction = nullptr;
             bool updateReplicationProgress = false;
@@ -221,12 +243,11 @@ public:
                     // while the second one is trickier. It happens in the case when next generation arrived while our
                     // fiber was waiting on the blocked row. In both cases we are not going to enqueue any more mutations
                     // in order to ensure monotonicity of mutation generations which is an important invariant.
-                    YT_LOG_DEBUG(
-                        "Stopping obsolete generation write (TabletId: %v, TransactionId: %v, Generation: %x, TransientGeneration: %x)",
-                        tabletId,
-                        params.TransactionId,
-                        params.Generation,
-                        transaction->GetTransientGeneration());
+                    YT_TLOG_DEBUG("Stopping obsolete generation write")
+                        .With("TabletId", tabletId)
+                        .With("TransactionId", params.TransactionId)
+                        .WithFormat("Generation", "%x", params.Generation)
+                        .WithFormat("TransientGeneration", "%x", transaction->GetTransientGeneration());
                     // Client already decided to go on with the next generation of rows, so we are ok to even ignore
                     // possible commit errors. Note that the result of this particular write does not affect the outcome of the
                     // transaction any more, so we are safe to lose some of freshly enqueued mutations.
@@ -275,20 +296,20 @@ public:
                 }
             }
 
-            YT_LOG_DEBUG_IF(context.RowCount > 0, "Rows written "
-                "(TransactionId: %v, TabletId: %v, RowCount: %v, Lockless: %v, "
-                "Generation: %x, PrepareSignature: %x, CommitSignature: %x)",
-                params.TransactionId,
-                tabletId,
-                context.RowCount,
-                lockless,
-                params.Generation,
-                mutationPrepareSignature,
-                mutationCommitSignature);
+            YT_TLOG_DEBUG_IF(context.RowCount > 0, "Rows written")
+                .With("TransactionId", params.TransactionId)
+                .With("TabletId", tabletId)
+                .With("RowCount", context.RowCount)
+                .With("Lockless", lockless)
+                .WithFormat("Generation", "%x", params.Generation)
+                .WithFormat("PrepareSignature", "%x", mutationPrepareSignature)
+                .WithFormat("CommitSignature", "%x", mutationCommitSignature);
 
             if (atomicity == EAtomicity::Full) {
                 transaction->TransientPrepareSignature() += mutationPrepareSignature;
             }
+
+            auto tableProfiler = tablet->GetTableProfiler();
 
             if (!reader->IsBatchEmpty()) {
                 auto writeCommandBatch = reader->FinishBatch();
@@ -308,7 +329,7 @@ public:
 
                 TReqWriteRows hydraRequest;
                 ToProto(hydraRequest.mutable_transaction_id(), params.TransactionId);
-                hydraRequest.set_transaction_start_timestamp(params.TransactionStartTimestamp);
+                hydraRequest.set_transaction_start_timestamp(ToProto(params.TransactionStartTimestamp));
                 hydraRequest.set_transaction_timeout(ToProto(params.TransactionTimeout));
                 ToProto(hydraRequest.mutable_tablet_id(), tabletId);
                 hydraRequest.set_mount_revision(ToProto(tablet->GetMountRevision()));
@@ -348,7 +369,7 @@ public:
                 mutation->SetCurrentTraceContext();
                 commitResult = mutation->Commit().As<void>();
 
-                auto counters = tablet->GetTableProfiler()->GetWriteCounters(GetCurrentProfilingUser());
+                auto counters = tableProfiler->GetWriteCounters(GetCurrentProfilingUser());
                 counters->RowCount.Increment(writeRecord.RowCount);
                 counters->DataWeight.Increment(writeRecord.DataWeight);
             }
@@ -361,8 +382,7 @@ public:
                     context.BlockedLockMask,
                     context.BlockedTimestamp);
 
-                tablet
-                    ->GetTableProfiler()
+                tableProfiler
                     ->GetWriteCounters(GetCurrentProfilingUser())
                     ->WaitOnBlockedRowDuration
                     .Record(waitOnBlockedRowDuration);
@@ -375,7 +395,7 @@ public:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::TestingFailureAfterWrite,
                 "Test error after write call execution")
-                << TErrorAttribute("tablet_id", tabletSnapshot->TabletId);
+                .With("tablet_id", tabletSnapshot->TabletId);
         }
 
         return commitResult;
@@ -451,12 +471,11 @@ private:
         IncrementTabletInFlightMutationCount(tablet, replicatorWrite, -1);
 
         if (mountRevision != tablet->GetMountRevision()) {
-            YT_LOG_DEBUG("Mount revision mismatch; write ignored "
-                "(%v, TransactionId: %v, MutationMountRevision: %x, CurrentMountRevision: %x)",
-                tablet->GetLoggingTag(),
-                transactionId,
-                mountRevision,
-                tablet->GetMountRevision());
+            YT_TLOG_DEBUG("Mount revision mismatch; write ignored")
+                .With(tablet->GetLoggingTags())
+                .With("TransactionId", transactionId)
+                .WithFormat("MutationMountRevision", "%x", mountRevision)
+                .WithFormat("CurrentMountRevision", "%x", tablet->GetMountRevision());
             return;
         }
 
@@ -472,11 +491,10 @@ private:
             }
 
             if (!lostHunkStoreIds.empty()) {
-                YT_LOG_ALERT("Hunk store locks are lost; write ignored "
-                    "(%v, TransactionId: %v, HunkStoreIds: %v)",
-                    tablet->GetLoggingTag(),
-                    transactionId,
-                    lostHunkStoreIds);
+                YT_TLOG_ALERT("Hunk store locks are lost; write ignored")
+                    .With(tablet->GetLoggingTags())
+                    .With("TransactionId", transactionId)
+                    .With("HunkStoreIds", lostHunkStoreIds);
                 return;
             }
         }
@@ -489,9 +507,10 @@ private:
                     // NB: May throw if tablet cell is decommissioned or suspended.
                     transaction = transactionManager->MakeTransactionPersistentOrThrow(transactionId);
                 } catch (const std::exception& ex) {
-                    YT_LOG_DEBUG(ex, "Failed to make transaction persistent (TabletId: %v, TransactionId: %v)",
-                        writeRecord.TabletId,
-                        transactionId);
+                    YT_TLOG_DEBUG("Failed to make transaction persistent")
+                        .With("TabletId", writeRecord.TabletId)
+                        .With("TransactionId", transactionId)
+                        .With(ex);
                     return;
                 }
 
@@ -499,15 +518,13 @@ private:
 
                 AddPersistentLeases(transaction, prerequisiteTransactionIds);
 
-                YT_LOG_DEBUG(
-                    "Performing atomic write as leader (TabletId: %v, TransactionId: %v, BatchGeneration: %x, "
-                    "TransientGeneration: %x, PersistentGeneration: %x, PrerequisiteTransactionIds: %v)",
-                    writeRecord.TabletId,
-                    transactionId,
-                    generation,
-                    transaction->GetTransientGeneration(),
-                    transaction->GetPersistentGeneration(),
-                    prerequisiteTransactionIds);
+                YT_TLOG_DEBUG("Performing atomic write as leader")
+                    .With("TabletId", writeRecord.TabletId)
+                    .With("TransactionId", transactionId)
+                    .WithFormat("BatchGeneration", "%x", generation)
+                    .WithFormat("TransientGeneration", "%x", transaction->GetTransientGeneration())
+                    .WithFormat("PersistentGeneration", "%x", transaction->GetPersistentGeneration())
+                    .With("PrerequisiteTransactionIds", prerequisiteTransactionIds);
 
                 // Monotonicity of persistent generations is ensured by the early finish in #Write whenever the
                 // current batch is obsolete.
@@ -537,7 +554,7 @@ private:
             case EAtomicity::None: {
                 const auto& transactionManager = Host_->GetTransactionManager();
                 if (transactionManager->GetDecommission()) {
-                    YT_LOG_DEBUG("Tablet cell is decommissioning, skip non-atomic write");
+                    YT_TLOG_DEBUG("Tablet cell is decommissioning, skip non-atomic write");
                     return;
                 }
 
@@ -545,10 +562,9 @@ private:
                 YT_VERIFY(generation == InitialTransactionGeneration);
 
                 if (tablet->GetState() == ETabletState::Orphaned) {
-                    YT_LOG_DEBUG("Tablet is orphaned; non-atomic write ignored "
-                        "(%v, TransactionId: %v)",
-                        tablet->GetLoggingTag(),
-                        transactionId);
+                    YT_TLOG_DEBUG("Tablet is orphaned; non-atomic write ignored")
+                        .With(tablet->GetLoggingTags())
+                        .With("TransactionId", transactionId);
                     return;
                 }
 
@@ -579,7 +595,7 @@ private:
     {
         auto transactionId = FromProto<TTransactionId>(request->transaction_id());
         auto atomicity = AtomicityFromTransactionId(transactionId);
-        auto transactionStartTimestamp = request->transaction_start_timestamp();
+        auto transactionStartTimestamp = FromProto<NTransactionClient::TTimestamp>(request->transaction_start_timestamp());
         auto transactionTimeout = FromProto<TDuration>(request->transaction_timeout());
         auto prepareSignature = request->prepare_signature();
         // COMPAT(gritukan)
@@ -664,9 +680,10 @@ private:
                         false,
                         transactionExternalizationToken);
                 } catch (const std::exception& ex) {
-                    YT_LOG_DEBUG(ex, "Failed to create transaction (TransactionId: %v, TabletId: %v)",
-                        FormatTransactionId(transactionId, transactionExternalizationToken),
-                        tabletId);
+                    YT_TLOG_DEBUG("Failed to create transaction")
+                        .With("TransactionId", FormatTransactionId(transactionId, transactionExternalizationToken))
+                        .With("TabletId", tabletId)
+                        .With(ex);
                     return;
                 }
 
@@ -678,14 +695,12 @@ private:
                     AddPersistentLeases(transaction, prerequisiteTransactionIds);
                 }
 
-                YT_LOG_DEBUG(
-                    "Performing atomic write as follower (TabletId: %v, TransactionId: %v, "
-                    "BatchGeneration: %x, PersistentGeneration: %x, PrerequisiteTransactionIds: %v)",
-                    tabletId,
-                    FormatTransactionId(transactionId, transactionExternalizationToken),
-                    generation,
-                    transaction->GetPersistentGeneration(),
-                    prerequisiteTransactionIds);
+                YT_TLOG_DEBUG("Performing atomic write as follower")
+                    .With("TabletId", tabletId)
+                    .With("TransactionId", FormatTransactionId(transactionId, transactionExternalizationToken))
+                    .WithFormat("BatchGeneration", "%x", generation)
+                    .WithFormat("PersistentGeneration", "%x", transaction->GetPersistentGeneration())
+                    .With("PrerequisiteTransactionIds", prerequisiteTransactionIds);
 
                 // This invariant holds during recovery.
                 YT_VERIFY(transaction->GetPersistentGeneration() == transaction->GetTransientGeneration());
@@ -719,7 +734,7 @@ private:
             case EAtomicity::None: {
                 const auto& transactionManager = Host_->GetTransactionManager();
                 if (transactionManager->GetDecommission()) {
-                    YT_LOG_DEBUG("Tablet cell is decommissioning, skip non-atomic write");
+                    YT_TLOG_DEBUG("Tablet cell is decommissioning, skip non-atomic write");
                     return;
                 }
 
@@ -748,9 +763,9 @@ private:
         TTransactionId transactionId,
         TReqWriteRows request)
     {
-        YT_LOG_DEBUG("Forwarding writes to sibling servant (%v, TransactionId: %v)",
-            tablet->GetLoggingTag(),
-            transactionId);
+        YT_TLOG_DEBUG("Forwarding writes to sibling servant")
+            .With(tablet->GetLoggingTags())
+            .With("TransactionId", transactionId);
 
         TTransactionExternalizationToken token(tablet->SmoothMovementData().GetSiblingAvenueEndpointId());
         auto atomicity = AtomicityFromTransactionId(transactionId);
@@ -795,23 +810,19 @@ private:
         auto* tablet = Host_->FindTablet(tabletId);
         if (!tablet) {
             // NB: Tablet could be missing if it was, e.g., forcefully removed.
-            YT_LOG_DEBUG(
-                "Received delayed rows for nonexistent tablet; ignored "
-                "(TabletId: %v, TransactionId: %v)",
-                tabletId,
-                transactionId);
+            YT_TLOG_DEBUG("Received delayed rows for nonexistent tablet; ignored")
+                .With("TabletId", tabletId)
+                .With("TransactionId", transactionId);
             return;
         }
 
         auto mountRevision = FromProto<NHydra::TRevision>(request->mount_revision());
         if (tablet->GetMountRevision() != mountRevision) {
-            YT_LOG_DEBUG(
-                "Received delayed rows with invalid mount revision; ignored "
-                "(TabletId: %v, TransactionId: %v, TabletMountRevision: %x, RequestMountRevision: %x)",
-                tabletId,
-                transactionId,
-                tablet->GetMountRevision(),
-                mountRevision);
+            YT_TLOG_DEBUG("Received delayed rows with invalid mount revision; ignored")
+                .With("TabletId", tabletId)
+                .With("TransactionId", transactionId)
+                .WithFormat("TabletMountRevision", "%x", tablet->GetMountRevision())
+                .WithFormat("RequestMountRevision", "%x", mountRevision);
             return;
         }
 
@@ -851,24 +862,21 @@ private:
         auto* transaction = transactionManager->FindPersistentTransaction(transactionId);
 
         if (!transaction) {
-            YT_LOG_ALERT(
-                "Delayed rows sent for absent transaction, ignored "
-                "(TransactionId: %v, TabletId: %v, RowCount: %v, DataWeight: %v, CommitSignature: %x)",
-                transactionId,
-                tablet->GetId(),
-                rowCount,
-                dataWeight,
-                commitSignature);
+            YT_TLOG_ALERT("Delayed rows sent for absent transaction, ignored")
+                .With("TransactionId", transactionId)
+                .With("TabletId", tablet->GetId())
+                .With("RowCount", rowCount)
+                .With("DataWeight", dataWeight)
+                .WithFormat("CommitSignature", "%x", commitSignature);
             return;
         }
 
-        YT_LOG_DEBUG(
-            "Writing transaction delayed rows (TabletId: %v, TransactionId: %v, RowCount: %v, Lockless: %v, CommitSignature: %x)",
-            tablet->GetId(),
-            transaction->GetId(),
-            writeRecord.RowCount,
-            lockless,
-            commitSignature);
+        YT_TLOG_DEBUG("Writing transaction delayed rows")
+            .With("TabletId", tablet->GetId())
+            .With("TransactionId", transaction->GetId())
+            .With("RowCount", writeRecord.RowCount)
+            .With("Lockless", lockless)
+            .WithFormat("CommitSignature", "%x", commitSignature);
 
         auto tabletWriteManager = tablet->GetTabletWriteManager();
         tabletWriteManager->WriteDelayedRows(transaction, writeRecord, lockless);
@@ -1016,10 +1024,9 @@ private:
         for (auto* tablet : affectedTablets) {
             const auto& tabletWriteManager = tablet->GetTabletWriteManager();
             if (tabletWriteManager->HasWriteState(transaction)) {
-                YT_LOG_ALERT("Tablet still has transation write state on transaction finish "
-                    "(%v, TransactionId: %v)",
-                    tablet->GetLoggingTag(),
-                    transaction->GetId());
+                YT_TLOG_ALERT("Tablet still has transation write state on transaction finish")
+                    .With(tablet->GetLoggingTags())
+                    .With("TransactionId", transaction->GetId());
             }
         }
 #endif
@@ -1032,11 +1039,9 @@ private:
     {
         // This method may be called either with or without a mutation context.
 
-        YT_LOG_DEBUG(
-            "Promoting transaction transient generation (TransactionId: %v, TransientGeneration: %x -> %x)",
-            transaction->GetId(),
-            transaction->GetTransientGeneration(),
-            generation);
+        YT_TLOG_DEBUG("Promoting transaction transient generation")
+            .With("TransactionId", transaction->GetId())
+            .WithFormat("TransientGeneration", "%x -> %x", transaction->GetTransientGeneration(), generation);
 
         transaction->SetTransientGeneration(generation);
         transaction->TransientPrepareSignature() = InitialTransactionSignature;
@@ -1058,11 +1063,9 @@ private:
     {
         YT_VERIFY(HasMutationContext());
 
-        YT_LOG_DEBUG(
-            "Promoting transaction persistent generation (TransactionId: %v, PersistentGeneration: %x -> %x)",
-            transaction->GetId(),
-            transaction->GetPersistentGeneration(),
-            generation);
+        YT_TLOG_DEBUG("Promoting transaction persistent generation")
+            .With("TransactionId", transaction->GetId())
+            .WithFormat("PersistentGeneration", "%x -> %x", transaction->GetPersistentGeneration(), generation);
 
         transaction->SetPersistentGeneration(generation);
         transaction->PersistentPrepareSignature() = InitialTransactionSignature;
@@ -1102,8 +1105,8 @@ private:
             clientInstant < serverInstant - clientTimestampThreshold)
         {
             THROW_ERROR_EXCEPTION("Transaction timestamp is off limits, check the local clock readings")
-            << TErrorAttribute("client_timestamp", clientTimestamp)
-            << TErrorAttribute("server_timestamp", serverTimestamp);
+            .With("client_timestamp", clientTimestamp)
+            .With("server_timestamp", serverTimestamp);
         }
     }
 
@@ -1116,10 +1119,10 @@ private:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::AllWritesDisabled,
                 "Too many stores in tablet, all writes disabled")
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("table_path", tablet->GetTablePath())
-                << TErrorAttribute("store_count", storeCount)
-                << TErrorAttribute("store_limit", storeLimit);
+                .With("tablet_id", tablet->GetId())
+                .With("table_path", tablet->GetTablePath())
+                .With("store_count", storeCount)
+                .With("store_limit", storeLimit);
         }
 
         auto overlappingStoreCount = tablet->GetOverlappingStoreCount();
@@ -1128,10 +1131,10 @@ private:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::AllWritesDisabled,
                 "Too many overlapping stores in tablet, all writes disabled")
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("table_path", tablet->GetTablePath())
-                << TErrorAttribute("overlapping_store_count", overlappingStoreCount)
-                << TErrorAttribute("overlapping_store_limit", overlappingStoreLimit);
+                .With("tablet_id", tablet->GetId())
+                .With("table_path", tablet->GetTablePath())
+                .With("overlapping_store_count", overlappingStoreCount)
+                .With("overlapping_store_limit", overlappingStoreLimit);
         }
 
         auto edenStoreCount = tablet->GetEdenStoreCount();
@@ -1140,10 +1143,10 @@ private:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::AllWritesDisabled,
                 "Too many eden stores in tablet, all writes disabled")
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("table_path", tablet->GetTablePath())
-                << TErrorAttribute("eden_store_count", edenStoreCount)
-                << TErrorAttribute("eden_store_limit", edenStoreCountLimit);
+                .With("tablet_id", tablet->GetId())
+                .With("table_path", tablet->GetTablePath())
+                .With("eden_store_count", edenStoreCount)
+                .With("eden_store_limit", edenStoreCountLimit);
         }
 
         auto dynamicStoreCount = tablet->GetDynamicStoreCount();
@@ -1151,10 +1154,10 @@ private:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::AllWritesDisabled,
                 "Too many dynamic stores in tablet, all writes disabled")
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("table_path", tablet->GetTablePath())
-                << TErrorAttribute("dynamic_store_count", dynamicStoreCount)
-                << TErrorAttribute("dynamic_store_count_limit", DynamicStoreCountLimit);
+                .With("tablet_id", tablet->GetId())
+                .With("table_path", tablet->GetTablePath())
+                .With("dynamic_store_count", dynamicStoreCount)
+                .With("dynamic_store_count_limit", DynamicStoreCountLimit);
         }
 
         auto overflow = tablet->GetStoreManager()->CheckOverflow();
@@ -1162,9 +1165,9 @@ private:
             THROW_ERROR_EXCEPTION(
                 NTabletClient::EErrorCode::AllWritesDisabled,
                 "Active store is overflown, all writes disabled")
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("table_path", tablet->GetTablePath())
-                << overflow;
+                .With("tablet_id", tablet->GetId())
+                .With("table_path", tablet->GetTablePath())
+                .With(overflow);
         }
 
         if (tablet->IsPhysicallyOrdered()) {
@@ -1175,8 +1178,8 @@ private:
                 THROW_ERROR_EXCEPTION(NTabletClient::EErrorCode::RequestThrottled,
                     "Size of tablet %v exceeds the limit, all writes disabled",
                     tablet->GetId())
-                    << TErrorAttribute("data_weight", tabletDataWeight)
-                    << TErrorAttribute("data_weight_limit", *maxOrderedTabletDataWeight);
+                    .With("data_weight", tabletDataWeight)
+                    .With("data_weight_limit", *maxOrderedTabletDataWeight);
             }
         }
     }
@@ -1207,34 +1210,34 @@ private:
                 THROW_ERROR_EXCEPTION(
                     NTabletClient::EErrorCode::ReplicatorWriteBlockedByUser,
                     "Tablet cannot accept replicator writes since some user mutations are still in flight")
-                    << TErrorAttribute("tablet_id", tablet->GetId())
-                    << TErrorAttribute("table_path", tablet->GetTablePath())
-                    << TErrorAttribute("in_flight_mutation_count", tablet->GetInFlightUserMutationCount());
+                    .With("tablet_id", tablet->GetId())
+                    .With("table_path", tablet->GetTablePath())
+                    .With("in_flight_mutation_count", tablet->GetInFlightUserMutationCount());
             }
             if (tablet->GetPendingUserWriteRecordCount() > 0) {
                 THROW_ERROR_EXCEPTION(
                     NTabletClient::EErrorCode::ReplicatorWriteBlockedByUser,
                     "Tablet cannot accept replicator writes since some user writes are still pending")
-                    << TErrorAttribute("tablet_id", tablet->GetId())
-                    << TErrorAttribute("table_path", tablet->GetTablePath())
-                    << TErrorAttribute("pending_write_record_count", tablet->GetPendingUserWriteRecordCount());
+                    .With("tablet_id", tablet->GetId())
+                    .With("table_path", tablet->GetTablePath())
+                    .With("pending_write_record_count", tablet->GetPendingUserWriteRecordCount());
             }
         } else {
             if (tablet->GetInFlightReplicatorMutationCount() > 0) {
                 THROW_ERROR_EXCEPTION(
                     NTabletClient::EErrorCode::UserWriteBlockedByReplicator,
                     "Tablet cannot accept user writes since some replicator mutations are still in flight")
-                    << TErrorAttribute("tablet_id", tablet->GetId())
-                    << TErrorAttribute("table_path", tablet->GetTablePath())
-                    << TErrorAttribute("in_flight_mutation_count", tablet->GetInFlightReplicatorMutationCount());
+                    .With("tablet_id", tablet->GetId())
+                    .With("table_path", tablet->GetTablePath())
+                    .With("in_flight_mutation_count", tablet->GetInFlightReplicatorMutationCount());
             }
             if (tablet->GetPendingReplicatorWriteRecordCount() > 0) {
                 THROW_ERROR_EXCEPTION(
                     NTabletClient::EErrorCode::UserWriteBlockedByReplicator,
                     "Tablet cannot accept user writes since some replicator writes are still pending")
-                    << TErrorAttribute("tablet_id", tablet->GetId())
-                    << TErrorAttribute("table_path", tablet->GetTablePath())
-                    << TErrorAttribute("pending_write_record_count", tablet->GetPendingReplicatorWriteRecordCount());
+                    .With("tablet_id", tablet->GetId())
+                    .With("table_path", tablet->GetTablePath())
+                    .With("pending_write_record_count", tablet->GetPendingReplicatorWriteRecordCount());
             }
         }
     }
@@ -1265,11 +1268,10 @@ private:
         auto tabletId = tablet->GetId();
         if (transaction->TransientAffectedTabletIds().emplace(tabletId).second) {
             auto lockCount = LockTablet(tablet, ETabletLockType::TransientTransaction);
-            YT_LOG_DEBUG(
-                "Transaction transiently affects tablet (TransactionId: %v, TabletId: %v, LockCount: %v)",
-                transaction->GetId(),
-                tablet->GetId(),
-                lockCount);
+            YT_TLOG_DEBUG("Transaction transiently affects tablet")
+                .With("TransactionId", transaction->GetId())
+                .With("TabletId", tablet->GetId())
+                .With("LockCount", lockCount);
         }
     }
 
@@ -1282,11 +1284,10 @@ private:
         auto tabletId = tablet->GetId();
         if (transaction->PersistentAffectedTabletIds().emplace(tabletId).second) {
             auto lockCount = LockTablet(tablet, ETabletLockType::PersistentTransaction);
-            YT_LOG_DEBUG(
-                "Transaction persistently affects tablet (TransactionId: %v, TabletId: %v, LockCount: %v)",
-                transaction->GetId(),
-                tablet->GetId(),
-                lockCount);
+            YT_TLOG_DEBUG("Transaction persistently affects tablet")
+                .With("TransactionId", transaction->GetId())
+                .With("TabletId", tablet->GetId())
+                .With("LockCount", lockCount);
         }
     }
 

@@ -68,6 +68,8 @@ struct IJobHost
 
     virtual void SetUserJobMemoryUsage(i64 memoryUsage) = 0;
 
+    virtual bool UpdateOomScoreAdj(pid_t pid, int* mutableExpectedScoreAdj, int desiredScoreAdj) = 0;
+
     virtual void ReleaseNetwork() = 0;
 
     virtual std::string GetAuthenticatedUser() const = 0;
@@ -106,6 +108,7 @@ struct IJobHost
     virtual std::string GetJobProxyHttpUnixDomainSocketPath() const = 0;
 
     virtual NChunkClient::TTrafficMeterPtr GetTrafficMeter() const = 0;
+    virtual NChunkClient::TJobIoMeterPtr GetJobIoMeter() const = 0;
 
     virtual NConcurrency::IThroughputThrottlerPtr GetInBandwidthThrottler(const NScheduler::TClusterName& clusterName) const = 0;
     virtual NConcurrency::IThroughputThrottlerPtr GetOutBandwidthThrottler() const = 0;

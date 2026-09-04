@@ -131,6 +131,7 @@ public:
                 Bootstrap_->GetRpcServer(),
                 electionManagerThunk,
                 Bootstrap_->GetCellManager()->GetCellId(),
+                Bootstrap_->GetCellManager()->GetTotalPeerCount(),
                 Bootstrap_->GetChangelogStoreFactory(),
                 Bootstrap_->GetSnapshotStore(),
                 Bootstrap_->GetNativeAuthenticator(),
@@ -247,7 +248,7 @@ public:
         YT_ASSERT(!AutomatonBlocked_);
         AutomatonBlocked_ = true;
 
-        YT_LOG_TRACE("Automaton thread blocked");
+        YT_TLOG_TRACE("Automaton thread blocked");
     }
 
     void UnblockAutomaton() override
@@ -257,7 +258,7 @@ public:
         YT_ASSERT(AutomatonBlocked_);
         AutomatonBlocked_ = false;
 
-        YT_LOG_TRACE("Automaton thread unblocked");
+        YT_TLOG_TRACE("Automaton thread unblocked");
     }
 
     bool IsAutomatonLocked() override
@@ -319,7 +320,7 @@ public:
                     replyCallback = std::move(replyCallback)
                 ] (TErrorOr<TAsyncSemaphoreGuard>&& guardOrError) {
                     if (!guardOrError.IsOK()) {
-                        context->Reply(TError("Failed to acquire semaphore") << guardOrError);
+                        context->Reply(TError("Failed to acquire semaphore").With(guardOrError));
                         return;
                     }
 

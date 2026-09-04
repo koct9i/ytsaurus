@@ -62,22 +62,50 @@ TNbdSession::TNbdSession(
 
 TFuture<TBlock> TNbdSession::Read(i64 offset, i64 length, ui64 cookie)
 {
-    YT_LOG_DEBUG("Reading from NBD session (Offset: %v, Length: %v, Cookie: %x)",
-        offset,
-        length,
-        cookie);
+    YT_TLOG_DEBUG("Reading from NBD session")
+        .With("Offset", offset)
+        .With("Length", length)
+        .WithFormat("Cookie", "%x", cookie);
 
     return NbdChunkHandler_->Read(offset, length, cookie);
 }
 
+TFuture<std::vector<TBlock>> TNbdSession::ReadBatch(
+    const std::vector<TNbdReadSubrequest>& subrequests,
+    ui64 cookie)
+{
+    YT_TLOG_DEBUG("Batch reading from NBD session")
+        .With("SubrequestCount", subrequests.size())
+        .WithFormat("Cookie", "%x", cookie);
+
+    return NbdChunkHandler_->ReadBatch(subrequests, cookie);
+}
+
 TFuture<NIO::TIOCounters> TNbdSession::Write(i64 offset, const TBlock& block, ui64 cookie)
 {
-    YT_LOG_DEBUG("Writing to NBD session (Offset: %v, Length: %v, Cookie: %x)",
-        offset,
-        block.Size(),
-        cookie);
+    YT_TLOG_DEBUG("Writing to NBD session")
+        .With("Offset", offset)
+        .With("Length", block.Size())
+        .WithFormat("Cookie", "%x", cookie);
 
     return NbdChunkHandler_->Write(offset, block, cookie);
+}
+
+TFuture<void> TNbdSession::Flush(ui64 cookie)
+{
+    YT_TLOG_DEBUG("Flushing NBD session")
+        .WithFormat("Cookie", "%x", cookie);
+
+    return NbdChunkHandler_->Flush(cookie);
+}
+
+TFuture<void> TNbdSession::FlushRange(i64 offset, i64 size)
+{
+    YT_TLOG_DEBUG("Flushing NBD session range")
+        .With("Offset", offset)
+        .With("Size", size);
+
+    return NbdChunkHandler_->FlushRange(offset, size);
 }
 
 //! Create NBD chunk and make filesystem on it.
@@ -203,8 +231,9 @@ i64 TNbdSession::GetIntermediateEmptyBlockCount() const
 }
 
 TFuture<ISession::TFinishResult> TNbdSession::Finish(
-    const NChunkClient::TRefCountedChunkMetaPtr& /* chunkMeta */,
-    std::optional<int> /* blockCount */)
+    const NChunkClient::TRefCountedChunkMetaPtr& /*chunkMeta*/,
+    std::optional<int> /*blockCount*/,
+    std::optional<NIO::TIOFairShareState> /*fairShareState*/)
 {
     THROW_ERROR_EXCEPTION("Not implemented");
 }
@@ -214,7 +243,9 @@ bool TNbdSession::ShouldUseProbePutBlocks() const
     YT_UNIMPLEMENTED();
 }
 
-void TNbdSession::ProbePutBlocks(i64)
+void TNbdSession::ProbePutBlocks(
+    i64 /*requestedCumulativeMemorySize*/,
+    std::optional<NIO::TIOFairShareState> /*fairShareState*/)
 {
     YT_UNIMPLEMENTED();
 }
@@ -230,26 +261,28 @@ i64 TNbdSession::GetMaxRequestedCumulativeBlockSize() const
 }
 
 TFuture<NIO::TIOCounters> TNbdSession::PutBlocks(
-    int /* startBlockIndex */,
-    std::vector<NChunkClient::TBlock> /* blocks */,
-    i64 /* cumulativeBlockSize */,
-    bool /* enableCaching */)
+    int /*startBlockIndex*/,
+    std::vector<NChunkClient::TBlock> /*blocks*/,
+    i64 /*cumulativeBlockSize*/,
+    std::optional<NIO::TIOFairShareState> /*fairShareState*/,
+    bool /*enableCaching*/)
 {
     THROW_ERROR_EXCEPTION("Not implemented");
 }
 
 TFuture<TNbdSession::TSendBlocksResult> TNbdSession::SendBlocks(
-    int /* startBlockIndex */,
-    int /* blockCount */,
-    i64 /* cumulativeBlockSize */,
-    TDuration /* requestTimeout */,
-    bool /* instantReplyOnThrottling */,
-    const NNodeTrackerClient::TNodeDescriptor& /* target */)
+    int /*startBlockIndex*/,
+    int /*blockCount*/,
+    i64 /*cumulativeBlockSize*/,
+    std::optional<NIO::TIOFairShareState> /*fairShareState*/,
+    TDuration /*requestTimeout*/,
+    bool /*instantReplyOnThrottling*/,
+    const NNodeTrackerClient::TNodeDescriptor& /*target*/)
 {
     THROW_ERROR_EXCEPTION("Not implemented");
 }
 
-TFuture<ISession::TFlushBlocksResult> TNbdSession::FlushBlocks(int /* blockIndex */)
+TFuture<ISession::TFlushBlocksResult> TNbdSession::FlushBlocks(int /*blockIndex*/)
 {
     THROW_ERROR_EXCEPTION("Not implemented");
 }

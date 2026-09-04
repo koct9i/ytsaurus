@@ -1,11 +1,11 @@
 #include "partition_tables.h"
 
 #include <yt/yt/ytlib/chunk_client/combine_data_slices.h>
+#include <yt/yt/ytlib/chunk_client/data_slice.h>
 #include <yt/yt/ytlib/chunk_client/data_slice_descriptor.h>
 #include <yt/yt/ytlib/chunk_client/helpers.h>
 #include <yt/yt/ytlib/chunk_client/input_chunk.h>
 #include <yt/yt/ytlib/chunk_client/input_chunk_slice.h>
-#include <yt/yt/ytlib/chunk_client/legacy_data_slice.h>
 
 #include <yt/yt/ytlib/chunk_pools/chunk_pool.h>
 #include <yt/yt/ytlib/chunk_pools/chunk_pool_factory.h>
@@ -114,11 +114,11 @@ TMultiTablePartitioner::TMultiTablePartitioner(
 
 TMultiTablePartitions TMultiTablePartitioner::PartitionTables()
 {
-    YT_LOG_INFO("Partitioning tables (DataWeightPerPartition: %v, CompressedDataSizePerPartition: %v, MaxPartitionCount: %v, AdjustDataWeightPerPartition: %v)",
-        Options_.DataWeightPerPartition,
-        Options_.CompressedDataSizePerPartition,
-        Options_.MaxPartitionCount,
-        Options_.AdjustDataWeightPerPartition);
+    YT_TLOG_INFO("Partitioning tables")
+        .With("DataWeightPerPartition", Options_.DataWeightPerPartition)
+        .With("CompressedDataSizePerPartition", Options_.CompressedDataSizePerPartition)
+        .With("MaxPartitionCount", Options_.MaxPartitionCount)
+        .With("AdjustDataWeightPerPartition", Options_.AdjustDataWeightPerPartition);
 
     InitializeChunkPool();
     CollectInput();
@@ -139,7 +139,8 @@ void TMultiTablePartitioner::InitializeChunkPool()
 
 void TMultiTablePartitioner::CollectInput()
 {
-    YT_LOG_INFO("Collecting input (TableCount: %v)", Paths_.size());
+    YT_TLOG_INFO("Collecting input")
+        .With("TableCount", Paths_.size());
 
     YT_VERIFY(ChunkPool_);
 
@@ -184,11 +185,11 @@ void TMultiTablePartitioner::CollectInput()
             },
             Logger);
 
-        YT_LOG_DEBUG("Input chunks fetched (TableIndex: %v, Path: %v, Schema: %v, ChunkCount: %v)",
-            tableIndex,
-            path,
-            inputTableInfo.Schema,
-            inputTableInfo.Chunks.size());
+        YT_TLOG_DEBUG("Input chunks fetched")
+            .With("TableIndex", tableIndex)
+            .With("Path", path)
+            .With("Schema", inputTableInfo.Schema)
+            .With("ChunkCount", inputTableInfo.Chunks.size());
 
         AddDataSource(tableIndex, inputTableInfo.Schema, inputTableInfo.Dynamic, std::move(inputTableInfo.RlsReadSpec));
 
@@ -209,18 +210,19 @@ void TMultiTablePartitioner::CollectInput()
     }
 
     if (columnarStatisticsFetcher->GetChunkCount() > 0) {
-        YT_LOG_INFO("Fetching chunk columnar statistics for tables with column selectors (ChunkCount: %v)",
-            columnarStatisticsFetcher->GetChunkCount());
+        YT_TLOG_INFO("Fetching chunk columnar statistics for tables with column selectors")
+            .With("ChunkCount", columnarStatisticsFetcher->GetChunkCount());
         WaitFor(columnarStatisticsFetcher->Fetch())
             .ThrowOnError();
-        YT_LOG_INFO("Columnar statistics fetched");
+        YT_TLOG_INFO("Columnar statistics fetched");
         columnarStatisticsFetcher->ApplyColumnSelectivityFactors();
     }
 
     YT_VERIFY(IsDataSourcesReady());
 
     for (const auto& inputTable : inputTables) {
-        YT_LOG_DEBUG("Fetching chunks (Path: %v)", Paths_[inputTable.TableIndex]);
+        YT_TLOG_DEBUG("Fetching chunks")
+            .With("Path", Paths_[inputTable.TableIndex]);
 
         const auto& dataSource = DataSourceDirectory_->DataSources()[inputTable.TableIndex];
 
@@ -233,16 +235,17 @@ void TMultiTablePartitioner::CollectInput()
 
     FetchVersionedDataSlices();
 
-    YT_LOG_INFO("Finishing chunk pool (TotalChunkCount: %v)", totalChunkCount);
+    YT_TLOG_INFO("Finishing chunk pool")
+        .With("TotalChunkCount", totalChunkCount);
 
     ChunkPool_->Finish();
 
-    YT_LOG_INFO("Input collected");
+    YT_TLOG_INFO("Input collected");
 }
 
 void TMultiTablePartitioner::BuildPartitions()
 {
-    YT_LOG_INFO("Building partitions");
+    YT_TLOG_INFO("Building partitions");
 
     YT_VERIFY(ChunkPool_);
     YT_VERIFY(IsDataSourcesReady());
@@ -264,7 +267,7 @@ void TMultiTablePartitioner::BuildPartitions()
             // If you change the message, please change the tests after deployment.
             // See eg. https://a.yandex-team.ru/arcadia/commit/9c13476686afd16f47ad22838809d17ebd6b9594
             THROW_ERROR_EXCEPTION("Maximum partition count exceeded")
-                << TErrorAttribute("limit", *Options_.MaxPartitionCount);
+                .With("limit", *Options_.MaxPartitionCount);
         }
 
         auto chunkStripeList = ChunkPool_->GetStripeList(cookie);
@@ -287,7 +290,8 @@ void TMultiTablePartitioner::BuildPartitions()
         }
     }
 
-    YT_LOG_INFO("Partitions built (PartitionCount: %v)", Partitions_.Partitions.size());
+    YT_TLOG_INFO("Partitions built")
+        .With("PartitionCount", Partitions_.Partitions.size());
 }
 
 bool TMultiTablePartitioner::IsDataSourcesReady()
@@ -350,7 +354,7 @@ std::vector<std::vector<TDataSliceDescriptor>> TMultiTablePartitioner::ConvertCh
     return slicesByTable;
 }
 
-void TMultiTablePartitioner::AddDataSlice(int tableIndex, TLegacyDataSlicePtr dataSlice)
+void TMultiTablePartitioner::AddDataSlice(int tableIndex, TDataSlicePtr dataSlice)
 {
     YT_VERIFY(ChunkPool_);
 
@@ -369,13 +373,13 @@ void TMultiTablePartitioner::PrepareVersionedSliceFetcher(const TInputTable& inp
     const auto& comparator = GetComparator(tableIndex);
     if (Options_.CompressedDataSizePerPartition) {
         THROW_ERROR_EXCEPTION("Partitioning versioned table by compressed data size is unimplemented")
-            << TErrorAttribute("table_index", tableIndex);
+            .With("table_index", tableIndex);
     }
     YT_VERIFY(Options_.DataWeightPerPartition);
 
-    YT_LOG_DEBUG("Fetching versioned data slices (TableIndex: %v, ChunkCount: %v)",
-        tableIndex,
-        inputChunks.size());
+    YT_TLOG_DEBUG("Fetching versioned data slices")
+        .With("TableIndex", tableIndex)
+        .With("ChunkCount", inputChunks.size());
 
     TRowBufferPtr rowBuffer = New<TRowBuffer>(TMultiTablePartitionerTag());
     auto fetcher = CreateChunkSliceFetcher(
@@ -388,14 +392,13 @@ void TMultiTablePartitioner::PrepareVersionedSliceFetcher(const TInputTable& inp
         Logger);
 
     for (const auto& inputChunk : inputChunks) {
-        auto inputChunkSlice = CreateInputChunkSlice(inputChunk);
-        InferLimitsFromBoundaryKeys(inputChunkSlice, rowBuffer);
+        auto inputChunkSlice = CreateInputChunkSlice(inputChunk, rowBuffer, comparator);
+        InferLimitsFromBoundaryKeys(inputChunkSlice, rowBuffer, /*keyColumnCount*/ std::nullopt, comparator);
         auto dataSlice = CreateUnversionedInputDataSlice(inputChunkSlice);
         dataSlice->SetInputStreamIndex(tableIndex);
-        dataSlice->TransformToNew(rowBuffer, comparator.GetLength());
-        YT_LOG_TRACE("Add data slice for slicing (TableIndex: %v, DataSlice: %v)",
-            tableIndex,
-            dataSlice);
+        YT_TLOG_TRACE("Add data slice for slicing")
+            .With("TableIndex", tableIndex)
+            .With("DataSlice", dataSlice);
         fetcher->AddDataSliceForSlicing(dataSlice, comparator, *Options_.DataWeightPerPartition, /*sliceByKeys*/ true, /*minManiacDataWeight*/ std::nullopt);
     }
 
@@ -434,12 +437,11 @@ void TMultiTablePartitioner::AddUnversionedDataSlices(const TInputTable& inputTa
     const auto& comparator = GetComparator(inputTable.TableIndex);
 
     for (const auto& inputChunk : inputTable.Chunks) {
-        auto inputChunkSlice = CreateInputChunkSlice(inputChunk);
-        inputChunkSlice->TransformToNew(RowBuffer_, comparator.GetLength());
-        TLegacyDataSlice::TChunkSliceList inputChunkSliceList;
+        auto inputChunkSlice = CreateInputChunkSlice(inputChunk, RowBuffer_, comparator);
+        TDataSlice::TChunkSliceList inputChunkSliceList;
 
         inputChunkSliceList.emplace_back(std::move(inputChunkSlice));
-        auto dataSlice = New<TLegacyDataSlice>(
+        auto dataSlice = New<TDataSlice>(
             EDataSourceType::UnversionedTable,
             std::move(inputChunkSliceList),
             TInputSliceLimit());

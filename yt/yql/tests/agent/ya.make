@@ -1,5 +1,7 @@
 PY3TEST()
 
+NO_BUILD_IF(SANITIZER_TYPE)
+
 PY_SRCS(
     common.py
 )
@@ -16,7 +18,6 @@ DEPENDS(
     yt/yt/packages/tests_package
     yt/yql/agent/bin
 
-    yt/yql/plugin/dynamic
     yt/yql/tools/mrjob
     yql/essentials/udfs/common/re2
     yql/essentials/udfs/common/file
@@ -24,11 +25,13 @@ DEPENDS(
     yql/essentials/udfs/common/streaming
     yql/essentials/udfs/common/string
     yql/essentials/udfs/common/yson2
+    yql/essentials/udfs/test/simple
 )
 
 PEERDIR(
     library/python/port_manager
     yql/library/langver/python
+    yql/essentials/providers/common/proto
     yt/yt/tests/conftest_lib
     yt/python/yt/environment/components/yql_agent
 )

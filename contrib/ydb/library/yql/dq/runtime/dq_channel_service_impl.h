@@ -247,8 +247,8 @@ public:
     const ui64 MaxInflightBytes; // NoLimit => HardLimit
     const ui64 MinInflightBytes; // HardLimit => NoLimit
     bool FinishPushed = false;
-    TInstant LastOutputNotificationTime;
-    TInstant LastInputNotificationTime;
+    std::atomic<TInstant> LastOutputNotificationTime;
+    std::atomic<TInstant> LastInputNotificationTime;
     TInstant FinishTime;
 
     std::atomic<bool> NeedToNotifyOutput = false;
@@ -269,13 +269,14 @@ class TNodeState;
 class TOutputDescriptor {
 public:
     TOutputDescriptor(const TChannelFullInfo& info, IMemoryQuotaManager::TPtr quotaManager, NActors::TActorSystem* actorSystem, ::NMonitoring::TDynamicCounters::TCounterPtr outputBufferBytes,
-        ::NMonitoring::TDynamicCounters::TCounterPtr outputBufferChunks, ui64 maxInflightBytes, ui64 minInflightBytes)
+        ::NMonitoring::TDynamicCounters::TCounterPtr outputBufferChunks, ui64 maxInflightBytes, ui64 minInflightBytes, ui64 coldInflightBytes)
         : Info(info)
         , ActorSystem(actorSystem)
         , OutputBufferBytes(outputBufferBytes)
         , OutputBufferChunks(outputBufferChunks)
         , MaxInflightBytes(maxInflightBytes)
         , MinInflightBytes(minInflightBytes)
+        , ColdInflightBytes(coldInflightBytes)
         , QuotaManager(quotaManager)
     {
         PushStats.Level = info.Level;
@@ -324,6 +325,7 @@ public:
     std::atomic<ui64> PushBytes = 0;
     std::atomic<ui64> RemotePopBytes = 0;
     std::atomic<ui64> SpilledBytes = 0;
+    std::atomic<ui64> SeqNo = 0;
 
     std::atomic<bool> NeedToNotifyOutput = false;
     std::atomic<bool> EarlyFinished = false;
@@ -338,6 +340,7 @@ public:
 
     const ui64 MaxInflightBytes; // NoLimit => HardLimit
     const ui64 MinInflightBytes; // HardLimit => NoLimit
+    const ui64 ColdInflightBytes;
 
     IMemoryQuotaManager::TPtr QuotaManager;
 };
@@ -365,8 +368,9 @@ public:
     TDataChunk Data;
     std::shared_ptr<TOutputDescriptor> Descriptor;
     std::atomic<EState> State;
-    ui64 SeqNo;
-    bool Leading;
+    ui64 SeqNo = 0;
+    bool Leading = false;
+    ui64 ChannelSeqNo = 0;
 };
 
 class TOutputBuffer : public IChannelBuffer {
@@ -435,8 +439,8 @@ public:
 
     TChannelFullInfo Info;
     NActors::TActorSystem* ActorSystem;
-    ui64 PeerGenMajor = 0;
-    NActors::TActorId PeerActorId;
+    ui64 OutputNodeGenMajor = 0;
+    NActors::TActorId OutputNodeActorId;
     bool IsBound = false;
     TDqThreadSafeStats PushStats;
     TDqThreadSafeStats PopStats;
@@ -446,6 +450,7 @@ public:
     std::atomic<ui64> QueueBytes = 0;
     mutable std::queue<TInputItem> Queue;
     std::atomic<ui64> InflightBytes = 0;
+    std::atomic<ui64> SeqNo = 0;
 
     std::atomic<bool> NeedToNotifyInput = false;
     std::atomic<bool> FinishPushed = false;
@@ -537,6 +542,8 @@ struct TEvPrivate {
     };
 };
 
+const int ReconciliationLogSize = 40;
+
 class TNodeState {
 public:
     TNodeState(NActors::TActorSystem* actorSystem, ui32 nodeId, NMonitoring::TDynamicCounterPtr counters, const TDqChannelLimits& limits)
@@ -557,10 +564,16 @@ public:
         InputBufferBytes = counters->GetCounter("InputBuffer/Bytes", true);
         InputBufferChunks = counters->GetCounter("InputBuffer/Chunks", true);
         InputBufferInflightBytes = counters->GetCounter("InputBuffer/InflightBytes", false);
-        LastActivity.store(TInstant::Now());
+        SessionMessagesSent = counters->GetCounter("Session/MessagesSent", true);
+        SessionMessagesResent = counters->GetCounter("Session/MessagesResent", true);
+        SessionReconciliations = counters->GetCounter("Session/Reconciliations", true);
+        auto now = TInstant::Now();
+        LastPeerActivity.store(now);
+        LastCleanup = now;
     }
 
     virtual ~TNodeState();
+    void FailDescriptors();
     void PushDataChunk(TDataChunk&& data, std::shared_ptr<TOutputDescriptor> descriptor);
     void SendMessage(std::shared_ptr<TOutputItem> item);
     void HandleDisconnected(NActors::TEvInterconnect::TEvNodeDisconnected::TPtr& ev);
@@ -576,21 +589,23 @@ public:
     void TerminateOutputDescriptor(const std::shared_ptr<TOutputDescriptor>& descriptor);
     void TerminateInputDescriptor(const std::shared_ptr<TInputDescriptor>& descriptor);
     void HandleCleanup();
-    void FailInputs(const NActors::TActorId& peerActorId, ui64 peerGenMajor);
+    void FailInputs(const NActors::TActorId& outputNodeActorId, ui64 outputNodeGenMajor);
     void FailOutputs(const NActors::TActorId& peerActorId, ui64 peerGenMajor);
     void SendAck(THolder<TEvDqCompute::TEvChannelAckV2>& evAck, ui64 cookie);
     void SendAckWithError(ui64 cookie, const TString& message);
     void HandleChannelData(TEvDqCompute::TEvChannelDataV2::TPtr& ev);
     void SendFromWaiters(ui64 deltaBytes);
-    void ConnectSession(NActors::TActorId& sender, ui64 genMajor, ui64 genMinor, ui64 seqNo);
+    void ConnectSession(NActors::TActorId& sender, ui64 genMajor, ui64 genMinor);
     virtual TString GetDebugInfo();
     void UpdateProgress(std::shared_ptr<TInputDescriptor>& descriptor);
     void SendUpdateProgress(std::shared_ptr<TInputDescriptor>& descriptor);
 
     void HandleReconciliation(TEvPrivate::TEvReconciliation::TPtr& ev);
-    void StartReconciliation(bool major);
-    void DoReconciliation();
-    void SendDiscovery(NActors::TActorId actorId, ui64 seqNo);
+    void StartReconciliation(bool major, char logSymbol);
+    void DoReconciliation(char logSymbol);
+    void AddReconciliationLog(char logSymbol);
+    TString GetReconciliationLog();
+    void SendDiscovery();
 
     NActors::TActorId NodeActorId;
     TString LogPrefix;
@@ -603,7 +618,6 @@ public:
     mutable std::unordered_map<TChannelInfo, std::shared_ptr<TInputDescriptor>> InputDescriptors;
     mutable std::queue<std::pair<TChannelInfo, TInstant>> UnboundInputs;
     mutable std::queue<std::pair<TChannelInfo, TInstant>> UnboundOutputs;
-    bool Connected = false;
     std::weak_ptr<TNodeState> Self;
     // Sender
     ui64 GenMajor = 1;
@@ -611,12 +625,12 @@ public:
     ui64 ReconciliationCount = 0;
     ui64 SeqNo = 0;
     std::atomic<ui64> InflightBytes = 0;
+    NActors::TActorId InputNodeActorId;
     // Receiver
-    NActors::TActorId PeerActorId;
-    std::atomic<ui64> PeerGenMajor = 0;
-    std::atomic<ui64> PeerGenMinor = 0;
+    NActors::TActorId OutputNodeActorId;
+    std::atomic<ui64> OutputNodeGenMajor = 0;
+    std::atomic<ui64> OutputNodeGenMinor = 0;
     ui64 ConfirmedSeqNo = 0;
-    TEvDqCompute::TEvChannelDataV2::TPtr OutOfOrderMessage;
     // ...
     const TDqChannelLimits Limits;
     const ui64 MaxInflightMessages = 8192;
@@ -638,13 +652,23 @@ public:
     ::NMonitoring::TDynamicCounters::TCounterPtr InputBufferBytes;
     ::NMonitoring::TDynamicCounters::TCounterPtr InputBufferChunks;
     ::NMonitoring::TDynamicCounters::TCounterPtr InputBufferInflightBytes;
-    const TDuration ReconciliationTimeout = TDuration::MilliSeconds(250);
+    ::NMonitoring::TDynamicCounters::TCounterPtr SessionMessagesSent;
+    ::NMonitoring::TDynamicCounters::TCounterPtr SessionMessagesResent;
+    ::NMonitoring::TDynamicCounters::TCounterPtr SessionReconciliations;
+    const TDuration ReconciliationTimeout = TDuration::MilliSeconds(1000);
     std::atomic<ui64> FailureLossSend = 0;
     std::atomic<ui64> FailureDoubleSend = 0;
     std::atomic<ui64> FailureReconciliation = 0;
-    std::atomic<TInstant> LastActivity;
+    std::atomic<TInstant> LastPeerActivity;
+    TInstant LastCleanup;
     std::atomic<bool> Terminating = false;
     std::atomic<bool> ResendAsked = false;
+    std::deque<char> ReconciliationLog;
+    TChannelInfo LastLostInfo = TChannelInfo(0,  NActors::TActorId{}, NActors::TActorId{});
+    std::atomic<ui64> SendCount = 0;
+    std::atomic<ui64> ResendCount = 0;
+    std::atomic<ui64> ReconCount = 0;
+    std::atomic<TInstant> ReconSent;
 };
 
 class TDebugNodeState : public TNodeState {
@@ -962,22 +986,6 @@ public:
         return PausedByCheckpoint;
     }
 
-    void AddWatermark(TInstant) override {
-        Y_ENSURE(false);
-    }
-
-    void PauseByWatermark(TInstant) override {
-        Y_ENSURE(false);
-    }
-
-    void ResumeByWatermark(TInstant) override {
-        Y_ENSURE(false);
-    }
-
-    bool IsPausedByWatermark() const override {
-        Y_ENSURE(false);
-    }
-
 // IDqInputChannel
 
     ui64 GetChannelId() const override {
@@ -1271,4 +1279,3 @@ public:
 };
 
 }
-

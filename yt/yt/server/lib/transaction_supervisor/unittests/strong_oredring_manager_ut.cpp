@@ -5,6 +5,8 @@
 #include <yt/yt/core/profiling/timing.h>
 #include <yt/yt/core/test_framework/framework.h>
 
+#include <yt/yt/client/transaction_client/ts_literal.h>
+
 #include <util/random/random.h>
 
 namespace NYT::NTransactionSupervisor {
@@ -13,6 +15,8 @@ namespace {
 using namespace NApi;
 using namespace NHydra;
 using namespace NTransactionClient;
+
+using NTransactionClient::operator""_ts;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -60,30 +64,30 @@ public:
 
     void Prepare(TTestTransaction transaction)
     {
-        YT_LOG_DEBUG("Calling Prepare (TransactionId: %v, PrepareTimestamp: %v, IsCoordinated: %v)",
-            transaction.Id,
-            transaction.PrepareTimestamp,
-            transaction.IsCoordinated);
+        YT_TLOG_DEBUG("Calling Prepare")
+            .With("TransactionId", transaction.Id)
+            .With("PrepareTimestamp", transaction.PrepareTimestamp)
+            .With("IsCoordinated", transaction.IsCoordinated);
 
         Manager_.OnCommitPrepare(transaction.Id, transaction.PrepareTimestamp, transaction.IsCoordinated, transaction.Tags);
     };
 
     [[nodiscard]] std::vector<TCommitInfo> ReadyToCommit(TTestTransaction transaction)
     {
-        YT_LOG_DEBUG("Calling ReadyToCommit (TransactionId: %v, CommitTimestamp: %v, IsCoordinated: %v)",
-            transaction.Id,
-            transaction.CommitTimestamp,
-            transaction.IsCoordinated);
+        YT_TLOG_DEBUG("Calling ReadyToCommit")
+            .With("TransactionId", transaction.Id)
+            .With("CommitTimestamp", transaction.CommitTimestamp)
+            .With("IsCoordinated", transaction.IsCoordinated);
 
         return Manager_.OnCommitReadyToCommit(transaction.Id, transaction.CommitTimestamp, SelfClockClusterTagMock);
     }
 
     [[nodiscard]] std::vector<TCommitInfo> Commit(TTestTransaction transaction)
     {
-        YT_LOG_DEBUG("Calling Commit (TransactionId: %v, CommitTimestamp: %v, IsCoordinated: %v)",
-            transaction.Id,
-            transaction.CommitTimestamp,
-            transaction.IsCoordinated);
+        YT_TLOG_DEBUG("Calling Commit")
+            .With("TransactionId", transaction.Id)
+            .With("CommitTimestamp", transaction.CommitTimestamp)
+            .With("IsCoordinated", transaction.IsCoordinated);
 
         return Manager_.OnCommitCommit(
             transaction.Id,
@@ -95,12 +99,12 @@ public:
 
     [[nodiscard]] std::vector<TCommitInfo> Abort(TTestTransaction transaction)
     {
-        YT_LOG_DEBUG("Calling Abort (TransactionId: %v, CommitTimestamp: %v, IsCoordinated: %v)",
-            transaction.Id,
-            transaction.CommitTimestamp,
-            transaction.IsCoordinated);
+        YT_TLOG_DEBUG("Calling Abort")
+            .With("TransactionId", transaction.Id)
+            .With("CommitTimestamp", transaction.CommitTimestamp)
+            .With("IsCoordinated", transaction.IsCoordinated);
 
-        return Manager_.OnCommitAbort(transaction.Id, transaction.CommitTimestamp);
+        return Manager_.OnCommitAbort(transaction.Id, transaction.CommitTimestamp.Underlying());
     };
 
 protected:
@@ -133,8 +137,8 @@ TEST_P(TStrongOrderingManagerTestSingleTransaction, Commit)
     TTestTransaction transaction{
         .Id = GenerateTransactionId(),
         .IsCoordinated = isCoordinated,
-        .PrepareTimestamp = 1,
-        .CommitTimestamp = 5,
+        .PrepareTimestamp = 1_ts,
+        .CommitTimestamp = 5_ts,
         .Tags = DefaultTags,
     };
 
@@ -157,8 +161,8 @@ TEST_P(TStrongOrderingManagerTestSingleTransaction, Abort)
     TTestTransaction transaction{
         .Id = GenerateTransactionId(),
         .IsCoordinated = isCoordinated,
-        .PrepareTimestamp = 1,
-        .CommitTimestamp = 5,
+        .PrepareTimestamp = 1_ts,
+        .CommitTimestamp = 5_ts,
         .Tags = DefaultTags,
     };
 
@@ -196,16 +200,16 @@ TEST_F(TStrongOrderingManagerTest, TwoOverlappingTransactions)
     TTestTransaction firstTransaction{
         .Id = GenerateTransactionId(),
         .IsCoordinated = true, // This should not matter.
-        .PrepareTimestamp = 3,
-        .CommitTimestamp = 6,
+        .PrepareTimestamp = 3_ts,
+        .CommitTimestamp = 6_ts,
         .Tags = DefaultTags,
     };
 
     TTestTransaction secondTransaction{
         .Id = GenerateTransactionId(),
         .IsCoordinated = true, // This should not matter.
-        .PrepareTimestamp = 2,
-        .CommitTimestamp = 10,
+        .PrepareTimestamp = 2_ts,
+        .CommitTimestamp = 10_ts,
         .Tags = DefaultTags,
     };
 
@@ -226,16 +230,16 @@ TEST_F(TStrongOrderingManagerTest, CommitOrderOptimized)
     TTestTransaction firstTransaction{
         .Id = GenerateTransactionId(),
         .IsCoordinated = false, // It's important for the test setup.
-        .PrepareTimestamp = 3,
-        .CommitTimestamp = 6,
+        .PrepareTimestamp = 3_ts,
+        .CommitTimestamp = 6_ts,
         .Tags = DefaultTags,
     };
 
     TTestTransaction secondTransaction{
         .Id = GenerateTransactionId(),
         .IsCoordinated = false, // This should not matter.
-        .PrepareTimestamp = 2,
-        .CommitTimestamp = 10,
+        .PrepareTimestamp = 2_ts,
+        .CommitTimestamp = 10_ts,
         .Tags = DefaultTags,
     };
 
@@ -302,8 +306,8 @@ protected:
 
         // Delay is added to timestamps to simulate network interactions.
         // This is only applicable to non-coordinated transactions.
-        TTimestamp MaxPrepareDelay = 100;
-        TTimestamp MaxCommitDelay = 100;
+        ui64 MaxPrepareDelay = 100;
+        ui64 MaxCommitDelay = 100;
 
         bool EnableDebugLogging = false;
 
@@ -392,10 +396,10 @@ protected:
 
         // Generate prepare timestamps and delays.
         auto maxPrepareTimestamp = config.AveragePrepareFrequency * config.TransactionCount;
-        std::uniform_int_distribution<TTimestamp> timestampDistribution(0, maxPrepareTimestamp);
-        std::uniform_int_distribution<TTimestamp> prepareDelayDistribution(1, config.MaxPrepareDelay);
+        std::uniform_int_distribution<ui64> timestampDistribution(0, maxPrepareTimestamp);
+        std::uniform_int_distribution<ui64> prepareDelayDistribution(1, config.MaxPrepareDelay);
         for (auto& transaction : transactions) {
-            transaction.PrepareTimestamp = timestampDistribution(Rng_);
+            transaction.PrepareTimestamp = TTimestamp(timestampDistribution(Rng_));
 
             // Prepare delays are generated early, because any other action has to be observed
             // strictly after a tranasction was prepared.
@@ -403,7 +407,7 @@ protected:
                 // Transactions coordinated by this cell have no delay.
                 transaction.DelayedPrepareTimestamp = transaction.PrepareTimestamp;
             } else {
-                transaction.DelayedPrepareTimestamp = transaction.PrepareTimestamp + prepareDelayDistribution(Rng_);
+                transaction.DelayedPrepareTimestamp = NYT::NTransactionClient::TTimestamp(transaction.PrepareTimestamp.Underlying() + prepareDelayDistribution(Rng_));
             }
         }
 
@@ -411,18 +415,18 @@ protected:
         std::unordered_set<TTimestamp> usedCommitTimestamps;
         auto maxCommitTimestampOffset = config.AverageCommitDuration * 2;
         for (auto& transaction : transactions) {
-            std::uniform_int_distribution<TTimestamp> commitOffsetDistribution(1, maxCommitTimestampOffset);
+            std::uniform_int_distribution<ui64> commitOffsetDistribution(1, maxCommitTimestampOffset);
 
             int collisionCount = 1;
-            auto candidate = transaction.DelayedPrepareTimestamp + commitOffsetDistribution(Rng_);
+            auto candidate = NYT::NTransactionClient::TTimestamp(transaction.DelayedPrepareTimestamp.Underlying() + commitOffsetDistribution(Rng_));
             while (usedCommitTimestamps.contains(candidate)) {
                 if (collisionCount % 100 == 0) {
-                    commitOffsetDistribution = std::uniform_int_distribution<TTimestamp>(
+                    commitOffsetDistribution = std::uniform_int_distribution<ui64>(
                         maxCommitTimestampOffset,
                         maxCommitTimestampOffset * 2 * (collisionCount / 100));
                 }
 
-                candidate = transaction.DelayedPrepareTimestamp + commitOffsetDistribution(Rng_);
+                candidate = NYT::NTransactionClient::TTimestamp(transaction.DelayedPrepareTimestamp.Underlying() + commitOffsetDistribution(Rng_));
                 ++collisionCount;
             }
 
@@ -439,7 +443,7 @@ protected:
         // Now generate everything else.
         std::bernoulli_distribution abortDistribution(config.AbortProbability);
         std::bernoulli_distribution readyToCommitDistribution(config.ReadyToCommitProbability);
-        std::uniform_int_distribution<TTimestamp> commitDelayDistribution(1, config.MaxCommitDelay);
+        std::uniform_int_distribution<ui64> commitDelayDistribution(1, config.MaxCommitDelay);
 
         for (auto& transaction : transactions) {
             transaction.ShouldAbortInsteadOfCommit = abortDistribution(Rng_);
@@ -452,13 +456,13 @@ protected:
                 continue;
             }
 
-            auto firstTimestamp = transaction.CommitTimestamp + commitDelayDistribution(Rng_);
-            auto secondTimestamp = transaction.CommitTimestamp + commitDelayDistribution(Rng_);
+            auto firstTimestamp = NYT::NTransactionClient::TTimestamp(transaction.CommitTimestamp.Underlying() + commitDelayDistribution(Rng_));
+            auto secondTimestamp = NYT::NTransactionClient::TTimestamp(transaction.CommitTimestamp.Underlying() + commitDelayDistribution(Rng_));
 
             // Avoid messy "same timestamp" situations.
             while (firstTimestamp == secondTimestamp) {
                 // Adding 1 in case MaxCommitDelay is 0, to avoid an infinite loop.
-                secondTimestamp = transaction.CommitTimestamp + commitDelayDistribution(Rng_) + 1;
+                secondTimestamp = NYT::NTransactionClient::TTimestamp(transaction.CommitTimestamp.Underlying() + commitDelayDistribution(Rng_) + 1);
             }
 
             if (!readyToCommitDistribution(Rng_)) {
@@ -477,19 +481,16 @@ protected:
     void LogTransactionInfo(const std::vector<TTestTransaction>& transactions)
     {
         for (const auto& transaction : transactions) {
-            YT_LOG_DEBUG(
-                "Transaction information (Id: %v, IsCoordinated: %v, PrepareTimestamp: %v "
-                "CommitTimestamp: %v, Tags: %v, DelayedPrepareTimestamp: %v, "
-                "DelayedReadyToCommitTimestamp: %v, DelayedCommitTimestamp: %v, ShouldAbortInsteadOfCommit: %v)",
-                transaction.Id,
-                transaction.IsCoordinated,
-                transaction.PrepareTimestamp,
-                transaction.CommitTimestamp,
-                transaction.Tags,
-                transaction.DelayedPrepareTimestamp,
-                transaction.DelayedReadyToCommitTimestamp,
-                transaction.DelayedCommitTimestamp,
-                transaction.ShouldAbortInsteadOfCommit);
+            YT_TLOG_DEBUG("Transaction information")
+                .With("Id", transaction.Id)
+                .With("IsCoordinated", transaction.IsCoordinated)
+                .With("PrepareTimestamp", transaction.PrepareTimestamp)
+                .With("CommitTimestamp", transaction.CommitTimestamp)
+                .With("Tags", transaction.Tags)
+                .With("DelayedPrepareTimestamp", transaction.DelayedPrepareTimestamp)
+                .With("DelayedReadyToCommitTimestamp", transaction.DelayedReadyToCommitTimestamp)
+                .With("DelayedCommitTimestamp", transaction.DelayedCommitTimestamp)
+                .With("ShouldAbortInsteadOfCommit", transaction.ShouldAbortInsteadOfCommit);
         }
     }
 

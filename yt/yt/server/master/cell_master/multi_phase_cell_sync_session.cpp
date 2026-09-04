@@ -34,9 +34,16 @@ void TMultiPhaseCellSyncSession::ScheduleSyncWithUpstream()
 
 void TMultiPhaseCellSyncSession::ScheduleSyncWithSequoiaTransactions()
 {
-    if (SyncWithSequoiaTransactions_ == ESyncRequest::DontNeed) {
+    if (!SuppressSyncWithSequoiaTransactions_ &&
+        SyncWithSequoiaTransactions_ == ESyncRequest::DontNeed)
+    {
         SyncWithSequoiaTransactions_ = ESyncRequest::Need;
     }
+}
+
+void TMultiPhaseCellSyncSession::SuppressSyncWithSequoiaTransactions()
+{
+    SuppressSyncWithSequoiaTransactions_ = true;
 }
 
 TFuture<void> TMultiPhaseCellSyncSession::Sync(const TCellTagList& cellTags, TFuture<void> additionalFuture)
@@ -96,8 +103,8 @@ TFuture<void> TMultiPhaseCellSyncSession::Sync(const TCellTagList& cellTags, std
         return OKFuture;
     }
 
-    YT_LOG_DEBUG_UNLESS(syncCellTags.empty(), "Request will synchronize with other cells (CellTags: %v)",
-        syncCellTags);
+    YT_TLOG_DEBUG_UNLESS(syncCellTags.empty(), "Request will synchronize with other cells")
+        .With("CellTags", syncCellTags);
 
     return AllSucceeded(std::move(syncFutures));
 }

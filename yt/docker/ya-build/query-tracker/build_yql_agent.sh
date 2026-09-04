@@ -56,7 +56,6 @@ CORE_TARGETS=(
     "${YTSAURUS_SOURCE_PATH}/contrib/libs/libiconv/dynamic"
     
     # Build required binaries and libraries
-    "${YTSAURUS_SOURCE_PATH}/yt/yql/plugin/dynamic"
     "${YTSAURUS_SOURCE_PATH}/yt/yql/dq_vanilla_job"
     "${YTSAURUS_SOURCE_PATH}/yt/yql/dq_vanilla_job.lite"
     "${YTSAURUS_SOURCE_PATH}/yql/essentials/udfs/logs/dsv"
@@ -109,9 +108,11 @@ fi
 
 if [ "$build_python_udfs" == "yes" ]; then
   # Build yql system python udfs inside a docker container.
+  # Extra docker mounts (e.g. the host ya cache/token) are provided by the caller via EXTRA_MOUNTS.
   docker container run --rm --name yql-python-udfs-build \
     -v $YTSAURUS_SOURCE_PATH:/ytsaurus \
     -v $YQL_BUILD_PATH:/yql_build \
+    ${EXTRA_MOUNTS:-} \
     --env YTSAURUS_SOURCE_PATH=/ytsaurus \
     --env YQL_BUILD_PATH=/yql_build \
     --env "BUILD_FLAGS=$BUILD_FLAGS" \

@@ -333,7 +333,7 @@ private:
             }
             return underlying->Cancel().Apply(BIND([location, error] (const TError& inner) {
                 location->ScheduleDisable(error);
-                return inner.IsOK() ? error : error << inner;
+                return inner.IsOK() ? error : error.With(inner);
             }));
         }));
     }
@@ -374,7 +374,7 @@ public:
     {
         YT_ASSERT_INVOKER_AFFINITY(Bootstrap_->GetControlInvoker());
 
-        YT_LOG_INFO("Initializing artifact cache");
+        YT_TLOG_INFO("Initializing artifact cache");
 
         Bootstrap_->GetDynamicConfigManager()->SubscribeBeforeConfigChanged(
             BIND_NO_PROPAGATE(&TArtifactCache::TImpl::OnDynamicConfigChanged, MakeWeak(this)));
@@ -387,7 +387,7 @@ public:
             auto location = New<TCacheLocation>(
                 "cache" + ToString(index),
                 std::move(locationConfig),
-                Bootstrap_->GetClusterNodeBootstrap(),
+                Bootstrap_,
                 // All this stuff is leaky.
                 Bootstrap_->GetArtifactCache());
 
@@ -404,9 +404,8 @@ public:
 
         ValidateLocations();
 
-        YT_LOG_INFO(
-            "Artifact cache initialized (ArtifactCount: %v)",
-            GetSize());
+        YT_TLOG_INFO("Artifact cache initialized")
+            .With("ArtifactCount", GetSize());
 
         RunBackgroundValidation();
     }
@@ -459,30 +458,35 @@ public:
             /*bypassArtifactCache*/ false);
 
         auto Logger = ExecNodeLogger()
-            .WithTag("ReadSessionId: %v", chunkReadOptions.ReadSessionId);
+            .WithTag("ReadSessionId", chunkReadOptions.ReadSessionId);
 
         // NB: Artifact key is being formatted as prototext and is pretty verbose.
         // We avoid annotating each relevant line with the full key and log the key
         // only once. Other lines are tagged read session id, which seems sufficient.
-        YT_LOG_INFO(
-            "Downloading artifact (ArtifactKey: %v)",
-            key);
+        YT_TLOG_INFO("Downloading artifact")
+            .With("ArtifactKey", key);
 
         auto cookie = BeginInsert(key);
         auto cookieValue = cookie.GetValue();
 
         if (cookie.IsActive()) {
             if (auto optionalDescriptor = ExtractRegisteredChunk(key)) {
+                // Artifact is on disk but not in the in-memory SLRU index (e.g. after node restart).
+                // NB: fetchedFromCache is set optimistically before validation completes.
+                // If DoValidateChunk finds corruption and falls back to DoDownloadArtifact,
+                // the artifact will be fetched over the network despite fetchedFromCache=true.
                 DoValidateArtifact(std::move(cookie), key, artifactDownloadOptions, chunkReadOptions, *optionalDescriptor, Logger);
+                if (fetchedFromCache) {
+                    *fetchedFromCache = true;
+                }
             } else {
                 DoDownloadArtifact(std::move(cookie), key, artifactDownloadOptions, chunkReadOptions, Logger);
-            }
-            if (fetchedFromCache) {
-                *fetchedFromCache = false;
+                if (fetchedFromCache) {
+                    *fetchedFromCache = false;
+                }
             }
         } else {
-            YT_LOG_INFO(
-                "Artifact is either found in cache or is being downloaded");
+            YT_TLOG_INFO("Artifact is either found in cache or is being downloaded");
             if (fetchedFromCache) {
                 *fetchedFromCache = true;
             }
@@ -644,12 +648,12 @@ private:
             // Delay start of background validation to populate chunk cache with useful artifacts.
             TDelayedExecutor::WaitForDuration(Config_->BackgroundArtifactValidationDelay);
 
-            YT_LOG_INFO("Background artifacts validation started");
+            YT_TLOG_INFO("Background artifacts validation started");
 
             while (true) {
                 auto guard = Guard(RegisteredChunkMapLock_);
                 if (RegisteredChunkMap_.empty()) {
-                    YT_LOG_INFO("Background artifacts validation finished");
+                    YT_TLOG_INFO("Background artifacts validation finished");
                     return;
                 }
 
@@ -659,7 +663,9 @@ private:
                 TArtifactDownloadOptions options;
                 auto errorOrChunk = WaitFor(DownloadArtifact(artifactKey, options));
                 if (!errorOrChunk.IsOK()) {
-                    YT_LOG_WARNING(errorOrChunk, "Background artifact validation failed (ArtifactKey: %v)", artifactKey);
+                    YT_TLOG_WARNING("Background artifact validation failed")
+                        .With("ArtifactKey", artifactKey)
+                        .With(errorOrChunk);
                 }
 
                 TDelayedExecutor::WaitForDuration(TDuration::MilliSeconds(10));
@@ -690,19 +696,19 @@ private:
         auto cookieValue = cookie.GetValue();
         auto canPrepareSingleChunk = CanPrepareSingleChunk(key);
         auto chunkId = GetOrCreateArtifactId(key, canPrepareSingleChunk);
-        Logger.AddTag("ChunkId: %v", chunkId);
+        Logger.AddTag("ChunkId", chunkId);
 
         auto [location, lockedChunkGuard] = AcquireNewChunkLocation(chunkId);
         if (!location) {
-            auto error = TError("Cannot find a suitable location for artifact chunk");
-            cookie.Cancel(error);
-            YT_LOG_ERROR(error);
+            static constexpr auto Message = "Cannot find a suitable location for artifact chunk"_sb;
+            cookie.Cancel(TError(Message));
+            YT_TLOG_ERROR(Message);
             return;
         }
 
-        Logger.AddTag("LocationId: %v", location->GetId());
+        Logger.AddTag("LocationId", location->GetId());
 
-        YT_LOG_INFO("Loading artifact into cache");
+        YT_TLOG_INFO("Loading artifact into cache");
 
         decltype(&TImpl::DownloadChunk) downloader;
         if (canPrepareSingleChunk) {
@@ -723,8 +729,7 @@ private:
 
         TSessionCounterGuard sessionCounterGuard(location);
 
-        auto invoker = CreateSerializedInvoker(location->GetAuxPoolInvoker());
-        invoker->Invoke(BIND(
+        location->GetAuxPoolInvoker()->Invoke(BIND(
             downloader,
             MakeStrong(this),
             key,
@@ -751,18 +756,18 @@ private:
         auto chunkId = descriptor.Descriptor.Id;
         const auto& location = descriptor.Location;
 
-        Logger.AddTag("ChunkId: %v, LocationId: %v",
-            chunkId,
-            location->GetId());
+        Logger
+            .AddTag("ChunkId", chunkId)
+            .AddTag("LocationId", location->GetId());
 
         if (!CanPrepareSingleChunk(key)) {
-            YT_LOG_INFO("Skipping validation for multi-chunk artifact");
+            YT_TLOG_INFO("Skipping validation for multi-chunk artifact");
             auto artifact = CreateArtifact(location, key, descriptor.Descriptor);
             EndInsertIfEnabled(cookie, std::move(artifact), location);
             return;
         }
 
-        YT_LOG_INFO("Scheduling cached chunk validation");
+        YT_TLOG_INFO("Scheduling cached chunk validation");
         location->GetAuxPoolInvoker()->Invoke(BIND(
             &TImpl::DoValidateChunk,
             MakeStrong(this),
@@ -790,7 +795,7 @@ private:
         YT_ASSERT_INVOKER_AFFINITY(location->GetAuxPoolInvoker());
 
         try {
-            YT_LOG_INFO("Chunk validation started");
+            YT_TLOG_INFO("Chunk validation started");
 
             auto dataFileName = location->GetChunkPath(chunkId);
 
@@ -809,21 +814,22 @@ private:
                 TFile dataFile(dataFileName, OpenExisting | RdOnly | CloseOnExec);
                 if (dataFile.GetLength() != miscExt.compressed_data_size()) {
                     THROW_ERROR_EXCEPTION("Chunk length mismatch")
-                        << TErrorAttribute("chunk_id", chunkId)
-                        << TErrorAttribute("expected_size", miscExt.compressed_data_size())
-                        << TErrorAttribute("actual_size", dataFile.GetLength());
+                        .With("chunk_id", chunkId)
+                        .With("expected_size", miscExt.compressed_data_size())
+                        .With("actual_size", dataFile.GetLength());
                 }
             } catch (const std::exception& ex) {
                 THROW_ERROR_EXCEPTION("Failed to validate cached chunk size")
-                    << ex;
+                    .With(ex);
             }
 
-            YT_LOG_INFO("Chunk validation completed");
+            YT_TLOG_INFO("Chunk validation completed");
 
             auto chunk = CreateArtifact(location, key, descriptor.Descriptor);
             EndInsertIfEnabled(cookie, std::move(chunk), location);
         } catch (const std::exception& ex) {
-            YT_LOG_INFO(ex, "Chunk is corrupted");
+            YT_TLOG_INFO("Chunk is corrupted")
+                .With(ex);
 
             location->RemoveChunkFiles(chunkId, true);
 
@@ -842,10 +848,9 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG(
-            "Cached chunk object created (ChunkId: %v, LocationId: %v)",
-            descriptor.Id,
-            location->GetId());
+        YT_TLOG_DEBUG("Cached chunk object created")
+            .With("ChunkId", descriptor.Id)
+            .With("LocationId", location->GetId());
 
         location->UpdateChunkCount(+1);
         location->UpdateUsedSpace(+descriptor.DiskSpace);
@@ -857,10 +862,9 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG(
-            "Cached chunk object destroyed (ChunkId: %v, LocationId: %v)",
-            descriptor.Id,
-            location->GetId());
+        YT_TLOG_DEBUG("Cached chunk object destroyed")
+            .With("ChunkId", descriptor.Id)
+            .With("LocationId", location->GetId());
 
         location->UpdateChunkCount(-1);
         location->UpdateUsedSpace(-descriptor.DiskSpace);
@@ -905,7 +909,7 @@ private:
                 TError(
                     NExecNode::EErrorCode::ArtifactFetchFailed,
                     "Refusing to insert artifact into a disabled cache location")
-                    << TErrorAttribute("location_id", location->GetId()));
+                    .With("location_id", location->GetId()));
             return;
         }
 
@@ -947,18 +951,16 @@ private:
         }
 
         if (!inserted) {
-            YT_LOG_WARNING(
-                "Removing duplicate cached chunk (ChunkId: %v)",
-                chunkId);
+            YT_TLOG_WARNING("Removing duplicate cached chunk")
+                .With("ChunkId", chunkId);
             location->RemoveChunkFiles(chunkId, true);
             return;
         }
 
-        YT_LOG_DEBUG(
-            "Cached chunk registered (ChunkId: %v, LocationId: %v, DiskSpace: %v)",
-            chunkId,
-            location->GetId(),
-            descriptor.DiskSpace);
+        YT_TLOG_DEBUG("Cached chunk registered")
+            .With("ChunkId", chunkId)
+            .With("LocationId", location->GetId())
+            .With("DiskSpace", descriptor.DiskSpace);
     }
 
 
@@ -973,10 +975,9 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG(
-            "Chunk object added to cache (ChunkId: %v, LocationId: %v)",
-            artifact->GetId(),
-            artifact->GetLocation()->GetId());
+        YT_TLOG_DEBUG("Chunk object added to cache")
+            .With("ChunkId", artifact->GetId())
+            .With("LocationId", artifact->GetLocation()->GetId());
 
         TAsyncSlruCacheBase::OnAdded(artifact);
     }
@@ -985,10 +986,9 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG(
-            "Chunk object removed from cache (ChunkId: %v, LocationId: %v)",
-            artifact->GetId(),
-            artifact->GetLocation()->GetId());
+        YT_TLOG_DEBUG("Chunk object removed from cache")
+            .With("ChunkId", artifact->GetId())
+            .With("LocationId", artifact->GetLocation()->GetId());
 
         TAsyncSlruCacheBase::OnRemoved(artifact);
     }
@@ -1151,12 +1151,12 @@ private:
 
             IChunkWriter::TWriteBlocksOptions writeBlocksOptions;
 
-            YT_LOG_DEBUG("Opening chunk writer");
+            YT_TLOG_DEBUG("Opening chunk writer");
 
             WaitFor(checkedChunkWriter->Open())
                 .ThrowOnError();
 
-            YT_LOG_DEBUG("Getting chunk meta");
+            YT_TLOG_DEBUG("Getting chunk meta");
 
             auto chunkMeta = WaitFor(chunkReader->GetMeta(IChunkReader::TGetMetaOptions{
                 .ClientOptions = chunkReadOptions,
@@ -1199,16 +1199,14 @@ private:
             blockFetcher->Start();
 
             for (int index = 0; index < blockCount; ++index) {
-                YT_LOG_DEBUG(
-                    "Downloading block (Block: %v)",
-                    index);
+                YT_TLOG_DEBUG("Downloading block")
+                    .With("Block", index);
 
                 auto block = WaitFor(blockFetcher->FetchBlock(index))
                     .ValueOrThrow();
 
-                YT_LOG_DEBUG(
-                    "Writing block (Block: %v)",
-                    index);
+                YT_TLOG_DEBUG("Writing block")
+                    .With("Block", index);
 
                 if (!checkedChunkWriter->WriteBlock(writeBlocksOptions, chunkReadOptions.WorkloadDescriptor, block)) {
                     WaitFor(checkedChunkWriter->GetReadyEvent())
@@ -1219,7 +1217,7 @@ private:
                     .ThrowOnError();
             }
 
-            YT_LOG_DEBUG("Closing chunk");
+            YT_TLOG_DEBUG("Closing chunk");
 
             auto deferredChunkMeta = New<TDeferredChunkMeta>();
             deferredChunkMeta->CopyFrom(*chunkMeta);
@@ -1247,7 +1245,7 @@ private:
                     });
             }
 
-            YT_LOG_INFO("Chunk is downloaded into cache");
+            YT_TLOG_INFO("Chunk is downloaded into cache");
 
             TChunkDescriptor descriptor(chunkId, checkedChunkWriter->GetChunkInfo().disk_space());
             auto chunk = CreateArtifact(location,  key, descriptor, std::move(chunkMeta), std::move(lockedChunkGuard));
@@ -1256,9 +1254,11 @@ private:
             auto error = TError(
                 "Error downloading chunk %v into cache",
                 chunkId)
-                << ex;
+                .With(ex);
             cookie.Cancel(error);
-            YT_LOG_WARNING(error);
+            YT_TLOG_WARNING("Error downloading chunk into cache")
+                .With("ChunkId", chunkId)
+                .With(ex);
         }
     }
 
@@ -1292,9 +1292,10 @@ private:
             EndInsertIfEnabled(cookie, std::move(artifact), location);
         } catch (const std::exception& ex) {
             auto error = TError("Error downloading file artifact into cache")
-                << ex;
+                .With(ex);
             cookie.Cancel(error);
-            YT_LOG_WARNING(error);
+            YT_TLOG_WARNING("Error downloading file artifact into cache")
+                .With(ex);
         }
     }
 
@@ -1328,23 +1329,32 @@ private:
             chunkSpecs,
             FromProto<NChunkClient::TDataSourcePtr>(key.data_source()));
 
-        return [reader = std::move(reader), key, throttler] (IOutputStream* output) {
+        auto asyncStream = CreateFileReaderAdapter(reader);
+        auto prefetchingStream = CreatePrefetchingAdapter(
+            std::move(asyncStream),
+            GetArtifactCacheReaderConfig()->WindowSize);
+
+        return [prefetchingStream, key, throttler] (IOutputStream* output) {
             TThrottlingOutput throttlingOutput(output, throttler);
-            TBlock block;
-            while (reader->ReadBlock(&block)) {
-                if (block.Data.Empty()) {
-                    auto error = WaitFor(reader->GetReadyEvent());
-                    if (!error.IsOK()) {
-                        THROW_ERROR_EXCEPTION(
-                            NExecNode::EErrorCode::ArtifactFetchFailed,
-                            "Error while fetching artifact chunks")
-                            << TErrorAttribute("path", key.data_source().path())
-                            << TErrorAttribute("filesystem", FromProto<NControllerAgent::ELayerFilesystem>(key.filesystem()))
-                            << std::move(error);
-                    }
-                } else {
-                    throttlingOutput.Write(block.Data.Begin(), block.Size());
+            auto syncStream = CreateSyncAdapter(prefetchingStream);
+
+            const void* buf;
+            while (true) {
+                size_t size;
+                try {
+                    size = syncStream->Next(&buf);
+                } catch (const std::exception& ex) {
+                    THROW_ERROR_EXCEPTION(
+                        NExecNode::EErrorCode::ArtifactFetchFailed,
+                        "Error while fetching artifact chunks")
+                        .With("path", key.data_source().path())
+                        .With("filesystem", FromProto<NControllerAgent::ELayerFilesystem>(key.filesystem()))
+                        .With(ex);
                 }
+                if (size == 0) {
+                    break;
+                }
+                throttlingOutput.Write(buf, size);
             }
         };
     }
@@ -1379,9 +1389,12 @@ private:
             EndInsertIfEnabled(cookie, std::move(chunk), location);
         } catch (const std::exception& ex) {
             auto error = TError("Error downloading table artifact into cache")
-                << ex;
+                .With(ex);
             cookie.Cancel(error);
-            YT_LOG_WARNING(error);
+            YT_TLOG_WARNING("Error downloading table artifact into cache")
+                .With("ArtifactKey", key)
+                .With("ChunkId", chunkId)
+                .With(ex);
         }
     }
 
@@ -1511,9 +1524,9 @@ private:
                         return TError(
                             NExecNode::EErrorCode::ArtifactFetchFailed,
                             "Error while fetching artifact chunks")
-                            << TErrorAttribute("path", key.data_source().path())
-                            << TErrorAttribute("filesystem", FromProto<NControllerAgent::ELayerFilesystem>(key.filesystem()))
-                            << std::move(readerError);
+                            .With("path", key.data_source().path())
+                            .With("filesystem", FromProto<NControllerAgent::ELayerFilesystem>(key.filesystem()))
+                            .With(std::move(readerError));
                     },
                 });
         };
@@ -1529,7 +1542,7 @@ private:
     {
         YT_ASSERT_INVOKER_AFFINITY(location->GetAuxPoolInvoker());
 
-        YT_LOG_INFO("Producing artifact file");
+        YT_TLOG_INFO("Producing artifact file");
 
         auto dataFileName = location->GetChunkPath(chunkId);
         auto metaFileName = dataFileName + ArtifactMetaSuffix;
@@ -1550,7 +1563,9 @@ private:
                         NFS::Remove(path);
                     }
                 } catch (const std::exception& ex) {
-                    YT_LOG_ERROR(ex, "Failed to cleanup a temporary file (Path: %v)", path);
+                    YT_TLOG_ERROR("Failed to cleanup a temporary file")
+                        .With("Path", path)
+                        .With(ex);
                 }
             }
         };
@@ -1653,38 +1668,34 @@ private:
 
         auto readMeta = [&] () -> std::optional<TArtifactKey> {
             if (metaBlob.Size() < sizeof(TArtifactMetaHeader)) {
-                YT_LOG_WARNING(
-                    "Artifact meta file %v is too short: at least %v bytes expected",
-                    metaFileName,
-                    sizeof(TArtifactMetaHeader));
+                YT_TLOG_WARNING("Artifact meta file is too short")
+                    .With("FileName", metaFileName)
+                    .With("MinSize", sizeof(TArtifactMetaHeader));
                 return std::nullopt;
             }
 
             const auto* header = reinterpret_cast<const TArtifactMetaHeader*>(metaBlob.Begin());
             if (header->Signature != header->ExpectedSignature) {
-                YT_LOG_WARNING(
-                    "Bad signature in artifact meta file %v: expected %X, actual %X",
-                    metaFileName,
-                    header->ExpectedSignature,
-                    header->Signature);
+                YT_TLOG_WARNING("Bad signature in artifact meta file")
+                    .With("FileName", metaFileName)
+                    .WithFormat("ExpectedSignature", "%X", header->ExpectedSignature)
+                    .WithFormat("Signature", "%X", header->Signature);
                 return std::nullopt;
             }
 
             if (header->Version != header->ExpectedVersion) {
-                YT_LOG_WARNING(
-                    "Incompatible version in artifact meta file %v: expected %v, actual %v",
-                    metaFileName,
-                    header->ExpectedVersion,
-                    header->Version);
+                YT_TLOG_WARNING("Incompatible version in artifact meta file")
+                    .With("FileName", metaFileName)
+                    .With("ExpectedVersion", header->ExpectedVersion)
+                    .With("Version", header->Version);
                 return std::nullopt;
             }
 
             metaBlob = metaBlob.Slice(sizeof(TArtifactMetaHeader), metaBlob.Size());
             TArtifactKey key;
             if (!TryDeserializeProto(&key, metaBlob)) {
-                YT_LOG_WARNING(
-                    "Failed to parse artifact meta file %v",
-                    metaFileName);
+                YT_TLOG_WARNING("Failed to parse artifact meta file")
+                    .With("FileName", metaFileName);
                 return std::nullopt;
             }
 

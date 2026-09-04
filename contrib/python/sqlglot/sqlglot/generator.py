@@ -9,6 +9,7 @@ from functools import reduce, wraps
 from sqlglot import exp
 from sqlglot.errors import ErrorLevel, UnsupportedError, concat_messages
 from sqlglot.expressions import apply_index_offset
+from sqlglot.expressions.core import maybe_parse
 from sqlglot.helper import csv, name_sequence, seq_get
 from sqlglot.jsonpath import ALL_JSON_PATH_PARTS, JSON_PATH_PART_TRANSFORMS
 from sqlglot.time import format_time
@@ -139,6 +140,7 @@ class Generator:
         ),
         exp.AnalyzeColumns: lambda self, e: self.sql(e, "this"),
         exp.AnalyzeWith: lambda self, e: self.expressions(e, prefix="WITH ", sep=" "),
+        exp.ArrayContainedBy: lambda self, e: self.binary(e, "<@"),
         exp.ArrayContainsAll: lambda self, e: self.binary(e, "@>"),
         exp.ArrayOverlaps: lambda self, e: self.binary(e, "&&"),
         exp.AssumeColumnConstraint: lambda self, e: f"ASSUME ({self.sql(e, 'this')})",
@@ -147,6 +149,7 @@ class Generator:
         exp.CaseSpecificColumnConstraint: lambda _, e: (
             f"{'NOT ' if e.args.get('not_') else ''}CASESPECIFIC"
         ),
+        exp.CalledOnNullInputProperty: lambda *_: "CALLED ON NULL INPUT",
         exp.Ceil: lambda self, e: self.ceil_floor(e),
         exp.CharacterSetColumnConstraint: lambda self, e: f"CHARACTER SET {self.sql(e, 'this')}",
         exp.CharacterSetProperty: lambda self, e: (
@@ -203,6 +206,7 @@ class Generator:
         exp.JSONBContainsAnyTopKeys: lambda self, e: self.binary(e, "?|"),
         exp.JSONBContainsAllTopKeys: lambda self, e: self.binary(e, "?&"),
         exp.JSONBDeleteAtPath: lambda self, e: self.binary(e, "#-"),
+        exp.JSONBPathExists: lambda self, e: self.binary(e, "@?"),
         exp.JSONObject: lambda self, e: self._jsonobject_sql(e),
         exp.JSONObjectAgg: lambda self, e: self._jsonobject_sql(e),
         exp.LanguageProperty: lambda self, e: self.naked_property(e),
@@ -330,6 +334,10 @@ class Generator:
     # Whether the plural form of date parts like day (i.e. "days") is supported in INTERVALs
     INTERVAL_ALLOWS_PLURAL_FORM = True
 
+    # Whether intervals in a REFRESH schedule (AutoRefreshProperty) are generated without the
+    # INTERVAL keyword, e.g. ClickHouse's REFRESH EVERY 30 SECOND
+    AUTO_REFRESH_BARE_INTERVALS = False
+
     # Whether limit and fetch are supported (possible values: "ALL", "LIMIT", "FETCH")
     LIMIT_FETCH = "ALL"
 
@@ -398,9 +406,6 @@ class Generator:
     # UNNEST WITH ORDINALITY (presto) instead of UNNEST WITH OFFSET (bigquery)
     UNNEST_WITH_ORDINALITY = True
 
-    # Whether FILTER (WHERE cond) can be used for conditional aggregation
-    AGGREGATE_FILTER_SUPPORTED = True
-
     # Whether JOIN sides (LEFT, RIGHT) are supported in conjunction with SEMI/ANTI join kinds
     SEMI_ANTI_JOIN_WITH_SIDE = True
 
@@ -424,6 +429,9 @@ class Generator:
 
     # The keyword to use when specifying the seed of a sample clause
     TABLESAMPLE_SEED_KEYWORD = "SEED"
+
+    # Whether the historical data clause (AT ... / BEFORE ...) is generated after the table alias
+    HISTORICAL_DATA_POST_ALIAS = False
 
     # Whether COLLATE is a function instead of a binary operator
     COLLATE_IS_FUNC = False
@@ -451,6 +459,9 @@ class Generator:
 
     # Whether UNPIVOT aliases are Identifiers (False means they're Literals)
     UNPIVOT_ALIASES_ARE_IDENTIFIERS = True
+
+    # Whether a (UN)PIVOT's alias is introduced with AS (Oracle rejects it, ORA-03048)
+    PIVOT_ALIAS_WITH_AS = True
 
     # What delimiter to use for separating JSON key/value pairs
     JSON_KEY_VALUE_PAIR_SEP = ":"
@@ -488,6 +499,12 @@ class Generator:
 
     # Whether to escape keys using single quotes in JSON paths
     JSON_PATH_SINGLE_QUOTE_ESCAPE = False
+
+    # Whether a quoted JSON path key (e.g. from a quoted identifier or ['key'] bracket) must be
+    # rendered in bracket form to preserve its case-sensitivity, even if it would otherwise match
+    # SAFE_JSON_PATH_KEY_RE and render as a bare dotted key. Needed for dialects like Databricks
+    # where a bare colon key is case-insensitive but a bracketed key is case-sensitive.
+    JSON_PATH_KEY_QUOTED_FORCES_BRACKETS = False
 
     # The JSONPathPart expressions supported by this dialect
     SUPPORTED_JSON_PATH_PARTS: t.ClassVar = ALL_JSON_PATH_PARTS.copy()
@@ -668,6 +685,7 @@ class Generator:
         exp.AutoRefreshProperty: exp.Properties.Location.POST_SCHEMA,
         exp.BackupProperty: exp.Properties.Location.POST_SCHEMA,
         exp.BlockCompressionProperty: exp.Properties.Location.POST_NAME,
+        exp.CalledOnNullInputProperty: exp.Properties.Location.POST_SCHEMA,
         exp.CatalogProperty: exp.Properties.Location.POST_CREATE,
         exp.CharacterSetProperty: exp.Properties.Location.POST_SCHEMA,
         exp.ChecksumProperty: exp.Properties.Location.POST_NAME,
@@ -1007,23 +1025,24 @@ class Generator:
         if not comments or isinstance(expression, self.EXCLUDE_COMMENTS):
             return sql
 
-        comments_sql = " ".join(
-            f"/*{self.sanitize_comment(comment)}*/" for comment in comments if comment
-        )
+        comments_list = [
+            f"/*{self._replace_line_breaks(self.sanitize_comment(comment))}*/"
+            for comment in comments
+            if comment
+        ]
 
-        if not comments_sql:
+        if not comments_list:
             return sql
 
-        comments_sql = self._replace_line_breaks(comments_sql)
-
         if separated or isinstance(expression, self.WITH_SEPARATED_COMMENTS):
+            comments_sql = self.sep().join(comments_list)
             return (
                 f"{self.sep()}{comments_sql}{sql}"
                 if not sql or sql[0].isspace()
                 else f"{comments_sql}{self.sep()}{sql}"
             )
 
-        return f"{sql} {comments_sql}"
+        return f"{sql} {' '.join(comments_list)}"
 
     def wrap(self, expression: exp.Expr | str) -> str:
         this_sql = (
@@ -1506,7 +1525,11 @@ class Generator:
         return sql
 
     def with_sql(self, expression: exp.With) -> str:
+        udfs = self.expressions(expression, key="udfs", flat=True)
+        udfs = f"WITH {udfs}" if udfs else ""
+
         sql = self.expressions(expression, flat=True)
+
         recursive = (
             "RECURSIVE "
             if self.CTE_RECURSIVE_KEYWORD_REQUIRED and expression.args.get("recursive")
@@ -1515,7 +1538,8 @@ class Generator:
         search = self.sql(expression, "search")
         search = f" {search}" if search else ""
 
-        return f"WITH {recursive}{sql}{search}"
+        sql = f"WITH {recursive}{sql}{search}" if sql else ""
+        return f"{udfs} {sql}" if udfs and sql else f"{udfs}{sql}"
 
     def cte_sql(self, expression: exp.CTE) -> str:
         alias = expression.args.get("alias")
@@ -1803,7 +1827,8 @@ class Generator:
         constraints = " CONSTRAINTS" if expression.args.get("constraints") else ""
         purge = " PURGE" if expression.args.get("purge") else ""
         sync = " SYNC" if expression.args.get("sync") else ""
-        return f"DROP{temporary}{materialized}{iceberg} {kind}{concurrently_sql}{exists_sql}{this}{on_cluster}{expressions}{cascade}{restrict}{constraints}{purge}{sync}"
+        force = " FORCE" if expression.args.get("force") else ""
+        return f"DROP{temporary}{materialized}{iceberg} {kind}{concurrently_sql}{exists_sql}{this}{on_cluster}{expressions}{cascade}{restrict}{constraints}{purge}{sync}{force}"
 
     def set_operation(self, expression: exp.SetOperation) -> str:
         op_type = type(expression)
@@ -1893,16 +1918,9 @@ class Generator:
         return f"{percent}{rows}{with_ties}"
 
     def filter_sql(self, expression: exp.Filter) -> str:
-        if self.AGGREGATE_FILTER_SUPPORTED:
-            this = self.sql(expression, "this")
-            where = self.sql(expression, "expression").strip()
-            return f"{this} FILTER({where})"
-
-        agg = expression.this
-        agg_arg = agg.this
-        cond = expression.expression.this
-        agg_arg.replace(exp.If(this=cond.copy(), true=agg_arg.copy()))
-        return self.sql(agg)
+        this = self.sql(expression, "this")
+        where = self.sql(expression, "expression").strip()
+        return f"{this} FILTER({where})"
 
     def hint_sql(self, expression: exp.Hint) -> str:
         if not self.QUERY_HINTS:
@@ -1944,6 +1962,20 @@ class Generator:
 
         params = self.sql(expression, "params")
         return f"{unique}{primary}{amp}{index}{name}{table}{params}"
+
+    def dynamicidentifier_sql(self, expression: exp.DynamicIdentifier) -> str:
+        this = expression.this
+        if this and this.is_string:
+            resolved = maybe_parse(this.name).sql(self.dialect)
+            if "expressions" in expression.args:
+                # `IDENTIFIER(...)` invoked as a function, e.g. `IDENTIFIER('my_func')(1, 2)`
+                # We can't safely emit the call to other dialects since name/arg semantics may differ
+                self.unsupported(
+                    "Transpiling dynamically-invoked IDENTIFIER() functions is unsupported"
+                )
+            return resolved
+        self.unsupported("IDENTIFIER() with non-literal arguments is not supported")
+        return self.func("IDENTIFIER", this)
 
     def identifier_sql(self, expression: exp.Identifier) -> str:
         text = expression.name
@@ -2254,6 +2286,8 @@ class Generator:
         exists = " IF EXISTS" if expression.args.get("exists") else ""
         where = self.sql(expression, "where")
         where = f"{self.sep()}REPLACE WHERE {where}" if where else ""
+        using = self.expressions(expression, key="using", flat=True)
+        using = f"{self.sep()}REPLACE USING ({using})" if using else ""
         expression_sql = f"{self.sep()}{self.sql(expression, 'expression')}"
         on_conflict = self.sql(expression, "conflict")
         on_conflict = f" {on_conflict}" if on_conflict else ""
@@ -2274,7 +2308,7 @@ class Generator:
         source = self.sql(expression, "source")
         source = f"TABLE {source}" if source else ""
 
-        sql = f"INSERT{hint}{alternative}{ignore}{this}{stored}{by_name}{exists}{partition_by}{settings}{where}{expression_sql}{source}"
+        sql = f"INSERT{hint}{alternative}{ignore}{this}{stored}{by_name}{exists}{partition_by}{settings}{where}{using}{expression_sql}{source}"
         return self.prepend_ctes(expression, sql)
 
     def introducer_sql(self, expression: exp.Introducer) -> str:
@@ -2393,10 +2427,12 @@ class Generator:
         laterals = self.expressions(expression, key="laterals", sep="")
 
         file_format = self.sql(expression, "format")
+        pattern = self.sql(expression, "pattern")
         if file_format:
-            pattern = self.sql(expression, "pattern")
             pattern = f", PATTERN => {pattern}" if pattern else ""
             file_format = f" (FILE_FORMAT => {file_format}{pattern})"
+        elif pattern:
+            file_format = f" (PATTERN => {pattern})"
 
         ordinality = expression.args.get("ordinality") or ""
         if ordinality:
@@ -2405,7 +2441,10 @@ class Generator:
 
         when = self.sql(expression, "when")
         if when:
-            table = f"{table} {when}"
+            if self.HISTORICAL_DATA_POST_ALIAS:
+                alias = f"{alias} {when}"
+            else:
+                table = f"{table} {when}"
 
         changes = self.sql(expression, "changes")
         changes = f" {changes}" if changes else ""
@@ -2563,7 +2602,8 @@ class Generator:
                 expression.fields[0].set("expressions", new_field_exprs)
 
         alias = self.sql(expression, "alias")
-        alias = f" AS {alias}" if alias else ""
+        if alias:
+            alias = f" AS {alias}" if self.PIVOT_ALIAS_WITH_AS else f" {alias}"
 
         fields = self.expressions(
             expression,
@@ -3215,7 +3255,12 @@ class Generator:
         limit = expression.args.get("limit")
 
         if self.LIMIT_FETCH == "LIMIT" and isinstance(limit, exp.Fetch):
-            limit = exp.Limit(expression=exp.maybe_copy(limit.args.get("count")))
+            count = limit.args.get("count")
+            # "FETCH FIRST ROWS ONLY" without a count means one row per the SQL
+            # standard; emitting a bare "LIMIT" here would produce invalid SQL.
+            limit = exp.Limit(
+                expression=exp.maybe_copy(count) if count is not None else exp.Literal.number(1)
+            )
         elif self.LIMIT_FETCH == "FETCH" and isinstance(limit, exp.Limit):
             limit = exp.Fetch(direction="FIRST", count=exp.maybe_copy(limit.expression))
 
@@ -3371,7 +3416,9 @@ class Generator:
         replace = f"{self.seg('REPLACE')} ({replace})" if replace else ""
         rename = self.expressions(expression, key="rename", flat=True)
         rename = f"{self.seg('RENAME')} ({rename})" if rename else ""
-        return f"*{except_}{replace}{rename}"
+        ilike = self.sql(expression, "ilike")
+        ilike = f"{self.seg('ILIKE')} {ilike}" if ilike else ""
+        return f"*{ilike}{except_}{replace}{rename}"
 
     def parameter_sql(self, expression: exp.Parameter) -> str:
         this = self.sql(expression, "this")
@@ -3586,7 +3633,12 @@ class Generator:
             if self.NORMALIZE_EXTRACT_DATE_PARTS
             else expression.this
         )
-        this_sql = self.sql(this) if self.EXTRACT_ALLOWS_QUOTES else this.name
+        if self.EXTRACT_ALLOWS_QUOTES:
+            this_sql = self.sql(this)
+        elif isinstance(this, exp.WeekStart):
+            this_sql = self.weekstart_name(this)
+        else:
+            this_sql = this.name
         expression_sql = self.sql(expression, "expression")
 
         return f"EXTRACT({this_sql} FROM {expression_sql})"
@@ -3693,6 +3745,10 @@ class Generator:
         options = f" {options}" if options else ""
         return f"PRIMARY KEY{this} ({expressions}){include}{options}"
 
+    def timeserieskey_sql(self, expression: exp.TimeseriesKey) -> str:
+        self.unsupported("TIMESERIES primary key columns are not supported")
+        return self.sql(expression, "this")
+
     def if_sql(self, expression: exp.If) -> str:
         return self.case_sql(exp.Case(ifs=[expression], default=expression.args.get("false")))
 
@@ -3718,9 +3774,6 @@ class Generator:
 
     def jsonpath_sql(self, expression: exp.JSONPath) -> str:
         path = self.expressions(expression, sep="", flat=True).lstrip(".")
-
-        if expression.args.get("escape"):
-            path = self.escape_str(path)
 
         if self.QUOTE_JSON_PATH:
             path = f"{self.dialect.QUOTE_START}{path}{self.dialect.QUOTE_END}"
@@ -3881,6 +3934,11 @@ class Generator:
         return f"(SELECT {self.sql(unnest)})"
 
     def interval_sql(self, expression: exp.Interval) -> str:
+        include_keyword = not self.AUTO_REFRESH_BARE_INTERVALS or not isinstance(
+            expression.find_ancestor(exp.AutoRefreshProperty, exp.Select),
+            exp.AutoRefreshProperty,
+        )
+        interval_keyword = "INTERVAL" if include_keyword else ""
         unit_expression = expression.args.get("unit")
         unit = self.sql(unit_expression) if unit_expression else ""
         if not self.INTERVAL_ALLOWS_PLURAL_FORM:
@@ -3890,17 +3948,22 @@ class Generator:
         if self.SINGLE_STRING_INTERVAL:
             this = expression.this.name if expression.this else ""
             if this:
+                interval_keyword = f"{interval_keyword} " if interval_keyword else ""
                 if unit_expression and isinstance(unit_expression, exp.IntervalSpan):
-                    return f"INTERVAL '{this}'{unit}"
-                return f"INTERVAL '{this}{unit}'"
-            return f"INTERVAL{unit}"
+                    return f"{interval_keyword}'{this}'{unit}"
+                return f"{interval_keyword}'{this}{unit}'"
+            return f"{interval_keyword}{unit}"
 
         this = self.sql(expression, "this")
         if this:
-            unwrapped = isinstance(expression.this, self.UNWRAPPED_INTERVAL_VALUES)
-            this = f" {this}" if unwrapped else f" ({this})"
+            if not include_keyword and expression.this.is_string:
+                this = expression.this.name
+            if not isinstance(expression.this, self.UNWRAPPED_INTERVAL_VALUES):
+                this = f"({this})"
+            if include_keyword:
+                this = f" {this}"
 
-        return f"INTERVAL{this}{unit}"
+        return f"{interval_keyword}{this}{unit}"
 
     def return_sql(self, expression: exp.Return) -> str:
         return f"RETURN {self.sql(expression, 'this')}"
@@ -3975,6 +4038,15 @@ class Generator:
         zone = self.sql(expression, "zone")
         return f"{this} AT TIME ZONE {zone} AT TIME ZONE 'UTC'"
 
+    def fromiso8601date_sql(self, expression: exp.FromISO8601Date) -> str:
+        return self.sql(exp.cast(expression.this, exp.DType.DATE))
+
+    def fromiso8601timestamp_sql(self, expression: exp.FromISO8601Timestamp) -> str:
+        return self.sql(exp.cast(expression.this, exp.DType.TIMESTAMPTZ))
+
+    def fromiso8601timestampnanos_sql(self, expression: exp.FromISO8601TimestampNanos) -> str:
+        return self.sql(exp.cast(expression.this, exp.DType.TIMESTAMPTZ))
+
     def add_sql(self, expression: exp.Add) -> str:
         return self.binary(expression, "+")
 
@@ -3994,13 +4066,11 @@ class Generator:
         stack: list[str | exp.Expr] | None = None,
     ) -> str:
         if stack is not None:
-            if expression.expressions:
-                stack.append(self.expressions(expression, sep=f" {op} "))
-            else:
-                stack.append(expression.right)
-                if expression.comments and self.comments:
-                    op = self.maybe_comment(op, comments=expression.comments)
-                stack.extend((op, expression.left))
+            stack.append(expression.right)
+            if expression.comments and self.comments:
+                op = self.maybe_comment(op, comments=expression.comments)
+
+            stack.extend((op, expression.left))
             return op
 
         stack = [expression]
@@ -4053,6 +4123,18 @@ class Generator:
     # Base implementation that excludes safe, zone, and target_type metadata args
     def strtotime_sql(self, expression: exp.StrToTime) -> str:
         return self.func("STR_TO_TIME", expression.this, expression.args.get("format"))
+
+    # Base implementation that excludes the safe and default_year metadata args
+    def strtodate_sql(self, expression: exp.StrToDate) -> str:
+        return self.func("STR_TO_DATE", expression.this, expression.args.get("format"))
+
+    def parsedatetime_sql(self, expression: exp.ParseDatetime) -> str:
+        return self.func(
+            "PARSE_DATETIME",
+            expression.this,
+            expression.args.get("format"),
+            expression.args.get("zone"),
+        )
 
     def currentdate_sql(self, expression: exp.CurrentDate) -> str:
         zone = self.sql(expression, "this")
@@ -4387,11 +4469,11 @@ class Generator:
         return self.binary(expression, ">=")
 
     def is_sql(self, expression: exp.Is) -> str:
+        negate = expression.args.get("negate")
         if not self.IS_BOOL_ALLOWED and isinstance(expression.expression, exp.Boolean):
-            return self.sql(
-                expression.this if expression.expression.this else exp.not_(expression.this)
-            )
-        return self.binary(expression, "IS")
+            positive = bool(expression.expression.this) != bool(negate)
+            return self.sql(expression.this if positive else exp.not_(expression.this))
+        return self.binary(expression, "IS NOT" if negate else "IS")
 
     def _like_sql(
         self,
@@ -5108,8 +5190,8 @@ class Generator:
         if self.LAST_DAY_SUPPORTS_DATE_PART:
             return self.function_fallback_sql(expression)
 
-        unit = expression.text("unit")
-        if unit and unit != "MONTH":
+        unit = expression.args.get("unit")
+        if unit and unit.name.upper() != "MONTH":
             self.unsupported("Date parts are not supported in LAST_DAY.")
 
         return self.func("LAST_DAY", expression.this)
@@ -5228,10 +5310,20 @@ class Generator:
             this = self.json_path_part(this)
             return f".{this}" if this else ""
 
-        if self.SAFE_JSON_PATH_KEY_RE.match(this):
+        quoted = expression.args.get("quoted")
+        if not (
+            quoted and self.JSON_PATH_KEY_QUOTED_FORCES_BRACKETS
+        ) and self.SAFE_JSON_PATH_KEY_RE.match(this):
             return f".{this}"
 
         this = self.json_path_part(this)
+
+        if quoted and self.QUOTE_JSON_PATH:
+            # The whole path is rendered as a single quoted string literal, so the bracketed key
+            # (which may itself contain backslash-escaped quotes, e.g. ["x \"y\"z"]) must be
+            # escaped again for the outer string literal (-> ["x \\"y\\"z"]).
+            this = self.escape_str(this)
+
         return (
             f"[{this}]"
             if self._quote_json_path_key_using_brackets and self.JSON_PATH_BRACKETED_KEY_SUPPORTED
@@ -5611,7 +5703,11 @@ class Generator:
 
     def arrayagg_sql(self, expression: exp.ArrayAgg) -> str:
         array_agg = self.function_fallback_sql(expression)
-        return self._add_arrayagg_null_filter(array_agg, expression, expression.this)
+        column_expr = expression.this
+        if isinstance(column_expr, exp.Order):
+            column_expr = column_expr.this
+
+        return self._add_arrayagg_null_filter(array_agg, expression, column_expr)
 
     def slice_sql(self, expression: exp.Slice) -> str:
         step = self.sql(expression, "step")
@@ -6128,13 +6224,30 @@ class Generator:
         this = expression.this
         return self.func("LOCALTIMESTAMP", this) if this else "LOCALTIMESTAMP"
 
-    def weekstart_sql(self, expression: exp.WeekStart) -> str:
-        this = expression.this.name.upper()
-        if self.dialect.WEEK_OFFSET == -1 and this == "SUNDAY":
-            # BigQuery specific optimization since WEEK(SUNDAY) == WEEK
-            return "WEEK"
+    def weekstart_name(self, expression: exp.WeekStart) -> str:
+        import sqlglot.dialects.dialect
 
-        return self.func("WEEK", expression.this)
+        # WEEK(<day>) is BigQuery-only syntax, so it degrades to the plain WEEK unit
+        this = expression.this.name.upper()
+
+        dow_from_week_start_day = sqlglot.dialects.dialect.WEEK_START_DAY_TO_DOW.get(this)
+        dow_from_week_offset = sqlglot.dialects.dialect.week_offset_to_dow(self.dialect.WEEK_OFFSET)
+
+        if dow_from_week_start_day != dow_from_week_offset:
+            self.unsupported(
+                f"WEEK({this}) is not supported; falling back to the default week start day"
+            )
+
+        return "WEEK"
+
+    def weekstart_sql(self, expression: exp.WeekStart) -> str:
+        name = self.weekstart_name(expression)
+
+        # DateTrunc stores string literal units, whereas TimeUnit expressions store keywords
+        if isinstance(expression.parent, exp.DateTrunc):
+            return self.sql(exp.Literal.string(name))
+
+        return name
 
     def chr_sql(self, expression: exp.Chr, name: str = "CHR") -> str:
         this = self.expressions(expression)
@@ -6144,7 +6257,12 @@ class Generator:
 
     def block_sql(self, expression: exp.Block) -> str:
         expressions = self.expressions(expression, sep="; ", flat=True)
-        return f"{expressions}" if expressions else ""
+        begin = "BEGIN " if expression.args.get("begin") else ""
+        return f"{begin}{expressions}" if expressions else ""
+
+    def functionspecification_sql(self, expression: exp.FunctionSpecification) -> str:
+        self.unsupported("Unsupported Inline UDFs syntax")
+        return ""
 
     def storedprocedure_sql(self, expression: exp.StoredProcedure) -> str:
         self.unsupported("Unsupported Stored Procedure syntax")

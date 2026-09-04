@@ -10,15 +10,15 @@ namespace NYT::NOffshoreDataGateway {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, OffshoreDataGatewayLogger, "OffshoreDataGateway");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, OffshoreDataGatewayLogger, "OffshoreDataGateway");
 
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, OffshoreDataGatewayProfiler, "/offshore_data_gateway");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, OffshoreDataGatewayProfiler, "/offshore_data_gateway");
 
 ////////////////////////////////////////////////////////////////////////////////
 
-DECLARE_REFCOUNTED_CLASS(TOffshoreDataGatewayBootstrapConfig)
-DECLARE_REFCOUNTED_CLASS(TOffshoreDataGatewayProgramConfig)
-DECLARE_REFCOUNTED_CLASS(TOffshoreDataGatewayDynamicConfig)
+DECLARE_REFCOUNTED_STRUCT(TOffshoreDataGatewayBootstrapConfig)
+DECLARE_REFCOUNTED_STRUCT(TOffshoreDataGatewayProgramConfig)
+DECLARE_REFCOUNTED_STRUCT(TOffshoreDataGatewayDynamicConfig)
 
 DECLARE_REFCOUNTED_CLASS(TDynamicConfigManager)
 

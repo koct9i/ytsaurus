@@ -373,16 +373,13 @@ void TObjectProxyBase::BeforeInvoke(const IYPathServiceContextPtr& context)
     if (requestHeader.HasExtension(NObjectClient::NProto::TPrerequisitesExt::prerequisites_ext)) {
         const auto& prerequisitesExt = requestHeader.GetExtension(NObjectClient::NProto::TPrerequisitesExt::prerequisites_ext);
 
-        YT_LOG_DEBUG_IF(
-            prerequisitesExt.revisions_size() != 0,
-            "Request contains prerequisite revisions (RequestId: %v, AuthenticationIdentity: %v, NodeId: %v, "
-            "OriginalTargetPath: %v, OriginalAdditionalPaths: %v, Revisions: %v)",
-            FromProto<TRequestId>(requestHeader.request_id()),
-            GetCurrentAuthenticationIdentity(),
-            GetId(),
-            GetOriginalRequestTargetYPath(requestHeader),
-            GetOriginalRequestAdditionalPaths(requestHeader),
-            prerequisitesExt.revisions());
+        YT_TLOG_DEBUG_IF(prerequisitesExt.revisions_size() != 0, "Request contains prerequisite revisions")
+            .With("RequestId", FromProto<TRequestId>(requestHeader.request_id()))
+            .With("AuthenticationIdentity", GetCurrentAuthenticationIdentity())
+            .With("NodeId", GetId())
+            .With("OriginalTargetPath", GetOriginalRequestTargetYPath(requestHeader))
+            .With("OriginalAdditionalPaths", GetOriginalRequestAdditionalPaths(requestHeader))
+            .With("Revisions", prerequisitesExt.revisions());
 
         objectManager->ValidatePrerequisites(
             requestHeader,
@@ -810,12 +807,12 @@ bool TObjectProxyBase::SetBuiltinAttribute(TInternedAttributeKey key, const TYso
             }
 
             if (owner->IsUser()) {
-                YT_LOG_ALERT_IF(
+                YT_TLOG_ALERT_IF(
                     owner->AsUser()->GetPendingRemoval(),
-                    "User pending for removal is being set as %Qv attribute for object (User: %v, ObjectId: %v)",
-                    EInternedAttributeKey::Owner.Unintern(),
-                    owner->GetName(),
-                    GetId());
+                    "User pending for removal is being set as an attribute for object")
+                    .With("Attribute", EInternedAttributeKey::Owner.Unintern())
+                    .With("User", owner->GetName())
+                    .With("ObjectId", GetId());
             }
 
             if (!force) {
@@ -876,7 +873,7 @@ void TObjectProxyBase::GuardedValidateCustomAttributeUpdate(
     } catch (const std::exception& ex) {
         THROW_ERROR_EXCEPTION("Error setting custom attribute %Qv",
             ToYPathLiteral(key))
-            << ex;
+            .With(ex);
     }
 }
 
@@ -890,7 +887,7 @@ void TObjectProxyBase::GuardedValidateCustomAttributeRemoval(TStringBuf key)
     } catch (const std::exception& ex) {
         THROW_ERROR_EXCEPTION("Error removing custom attribute %Qv",
             ToYPathLiteral(key))
-            << ex;
+            .With(ex);
     }
 }
 
@@ -952,8 +949,8 @@ void TObjectProxyBase::ValidateAnnotation(const std::string& annotation)
 {
     if (annotation.size() > MaxAnnotationLength) {
         THROW_ERROR_EXCEPTION("Annotation is too long")
-            << TErrorAttribute("annotation_length", annotation.size())
-            << TErrorAttribute("maximum_annotation_length", MaxAnnotationLength);
+            .With("annotation_length", annotation.size())
+            .With("maximum_annotation_length", MaxAnnotationLength);
     }
 
     auto isAsciiText = [] (char c) {
@@ -993,6 +990,11 @@ bool TObjectProxyBase::IsSecondaryMaster() const
 void TObjectProxyBase::RequireLeader() const
 {
     Bootstrap_->GetObjectService()->RequireLeader();
+}
+
+TError TObjectProxyBase::RequireLeaderAsync() const
+{
+    return Bootstrap_->GetObjectService()->RequireLeaderAsync();
 }
 
 void TObjectProxyBase::PostToSecondaryMasters(IServiceContextPtr context)

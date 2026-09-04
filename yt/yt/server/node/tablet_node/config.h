@@ -30,6 +30,8 @@
 
 #include <yt/yt/core/concurrency/config.h>
 
+#include <yt/yt/core/misc/config.h>
+
 #include <yt/yt/core/rpc/public.h>
 
 #include <yt/yt/core/ytree/polymorphic_yson_struct.h>
@@ -132,7 +134,13 @@ struct TTabletManagerDynamicConfig
     //! snapshots with redirection hint may be evicted.
     std::optional<TDuration> ExtendedSnapshotEvictionTimeout;
 
+    //! Timeout for waiting on a smooth movement stage change when a write
+    //! arrives at a tablet that is temporarily in read-only stage.
+    TDuration WaitOnReadOnlySmoothMovementStageTimeout;
+
     bool YieldBeforeBuildingLsmActions;
+
+    bool AccountActiveStoreLookupHashTableToTabletStatic;
 
     REGISTER_YSON_STRUCT(TTabletManagerDynamicConfig);
 
@@ -199,8 +207,11 @@ DEFINE_REFCOUNTED_TYPE(TStoreBackgroundActivityOrchidConfig)
 struct TCompactionHintFetcherConfig
     : public NYTree::TYsonStruct
 {
+    static const TExponentialBackoffOptions DefaultRetryBackoff;
+
     NConcurrency::TPeriodicExecutorOptions PeriodicExecutor;
     NConcurrency::TThroughputThrottlerConfigPtr RequestThrottler;
+    TExponentialBackoffOptions RetryBackoff;
 
     REGISTER_YSON_STRUCT(TCompactionHintFetcherConfig);
 
@@ -285,6 +296,8 @@ struct TStoreCompactorDynamicConfig
 
     std::optional<std::string> CompactionFairSharePool;
     std::optional<std::string> PartitioningFairSharePool;
+
+    bool ReuseCompactionInvokerForWriterCompression;
 
     bool ScheduleNewTasksAfterTaskCompletion;
 
@@ -551,6 +564,7 @@ struct TRowCacheControllerDynamicConfig
     i64 MemoryLimitGapInBytes;
     double MemoryLimitGapFraction;
     double RotationMemoryThreshold;
+    bool AllowFillingAvailableMemory;
 
     REGISTER_YSON_STRUCT(TRowCacheControllerDynamicConfig);
 
@@ -755,6 +769,8 @@ struct TTabletNodeDynamicConfig
 
     NChaosClient::TChaosReplicationCardUpdatesBatcherDynamicConfigPtr ChaosReplicationCardUpdatesBatcher;
 
+    TSlruCacheDynamicConfigPtr ClientCache;
+
     TTestingTabletNodeDynamicConfig Testing;
 
     REGISTER_YSON_STRUCT(TTabletNodeDynamicConfig);
@@ -844,6 +860,8 @@ struct TTabletNodeConfig
     //! Used for local mode. If false, node will crash when recovering
     //! a tablet cell from the different reign.
     bool AllowReignChange;
+
+    TSlruCacheConfigPtr ClientCache;
 
     REGISTER_YSON_STRUCT(TTabletNodeConfig);
 

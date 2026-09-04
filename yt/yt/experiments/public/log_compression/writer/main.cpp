@@ -9,7 +9,7 @@ using namespace NYT;
 using namespace NYT::NLogging;
 using namespace NYT::NConcurrency;
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "Stress");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "Stress");
 
 int main(int argc, const char *argv[])
 {
@@ -39,7 +39,9 @@ int main(int argc, const char *argv[])
     for (int i = 0; i < threadCount; ++i) {
         auto asyncResult = BIND([threadNum = i, eventCount] {
             for (int i = 0; i < eventCount; ++i) {
-                YT_LOG_DEBUG("Debug event (Seq: %v, Thread: %v)", i, threadNum);
+                YT_TLOG_DEBUG("Debug event")
+                    .With("Seq", i)
+                    .With("Thread", threadNum);
             }
         })
             .AsyncVia(pool->GetInvoker())

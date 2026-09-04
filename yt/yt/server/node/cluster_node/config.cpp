@@ -500,6 +500,8 @@ void TClusterNodeDynamicConfig::Register(TRegistrar registrar)
         .Optional();
     registrar.Parameter("resource_limits", &TThis::ResourceLimits)
         .DefaultNew();
+    registrar.Parameter("hotswap_manager", &TThis::HotswapManager)
+        .DefaultNew();
     registrar.Parameter("data_node", &TThis::DataNode)
         .DefaultNew();
     registrar.Parameter("cellar_node", &TThis::CellarNode)
@@ -545,6 +547,10 @@ void TClusterNodeDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("memory_limit_exceeded_for_category_threshold", &TThis::MemoryLimitExceededForCategoryThreshold)
         .Default(1.1);
     registrar.Parameter("node_memory_tracker", &TThis::NodeMemoryTracker)
+        .DefaultNew();
+    registrar.Parameter("aux_poller_thread_count", &TThis::AuxPollerThreadCount)
+        .Default();
+    registrar.Parameter("solomon_exporter", &TThis::SolomonExporter)
         .DefaultNew();
 
     registrar.Parameter("chaos_residency_cache", &TThis::ChaosResidencyCache)

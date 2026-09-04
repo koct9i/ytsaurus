@@ -53,6 +53,7 @@
 
 #include <yt/yt/core/misc/public.h>
 
+#include <yt/yt/core/ytree/composite_map.h>
 #include <yt/yt/core/ytree/fluent.h>
 #include <yt/yt/core/ytree/helpers.h>
 #include <yt/yt/core/ytree/virtual.h>
@@ -75,8 +76,8 @@ using namespace NYTree;
 using namespace NYson;
 using namespace NProfiling;
 
-using NYT::ToProto;
 using NYT::FromProto;
+using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -117,7 +118,7 @@ public:
         , TimestampProvider_(std::move(timestampProvider))
         , ParticipantProviders_(std::move(participantProviders))
         , Authenticator_(std::move(authenticator))
-        , Logger(TransactionSupervisorLogger().WithTag("CellId: %v", SelfCellId_))
+        , Logger(TransactionSupervisorLogger().WithTag("CellId", SelfCellId_))
         , StrongOrderingManager_(Logger)
         , TransactionSupervisorService_(New<TTransactionSupervisorService>(this))
         , TransactionParticipantService_(New<TTransactionParticipantService>(this))
@@ -129,35 +130,25 @@ public:
         YT_VERIFY(TimestampProvider_);
 
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorCommitSimpleTransaction, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqCoordinatorCommitSimpleTransaction"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorCommitSimpleTransaction, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorCommitDistributedTransactionPhaseOne, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqCoordinatorCommitDistributedTransactionPhaseOne"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorCommitDistributedTransactionPhaseOne, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorCommitDistributedTransactionPhaseTwo, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqCoordinatorCommitDistributedTransactionPhaseTwo"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorCommitDistributedTransactionPhaseTwo, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorAbortDistributedTransactionPhaseTwo, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqCoordinatorAbortDistributedTransactionPhaseTwo"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorAbortDistributedTransactionPhaseTwo, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorAbortTransaction, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqCoordinatorAbortTransaction"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorAbortTransaction, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorFinishDistributedTransaction, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqCoordinatorFinishDistributedTransaction"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraCoordinatorFinishDistributedTransaction, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantPrepareTransaction, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqParticipantPrepareTransaction"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantPrepareTransaction, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantMakeTransactionReadyToCommit, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqParticipantMakeTransactionReadyToCommit"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantMakeTransactionReadyToCommit, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantCommitTransaction, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqParticipantCommitTransaction"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantCommitTransaction, Unretained(this)));
         TCompositeAutomatonPart::RegisterMethod(
-            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantAbortTransaction, Unretained(this)),
-            /*aliases*/ {"NYT.NHiveServer.NProto.TReqParticipantAbortTransaction"});
+            BIND_NO_PROPAGATE(&TTransactionSupervisor::HydraParticipantAbortTransaction, Unretained(this)));
 
         RegisterLoader(
             "TransactionSupervisor.Keys",
@@ -224,9 +215,9 @@ public:
         }
 
         if (decommission) {
-            YT_LOG_INFO("Decommissioning transaction supervisor");
+            YT_TLOG_INFO("Decommissioning transaction supervisor");
         } else {
-            YT_LOG_INFO("Transaction supervisor is no longer decommissioned");
+            YT_TLOG_INFO("Transaction supervisor is no longer decommissioned");
         }
 
         Decommissioned_ = decommission;
@@ -247,6 +238,14 @@ public:
         StrongOrderingManager_.OnProfiling(buffer);
     }
 
+    void SetArtificialParticipantCommitDelay(TDuration delay) override
+    {
+        auto oldDelay = ArtificialParticipantCommitDelay_.exchange(delay, std::memory_order::relaxed);
+        YT_TLOG_DEBUG_IF(delay != oldDelay, "Artificial participant commit delay changed")
+            .With("OldDelay", oldDelay)
+            .With("NewDelay", delay);
+    }
+
     TFuture<void> GetReadyToEnterReadOnlyMode() override
     {
         return StrongOrderingManager_.WaitUntilPreparedCommitsFinish();
@@ -264,6 +263,9 @@ private:
     const IAuthenticatorPtr Authenticator_;
 
     const NLogging::TLogger Logger;
+
+    // For testing purposes.
+    std::atomic<TDuration> ArtificialParticipantCommitDelay_ = TDuration::Zero();
 
     DECLARE_THREAD_AFFINITY_SLOT(AutomatonThread);
 
@@ -296,14 +298,15 @@ private:
                 NRpc::TDispatcher::Get()->GetLightInvoker(),
                 BIND(&TWrappedParticipant::OnProbation, MakeWeak(this)),
                 Config_->ParticipantProbationPeriod))
-            , Logger(logger.WithTag("ParticipantCellId: %v", CellId_))
+            , Logger(logger.WithTag("ParticipantCellId", CellId_))
         {
             ProbationExecutor_->Start();
         }
 
         ~TWrappedParticipant()
         {
-            // ProbationExecutor_ owns this instance via MakeWeak
+            // ProbationExecutor_ has weak reference to this instance,
+            // so stop it to prevent callback being fired after this instance destruction.
             YT_UNUSED_FUTURE(ProbationExecutor_->Stop());
         }
 
@@ -332,8 +335,10 @@ private:
             if (GetState() == ETransactionParticipantState::Unregistered) {
                 return true;
             }
-            if (LastTouched_ + ParticipantTtl < NProfiling::GetInstant() && PendingSenders_.empty()) {
-                return true;
+
+            if (LastTouched_ + ParticipantTtl < NProfiling::GetInstant()) {
+                auto guard = Guard(SpinLock_);
+                return PendingSenders_.empty();
             }
             return false;
         }
@@ -487,7 +492,7 @@ private:
 
             guard.Release();
 
-            YT_LOG_DEBUG("Participant cell is up");
+            YT_TLOG_DEBUG("Participant cell is up");
 
             for (const auto& sender : senders) {
                 sender();
@@ -504,7 +509,8 @@ private:
 
             Up_ = false;
 
-            YT_LOG_DEBUG(error, "Participant cell is down");
+            YT_TLOG_DEBUG("Participant cell is down")
+                .With(error);
         }
 
         void BuildOrchidYson(IYsonConsumer* consumer)
@@ -553,7 +559,7 @@ private:
                 }
             }
 
-            YT_LOG_DEBUG("Could not find any matching transaction participant provider");
+            YT_TLOG_DEBUG("Could not find any matching transaction participant provider");
 
             return nullptr;
         }
@@ -611,7 +617,7 @@ private:
 
                     case ETransactionParticipantState::Unregistered:
                         if (succeedOnUnregistered) {
-                            YT_LOG_DEBUG("Participant unregistered; assuming success");
+                            YT_TLOG_DEBUG("Participant unregistered; assuming success");
                             promise.Set(TError());
                         } else {
                             promise.Set(MakeUnregisteredError());
@@ -679,7 +685,7 @@ private:
                 return;
             }
 
-            YT_LOG_DEBUG("Checking participant availablitity");
+            YT_TLOG_DEBUG("Checking participant availability");
             underlying->CheckAvailability().Subscribe(
                 BIND(&TWrappedParticipant::OnAvailabilityCheckResult, MakeWeak(this)));
         }
@@ -687,7 +693,8 @@ private:
         void OnAvailabilityCheckResult(const TError& error)
         {
             if (!error.IsOK()) {
-                YT_LOG_DEBUG(error, "Participant availability check failed");
+                YT_TLOG_DEBUG("Participant availability check failed")
+                    .With(error);
                 return;
             }
 
@@ -830,7 +837,7 @@ private:
             auto clockClusterTag = request->has_clock_cluster_tag()
                 ? FromProto<TCellTag>(request->clock_cluster_tag())
                 : InvalidCellTag;
-            auto maxAllowedCommitTimestamp = request->max_allowed_commit_timestamp();
+            auto maxAllowedCommitTimestamp = FromProto<NTransactionClient::TTimestamp>(request->max_allowed_commit_timestamp());
 
             // COMPAT(h0pless): Remove this flag after 26.1.
             auto stronglyOrdered = request->strongly_ordered();
@@ -842,12 +849,11 @@ private:
             }
 
             auto expectedPrepareSignatures = BuildExpectedPrepareSignaturesFromRequest(*request, participantCellIds.size());
-            YT_LOG_ALERT_AND_THROW_UNLESS(
+            YT_TLOG_ALERT_AND_THROW_UNLESS(
                 expectedPrepareSignatures.Participants.size() == participantCellIds.size(),
-                "Participant expected prepare signature count mismatch "
-                "(ParticipantCount: %v, SignatureCount: %v)",
-                participantCellIds.size(),
-                expectedPrepareSignatures.Participants.size());
+                "Participant expected prepare signature count mismatch")
+                .With("ParticipantCount", participantCellIds.size())
+                .With("SignatureCount", expectedPrepareSignatures.Participants.size());
 
             YT_VERIFY(GetPrerequisiteTransactionIds(context->GetRequestHeader()).empty());
 
@@ -855,8 +861,8 @@ private:
                 coordinatorCommitMode == ETransactionCoordinatorCommitMode::Lazy)
             {
                 THROW_ERROR_EXCEPTION("Coordinator prepare and commit modes are incompatible")
-                    << TErrorAttribute("coordinator_prepare_mode", coordinatorPrepareMode)
-                    << TErrorAttribute("coordinator_commit_mode", coordinatorCommitMode);
+                    .With("coordinator_prepare_mode", coordinatorPrepareMode)
+                    .With("coordinator_commit_mode", coordinatorCommitMode);
             }
 
             auto owner = GetOwnerOrThrow();
@@ -866,9 +872,9 @@ private:
                 clockClusterTag != owner->SelfClockClusterTag_)
             {
                 THROW_ERROR_EXCEPTION("Transaction origin clock source differs from coordinator clock source")
-                    << TErrorAttribute("transaction_id", transactionId)
-                    << TErrorAttribute("client_clock_cluster_tag", clockClusterTag)
-                    << TErrorAttribute("coordinator_clock_cluster_tag", owner->SelfClockClusterTag_);
+                    .With("transaction_id", transactionId)
+                    .With("client_clock_cluster_tag", clockClusterTag)
+                    .With("coordinator_clock_cluster_tag", owner->SelfClockClusterTag_);
             }
 
             context->SetRequestInfo("TransactionId: %v, ParticipantCellIds: %v, PrepareOnlyParticipantCellIds: %v, CellIdsToSyncWithBeforePrepare: %v, "
@@ -909,11 +915,10 @@ private:
             // COMPAT(h0pless): remove after 26.1. Here I am using the fact that all components that
             // order strongly ordered transactions are updated at the same time or before the master is.
             if (stronglyOrdered) {
-                YT_LOG_ALERT_IF(strongOrderingTags.empty(),
-                    "Transaction strong ordering mismatch detacted (TransactionId: %v, StronglyOrdered: %v, StrongOrderingTags: %v)",
-                    transactionId,
-                    stronglyOrdered,
-                    strongOrderingTags);
+                YT_TLOG_ALERT_IF(strongOrderingTags.empty(), "Transaction strong ordering mismatch detected")
+                    .With("TransactionId", transactionId)
+                    .With("StronglyOrdered", stronglyOrdered)
+                    .With("StrongOrderingTags", strongOrderingTags);
             }
 
             TFuture<TSharedRefArray> asyncResponseMessage;
@@ -1030,8 +1035,9 @@ private:
                     auto* subresponse = response->add_subresponses();
                     if (!result.IsOK()) {
                         auto transactionId = FromProto<TTransactionId>(request->subrequests(i).transaction_id());
-                        YT_LOG_DEBUG(result, "Failed to ping transaction (TransactionId: %v)",
-                            transactionId);
+                        YT_TLOG_DEBUG("Failed to ping transaction")
+                            .With("TransactionId", transactionId)
+                            .With(result);
                         ToProto(subresponse->mutable_error(), TError(result));
                     }
                 }
@@ -1087,7 +1093,7 @@ private:
             ValidatePeer(EPeerKind::Leader);
 
             auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-            auto prepareTimestamp = request->prepare_timestamp();
+            auto prepareTimestamp = FromProto<NTransactionClient::TTimestamp>(request->prepare_timestamp());
             auto prepareTimestampClusterTag = request->prepare_timestamp_cluster_tag();
             auto cellIdsToSyncWith = FromProto<std::vector<TCellId>>(request->cell_ids_to_sync_with());
             auto strongOrderingTags = FromProto<std::vector<std::string>>(request->strong_ordering_tags());
@@ -1115,7 +1121,7 @@ private:
 
             NTransactionSupervisor::NProto::TReqParticipantPrepareTransaction hydraRequest;
             ToProto(hydraRequest.mutable_transaction_id(), transactionId);
-            hydraRequest.set_prepare_timestamp(prepareTimestamp);
+            hydraRequest.set_prepare_timestamp(ToProto(prepareTimestamp));
             hydraRequest.set_prepare_timestamp_cluster_tag(prepareTimestampClusterTag);
             ToProto(hydraRequest.mutable_strong_ordering_tags(), strongOrderingTags);
             hydraRequest.set_expected_prepare_signature(expectedPrepareSignature);
@@ -1150,7 +1156,7 @@ private:
             ValidatePeer(EPeerKind::Leader);
 
             auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-            auto commitTimestamp = request->commit_timestamp();
+            auto commitTimestamp = FromProto<NTransactionClient::TTimestamp>(request->commit_timestamp());
             auto commitTimestampClusterTag = request->commit_timestamp_cluster_tag();
 
             context->SetRequestInfo("TransactionId: %v, CommitTimestamp: %v@%v",
@@ -1160,7 +1166,7 @@ private:
 
             NTransactionSupervisor::NProto::TReqParticipantMakeTransactionReadyToCommit hydraRequest;
             ToProto(hydraRequest.mutable_transaction_id(), transactionId);
-            hydraRequest.set_commit_timestamp(commitTimestamp);
+            hydraRequest.set_commit_timestamp(ToProto(commitTimestamp));
             hydraRequest.set_commit_timestamp_cluster_tag(commitTimestampClusterTag);
             NRpc::WriteAuthenticationIdentityToProto(&hydraRequest, NRpc::GetCurrentAuthenticationIdentity());
 
@@ -1175,7 +1181,7 @@ private:
             ValidatePeer(EPeerKind::Leader);
 
             auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-            auto commitTimestamp = request->commit_timestamp();
+            auto commitTimestamp = FromProto<NTransactionClient::TTimestamp>(request->commit_timestamp());
             auto commitTimestampClusterTag = request->commit_timestamp_cluster_tag();
             auto stronglyOrdered = request->strongly_ordered();
 
@@ -1187,12 +1193,21 @@ private:
 
             NTransactionSupervisor::NProto::TReqParticipantCommitTransaction hydraRequest;
             ToProto(hydraRequest.mutable_transaction_id(), transactionId);
-            hydraRequest.set_commit_timestamp(commitTimestamp);
+            hydraRequest.set_commit_timestamp(ToProto(commitTimestamp));
             hydraRequest.set_commit_timestamp_cluster_tag(commitTimestampClusterTag);
             hydraRequest.set_strongly_ordered(stronglyOrdered);
             NRpc::WriteAuthenticationIdentityToProto(&hydraRequest, NRpc::GetCurrentAuthenticationIdentity());
 
             auto owner = GetOwnerOrThrow();
+
+            auto commitDelay = owner->ArtificialParticipantCommitDelay_.load(std::memory_order::relaxed);
+            if (commitDelay != TDuration::Zero()) {
+                YT_TLOG_DEBUG("Waiting for artificial delay before transaction commit on participant")
+                    .With("TransactionId", transactionId)
+                    .With("Delay", commitDelay);
+                TDelayedExecutor::WaitForDuration(commitDelay);
+            }
+
             auto mutation = CreateMutation(owner->HydraManager_, hydraRequest);
             mutation->SetCurrentTraceContext();
             YT_UNUSED_FUTURE(mutation->CommitAndReply(context));
@@ -1335,7 +1350,7 @@ private:
         }
 
     private:
-        TWeakPtr<TTransactionSupervisor> Owner_;
+        const TWeakPtr<TTransactionSupervisor> Owner_;
     };
 
     const IYPathServicePtr OrchidService_;
@@ -1343,7 +1358,7 @@ private:
     IYPathServicePtr CreateOrchidService()
     {
         auto invoker = HydraManager_->CreateGuardedAutomatonInvoker(AutomatonInvoker_);
-        return New<TCompositeMapService>()
+        return CreateCompositeMapService()
             ->AddChild("transient_commits", New<TCommitOrchidService>(
                 MakeWeak(this),
                 &TTransactionSupervisor::TransientCommitMap_))
@@ -1455,9 +1470,10 @@ private:
                 transactionId,
                 options);
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Error preparing simple transaction commit (TransactionId: %v, %v)",
-                transactionId,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_DEBUG("Error preparing simple transaction commit")
+                .With("TransactionId", transactionId)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
             SetCommitFailed(commit, ex);
             RemoveTransientCommit(commit);
             // Best effort, fire-and-forget.
@@ -1477,7 +1493,7 @@ private:
         // 1) only active Sequoia transactions leads to stuck requests in
         //    read-only mode;
         // 2) read-only mode for tablet cell Hydra is unlikely to be used;
-        // 3) transaction supervisor knows only aboud a part of 2PC: it knows
+        // 3) transaction supervisor knows only about a part of 2PC: it knows
         //    nothing about foreign transactions. Therefore, to properly wait
         //    all 2PC in tablet cells would require some changes in tablet node
         //    transaction manager and it is not what we want to touch.
@@ -1511,9 +1527,9 @@ private:
             ToProto(entry->mutable_strong_ordering_tags(), tags);
         }
 
-        request.set_prepare_timestamp(prepareTimestamp);
+        request.set_prepare_timestamp(ToProto(prepareTimestamp));
         request.set_prepare_timestamp_cluster_tag(ToProto(SelfClockClusterTag_));
-        request.set_max_allowed_commit_timestamp(commit->GetMaxAllowedCommitTimestamp());
+        request.set_max_allowed_commit_timestamp(ToProto(commit->GetMaxAllowedCommitTimestamp()));
         WriteAuthenticationIdentityToProto(&request, commit->AuthenticationIdentity());
 
         auto mutation = CreateMutation(HydraManager_, request);
@@ -1536,21 +1552,23 @@ private:
                 }
 
                 if (commit->GetPersistent()) {
-                    YT_LOG_ALERT("Found persistent commit in transient commit map (TransactionId: %v, TransientState: %v, PersistentState: %v)",
-                        transactionId,
-                        commit->GetTransientState(),
-                        commit->GetPersistentState());
+                    YT_TLOG_ALERT("Found persistent commit in transient commit map")
+                        .With("TransactionId", transactionId)
+                        .With("TransientState", commit->GetTransientState())
+                        .With("PersistentState", commit->GetPersistentState());
                     return;
                 }
 
                 if (FindPersistentCommit(transactionId)) {
-                    YT_LOG_ALERT("Found transient commit in persistent commit map (TransactionId: %v, TransientState: %v, PersistentState: %v)",
-                        transactionId,
-                        commit->GetTransientState(),
-                        commit->GetPersistentState());
+                    YT_TLOG_ALERT("Found transient commit in persistent commit map")
+                        .With("TransactionId", transactionId)
+                        .With("TransientState", commit->GetTransientState())
+                        .With("PersistentState", commit->GetPersistentState());
                     return;
                 }
 
+                // Best effort to reduce duration of transient locks for
+                // transaction which will be unlikely to be committed.
                 SetCommitFailed(commit, errorOrResponse);
                 RemoveTransientCommit(commit);
             }).Via(EpochAutomatonInvoker_));
@@ -1579,10 +1597,11 @@ private:
             };
             TransactionManager_->PrepareTransactionAbort(transactionId, options);
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Error preparing transaction abort (TransactionId: %v, Force: %v, %v)",
-                transactionId,
-                force,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_DEBUG("Error preparing transaction abort")
+                .With("TransactionId", transactionId)
+                .With("Force", force)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
             SetAbortFailed(abort, ex);
             RemoveAbort(abort);
             return asyncResponseMessage;
@@ -1657,10 +1676,9 @@ private:
         auto* commit = FindCommit(transactionId);
 
         if (commit && commit->GetPersistentState() != ECommitState::Start) {
-            YT_LOG_DEBUG("Requested to commit simple transaction in wrong state; ignored "
-                "(TransactionId: %v, State: %v)",
-                transactionId,
-                commit->GetPersistentState());
+            YT_TLOG_DEBUG("Requested to commit simple transaction in wrong state; ignored")
+                .With("TransactionId", transactionId)
+                .With("State", commit->GetPersistentState());
             return;
         }
 
@@ -1682,8 +1700,9 @@ private:
                 SetCommitFailed(commit, ex);
                 RemoveTransientCommit(commit);
             }
-            YT_LOG_DEBUG(ex, "Error committing simple transaction (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("Error committing simple transaction")
+                .With("TransactionId", transactionId)
+                .With(ex);
 
             // COMPAT(gritukan)
             auto* mutationContext = GetCurrentMutationContext();
@@ -1735,9 +1754,9 @@ private:
         auto inheritCommitTimestamp = request->inherit_commit_timestamp();
         auto coordinatorCommitMode = FromProto<ETransactionCoordinatorCommitMode>(request->coordinator_commit_mode());
         auto coordinatorPrepareMode = FromProto<ETransactionCoordinatorPrepareMode>(request->coordinator_prepare_mode());
-        auto prepareTimestamp = request->prepare_timestamp();
+        auto prepareTimestamp = FromProto<NTransactionClient::TTimestamp>(request->prepare_timestamp());
         auto prepareTimestampClusterTag = FromProto<TClusterTag>(request->prepare_timestamp_cluster_tag());
-        auto maxAllowedCommitTimestamp = request->max_allowed_commit_timestamp();
+        auto maxAllowedCommitTimestamp = FromProto<NTransactionClient::TTimestamp>(request->max_allowed_commit_timestamp());
 
         TStrongOrderingTagsMap strongOrderingTags;
         for (const auto& entry : request->strong_ordering_tags_map()) {
@@ -1746,13 +1765,12 @@ private:
         }
 
         auto expectedPrepareSignatures = BuildExpectedPrepareSignaturesFromRequest(*request, participantCellIds.size());
-        YT_LOG_ALERT_UNLESS(
+        YT_TLOG_ALERT_UNLESS(
             expectedPrepareSignatures.Participants.size() == participantCellIds.size(),
-            "Participant expected prepare signature count mismatch "
-            "(TransactionId: %v, ParticipantCount: %v, SignatureCount: %v)",
-            transactionId,
-            participantCellIds.size(),
-            expectedPrepareSignatures.Participants.size());
+            "Participant expected prepare signature count mismatch")
+            .With("TransactionId", transactionId)
+            .With("ParticipantCount", participantCellIds.size())
+            .With("SignatureCount", expectedPrepareSignatures.Participants.size());
 
         auto identity = NRpc::ParseAuthenticationIdentityFromProto(*request);
         NRpc::TCurrentAuthenticationIdentityGuard identityGuard(&identity);
@@ -1760,21 +1778,19 @@ private:
         if (!strongOrderingTags.empty()) {
             // It's possible to make strong ordering manager work with transactions with lazy coordinator commit mode.
             // But for now it seems like a waste of time.
-            YT_LOG_ALERT_AND_THROW_IF(
+            YT_TLOG_ALERT_AND_THROW_IF(
                 coordinatorCommitMode == ETransactionCoordinatorCommitMode::Lazy,
-                "Strong ordering is not supported for transactions with coordinator in lazy commit mode "
-                "(TransactionId: %v, CoordinatorPrepareMode: %v, CoordinatorCommitMode: %v)",
-                transactionId,
-                coordinatorPrepareMode,
-                coordinatorCommitMode);
+                "Strong ordering is not supported for transactions with coordinator in lazy commit mode")
+                .With("TransactionId", transactionId)
+                .With("CoordinatorPrepareMode", coordinatorPrepareMode)
+                .With("CoordinatorCommitMode", coordinatorCommitMode);
 
-            YT_LOG_ALERT_AND_THROW_UNLESS(
+            YT_TLOG_ALERT_AND_THROW_UNLESS(
                 StrongOrderingManager_.IsUniqueClockSource(prepareTimestampClusterTag),
-                "Clocks for strong ordered transactions are not unique (TransactionId: %v, "
-                "PrepareTimestampClusterTag: %v, ExpectedClusterTag: %v)",
-                transactionId,
-                prepareTimestampClusterTag,
-                StrongOrderingManager_.GetClockSourceClusterTag());
+                "Clocks for strong ordered transactions are not unique")
+                .With("TransactionId", transactionId)
+                .With("PrepareTimestampClusterTag", prepareTimestampClusterTag)
+                .With("ExpectedClusterTag", StrongOrderingManager_.GetClockSourceClusterTag());
         }
 
         // Ensure commit existence (possibly moving it from transient to persistent).
@@ -1796,37 +1812,33 @@ private:
                 maxAllowedCommitTimestamp,
                 identity);
         } catch (const std::exception& ex) {
-            if (auto commit = FindCommit(transactionId)) {
-                YT_VERIFY(!commit->GetPersistent());
-                SetCommitFailed(commit, ex);
-                RemoveTransientCommit(commit);
+            if (auto* existingCommit = FindCommit(transactionId)) {
+                YT_VERIFY(!existingCommit->GetPersistent());
+                SetCommitFailed(existingCommit, ex);
+                RemoveTransientCommit(existingCommit);
             }
+
             THROW_ERROR WrapHydraError(ex);
         }
 
-        if (commit && commit->GetPersistentState() != ECommitState::Start) {
-            YT_LOG_DEBUG(
-                "Requested to commit distributed transaction in wrong state; ignored (TransactionId: %v, State: %v)",
-                transactionId,
-                commit->GetPersistentState());
+        if (commit->GetPersistentState() != ECommitState::Start) {
+            YT_TLOG_DEBUG("Requested to commit distributed transaction in wrong state; ignored")
+                .With("TransactionId", transactionId)
+                .With("State", commit->GetPersistentState());
             return;
         }
 
         commit->PrepareTimestamp() = prepareTimestamp;
         commit->PrepareTimestampClusterTag() = prepareTimestampClusterTag;
 
-        YT_LOG_DEBUG(
-            "Distributed commit phase one started "
-            "(TransactionId: %v, %v, ParticipantCellIds: %v, ParticipantExpectedPrepareSignatures: %v, CoordinatorExpectedPrepareSignature: %v, "
-            "PrepareTimestamp: %v@%v, StrongOrderingTags: %v)",
-            transactionId,
-            NRpc::GetCurrentAuthenticationIdentity(),
-            participantCellIds,
-            expectedPrepareSignatures.Participants,
-            expectedPrepareSignatures.Coordinator,
-            prepareTimestamp,
-            prepareTimestampClusterTag,
-            MakeShrunkFormattableView(strongOrderingTags, TDefaultFormatter(), /*limit*/ 100));
+        YT_TLOG_DEBUG("Distributed commit phase one started")
+            .With("TransactionId", transactionId)
+            .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+            .With("ParticipantCellIds", participantCellIds)
+            .With("ParticipantExpectedPrepareSignatures", expectedPrepareSignatures.Participants)
+            .With("CoordinatorExpectedPrepareSignature", expectedPrepareSignatures.Coordinator)
+            .WithFormat("PrepareTimestamp", "%v@%v", prepareTimestamp, prepareTimestampClusterTag)
+            .With("StrongOrderingTags", MakeShrunkFormattableView(strongOrderingTags, TDefaultFormatter(), /*limit*/ 100));
 
         if (coordinatorPrepareMode == ETransactionCoordinatorPrepareMode::Early &&
             !RunCoordinatorPrepare(commit))
@@ -1858,27 +1870,24 @@ private:
 
         auto* commit = FindPersistentCommit(transactionId);
         if (!commit) {
-            YT_LOG_ERROR("Requested to execute phase two commit for a non-existing transaction; ignored (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_ERROR("Requested to execute phase two commit for a non-existing transaction; ignored")
+                .With("TransactionId", transactionId);
             return;
         }
 
-        YT_LOG_DEBUG(
-            "Distributed commit phase two started "
-            "(TransactionId: %v, ParticipantCellIds: %v, PrepareOnlyParticipantCellIds: %v, CommitTimestamps: %v)",
-            transactionId,
-            commit->ParticipantCellIds(),
-            commit->PrepareOnlyParticipantCellIds(),
-            commitTimestamps);
+        YT_TLOG_DEBUG("Distributed commit phase two started")
+            .With("TransactionId", transactionId)
+            .With("ParticipantCellIds", commit->ParticipantCellIds())
+            .With("PrepareOnlyParticipantCellIds", commit->PrepareOnlyParticipantCellIds())
+            .With("CommitTimestamps", commitTimestamps);
 
         YT_VERIFY(commit->GetDistributed());
         YT_VERIFY(commit->GetPersistent());
 
         if (commit->GetPersistentState() != ECommitState::Prepare) {
-            YT_LOG_ERROR(
-                "Requested to execute phase two commit for transaction in wrong state; ignored (TransactionId: %v, State: %v)",
-                transactionId,
-                commit->GetPersistentState());
+            YT_TLOG_ERROR("Requested to execute phase two commit for transaction in wrong state; ignored")
+                .With("TransactionId", transactionId)
+                .With("State", commit->GetPersistentState());
             return;
         }
 
@@ -1914,13 +1923,11 @@ private:
                 ChangeCommitTransientState(commit, ECommitState::ReadyToCommit);
             } else {
                 // COMPAT(h0pless): StopSendingUnnecessaryRequests. Can be removed once stable.
-                YT_LOG_DEBUG(
-                    "Transient state of a transaction is past %Qv; skipping ReadyToCommit transition "
-                    "(TransactionId: %v, TransientState: %v, PersistentState: %v)",
-                    ECommitState::GeneratingCommitTimestamps,
-                    transactionId,
-                    commit->GetTransientState(),
-                    commit->GetPersistentState());
+                YT_TLOG_DEBUG("Transient state of a transaction is past the expected one; skipping ReadyToCommit transition")
+                    .With("ExpectedState", ECommitState::GeneratingCommitTimestamps)
+                    .With("TransactionId", transactionId)
+                    .With("TransientState", commit->GetTransientState())
+                    .With("PersistentState", commit->GetPersistentState());
             }
 
             // Technically transient state and persistent state can diverge here, but this
@@ -1930,13 +1937,11 @@ private:
                 ChangeCommitPersistentState(commit, ECommitState::ReadyToCommit);
             } else {
                 // COMPAT(h0pless): StopSendingUnnecessaryRequests. Can be removed once stable.
-                YT_LOG_DEBUG(
-                    "Persistent state of a transaction is past %Qv; skipping ReadyToCommit transition "
-                    "(TransactionId: %v, TransientState: %v, PersistentState: %v)",
-                    ECommitState::Prepare,
-                    transactionId,
-                    commit->GetTransientState(),
-                    commit->GetPersistentState());
+                YT_TLOG_DEBUG("Persistent state of a transaction is past the expected one; skipping ReadyToCommit transition")
+                    .With("ExpectedState", ECommitState::Prepare)
+                    .With("TransactionId", transactionId)
+                    .With("TransientState", commit->GetTransientState())
+                    .With("PersistentState", commit->GetPersistentState());
             }
         } else {
             // Even if coordinator is not committing this transaction in strongly
@@ -1963,9 +1968,8 @@ private:
 
         auto* commit = FindPersistentCommit(transactionId);
         if (!commit) {
-            YT_LOG_ERROR(
-                "Requested to execute phase two abort for a non-existing transaction; ignored (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_ERROR("Requested to execute phase two abort for a non-existing transaction; ignored")
+                .With("TransactionId", transactionId);
             return;
         }
 
@@ -1973,10 +1977,9 @@ private:
         YT_VERIFY(commit->GetPersistent());
 
         if (commit->GetPersistentState() != ECommitState::Prepare && commit->GetPersistentState() != ECommitState::ReadyToCommit) {
-            YT_LOG_ERROR(
-                "Requested to execute phase two abort for transaction in wrong state; ignored (TransactionId: %v, State: %v)",
-                transactionId,
-                commit->GetPersistentState());
+            YT_TLOG_ERROR("Requested to execute phase two abort for transaction in wrong state; ignored")
+                .With("TransactionId", transactionId)
+                .With("State", commit->GetPersistentState());
             return;
         }
 
@@ -1991,10 +1994,11 @@ private:
             };
             TransactionManager_->AbortTransaction(transactionId, options);
         } catch (const std::exception& ex) {
-            YT_LOG_ERROR(ex, "Error aborting transaction at coordinator; ignored (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                ECommitState::Abort,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_ERROR("Error aborting transaction at coordinator; ignored")
+                .With("TransactionId", transactionId)
+                .With("State", ECommitState::Abort)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
         }
 
         if (commit->IsStronglyOrderedForCell(SelfCellId_)) {
@@ -2006,10 +2010,10 @@ private:
         ChangeCommitPersistentState(commit, ECommitState::Abort);
         ChangeCommitTransientState(commit, ECommitState::Abort);
 
-        YT_LOG_DEBUG("Coordinator aborted (TransactionId: %v, State: %v, %v)",
-            transactionId,
-            ECommitState::Abort,
-            NRpc::GetCurrentAuthenticationIdentity());
+        YT_TLOG_DEBUG("Coordinator aborted")
+            .With("TransactionId", transactionId)
+            .With("State", ECommitState::Abort)
+            .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity());
     }
 
     void HydraCoordinatorAbortTransaction(NTransactionSupervisor::NProto::TReqCoordinatorAbortTransaction* request)
@@ -2034,8 +2038,9 @@ private:
         } catch (const std::exception& ex) {
             SetAbortFailed(abort, ex);
             RemoveAbort(abort);
-            YT_LOG_DEBUG(ex, "Error aborting transaction; ignored (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("Error aborting transaction; ignored")
+                .With("TransactionId", transactionId)
+                .With(ex);
             return;
         }
 
@@ -2071,8 +2076,8 @@ private:
         auto transactionId = FromProto<TTransactionId>(request->transaction_id());
         auto* commit = FindPersistentCommit(transactionId);
         if (!commit) {
-            YT_LOG_DEBUG("Requested to finish a non-existing transaction commit; ignored (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("Requested to finish a non-existing transaction commit; ignored")
+                .With("TransactionId", transactionId);
             return;
         }
 
@@ -2088,8 +2093,8 @@ private:
         // Transaction may have been (unsuccessfully) aborted. Cached abort errors should not outlive the commit.
         TryRemoveAbort(transactionId);
 
-        YT_LOG_DEBUG("Distributed transaction commit finished (TransactionId: %v)",
-            transactionId);
+        YT_TLOG_DEBUG("Distributed transaction commit finished")
+            .With("TransactionId", transactionId);
     }
 
 
@@ -2106,7 +2111,7 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
         auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-        auto prepareTimestamp = request->prepare_timestamp();
+        auto prepareTimestamp = FromProto<NTransactionClient::TTimestamp>(request->prepare_timestamp());
         auto prepareTimestampClusterTag = FromProto<TClusterTag>(request->prepare_timestamp_cluster_tag());
         auto strongOrderingTags = FromProto<std::vector<std::string>>(request->strong_ordering_tags());
         auto expectedPrepareSignature = request->has_expected_prepare_signature()
@@ -2117,13 +2122,12 @@ private:
         NRpc::TCurrentAuthenticationIdentityGuard identityGuard(&identity);
 
         if (!strongOrderingTags.empty()) {
-            YT_LOG_ALERT_AND_THROW_UNLESS(
+            YT_TLOG_ALERT_AND_THROW_UNLESS(
                 StrongOrderingManager_.IsUniqueClockSource(prepareTimestampClusterTag),
-                "Clocks for strong ordered transactions are not unique (TransactionId: %v, "
-                "PrepareTimestampClusterTag: %v, ExpectedClusterTag: %v)",
-                transactionId,
-                prepareTimestampClusterTag,
-                StrongOrderingManager_.GetClockSourceClusterTag());
+                "Clocks for strong ordered transactions are not unique")
+                .With("TransactionId", transactionId)
+                .With("PrepareTimestampClusterTag", prepareTimestampClusterTag)
+                .With("ExpectedClusterTag", StrongOrderingManager_.GetClockSourceClusterTag());
         }
 
         try {
@@ -2139,10 +2143,11 @@ private:
                 transactionId,
                 options);
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Participant failure (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                ECommitState::Prepare,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_DEBUG("Participant failure")
+                .With("TransactionId", transactionId)
+                .With("State", ECommitState::Prepare)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
 
             THROW_ERROR WrapHydraError(ex);
         }
@@ -2155,10 +2160,10 @@ private:
                 std::move(strongOrderingTags));
         }
 
-        YT_LOG_DEBUG("Participant success (TransactionId: %v, State: %v, %v)",
-            transactionId,
-            ECommitState::Prepare,
-            NRpc::GetCurrentAuthenticationIdentity());
+        YT_TLOG_DEBUG("Participant success")
+            .With("TransactionId", transactionId)
+            .With("State", ECommitState::Prepare)
+            .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity());
     }
 
     // Active -- throw (wait for prepare)
@@ -2173,7 +2178,7 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
         auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-        auto commitTimestamp = request->commit_timestamp();
+        auto commitTimestamp = FromProto<NTransactionClient::TTimestamp>(request->commit_timestamp());
         auto commitTimestampClusterTag = FromProto<TClusterTag>(request->commit_timestamp_cluster_tag());
 
         auto identity = NRpc::ParseAuthenticationIdentityFromProto(*request);
@@ -2184,22 +2189,21 @@ private:
             TransactionManager_,
             transactionId);
         if (state == ETransactionState::Committed || state == ETransactionState::Aborted) {
-            YT_LOG_DEBUG("Strongly ordered transaction at participant was already %v (TransactionId: %v)",
-                state == ETransactionState::Committed ? "committed" : "aborted",
-                transactionId);
+            YT_TLOG_DEBUG("Strongly ordered transaction at participant was already finished")
+                .With("State", state)
+                .With("TransactionId", transactionId);
             return;
         }
 
-        YT_LOG_ALERT_AND_THROW_UNLESS(
+        YT_TLOG_ALERT_AND_THROW_UNLESS(
             StrongOrderingManager_.IsUniqueClockSource(commitTimestampClusterTag),
-            "Clocks for strong ordered transactions are not unique (TransactionId: %v, "
-            "CommitTimestampClusterTag: %v, ExpectedClusterTag: %v)",
-            transactionId,
-            commitTimestampClusterTag,
-            StrongOrderingManager_.GetClockSourceClusterTag());
+            "Clocks for strong ordered transactions are not unique")
+            .With("TransactionId", transactionId)
+            .With("CommitTimestampClusterTag", commitTimestampClusterTag)
+            .With("ExpectedClusterTag", StrongOrderingManager_.GetClockSourceClusterTag());
 
-        YT_LOG_DEBUG("Strongly ordered transaction is ready to commit at participant (TransactionId: %v)",
-            transactionId);
+        YT_TLOG_DEBUG("Strongly ordered transaction is ready to commit at participant")
+            .With("TransactionId", transactionId);
 
         auto transactionsToCommit = StrongOrderingManager_.OnCommitReadyToCommit(
             transactionId,
@@ -2220,7 +2224,7 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
         auto transactionId = FromProto<TTransactionId>(request->transaction_id());
-        auto commitTimestamp = request->commit_timestamp();
+        auto commitTimestamp = FromProto<NTransactionClient::TTimestamp>(request->commit_timestamp());
         auto commitTimestampClusterTag = FromProto<TClusterTag>(request->commit_timestamp_cluster_tag());
         auto stronglyOrdered = request->strongly_ordered();
 
@@ -2233,29 +2237,28 @@ private:
                 TransactionManager_,
                 transactionId);
             if (state == ETransactionState::Committed) {
-                YT_LOG_DEBUG("Transaction is already committed (TransactionId: %v)",
-                    transactionId);
+                YT_TLOG_DEBUG("Transaction is already committed")
+                    .With("TransactionId", transactionId);
                 return;
             }
 
             // Not sure if it is possible.
             if (state == ETransactionState::Aborted) {
-                YT_LOG_ALERT("Trying to commit an aborted strongly ordered transaction (TransactionId: %v)",
-                    transactionId);
+                YT_TLOG_ALERT("Trying to commit an aborted strongly ordered transaction")
+                    .With("TransactionId", transactionId);
                 THROW_ERROR WrapHydraError(TError("Transaction %v is aborted",
                     transactionId));
             }
 
-            YT_LOG_ALERT_AND_THROW_UNLESS(
+            YT_TLOG_ALERT_AND_THROW_UNLESS(
                 StrongOrderingManager_.IsUniqueClockSource(commitTimestampClusterTag),
-                "Clocks for strong ordered transactions are not unique (TransactionId: %v, "
-                "CommitTimestampClusterTag: %v, ExpectedClusterTag: %v)",
-                transactionId,
-                commitTimestampClusterTag,
-                StrongOrderingManager_.GetClockSourceClusterTag());
+                "Clocks for strong ordered transactions are not unique")
+                .With("TransactionId", transactionId)
+                .With("CommitTimestampClusterTag", commitTimestampClusterTag)
+                .With("ExpectedClusterTag", StrongOrderingManager_.GetClockSourceClusterTag());
 
-            YT_LOG_DEBUG("Committing strongly ordered transaction at participant (TransactionId: %v)",
-                    transactionId);
+            YT_TLOG_DEBUG("Committing strongly ordered transaction at participant")
+                .With("TransactionId", transactionId);
 
             auto transactionsToCommit = StrongOrderingManager_.OnCommitCommit(
                 transactionId,
@@ -2282,8 +2285,8 @@ private:
         bool stronglyOrdered)
     {
         if (stronglyOrdered) {
-            YT_LOG_DEBUG("Actually committing strongly ordered transaction at participant (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("Actually committing strongly ordered transaction at participant")
+                .With("TransactionId", transactionId);
         }
 
         try {
@@ -2296,22 +2299,19 @@ private:
             };
             TransactionManager_->CommitTransaction(transactionId, options);
         } catch (const std::exception& ex) {
-            YT_LOG_EVENT(
-                Logger(),
-                stronglyOrdered ? NLogging::ELogLevel::Fatal : NLogging::ELogLevel::Debug,
-                ex,
-                "Participant failure (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                ECommitState::Commit,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_EVENT(Logger(), stronglyOrdered ? NLogging::ELogLevel::Fatal : NLogging::ELogLevel::Debug, "Participant failure")
+                .With("TransactionId", transactionId)
+                .With("State", ECommitState::Commit)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
 
             throw;
         }
 
-        YT_LOG_DEBUG("Participant success (TransactionId: %v, State: %v, %v)",
-            transactionId,
-            ECommitState::Commit,
-            NRpc::GetCurrentAuthenticationIdentity());
+        YT_TLOG_DEBUG("Participant success")
+            .With("TransactionId", transactionId)
+            .With("State", ECommitState::Commit)
+            .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity());
     }
 
     // Active -- ok (was do nothing before, but we should still do transactionManager->Abort())
@@ -2337,15 +2337,15 @@ private:
                 TransactionManager_,
                 transactionId);
             if (state == ETransactionState::Aborted) {
-                YT_LOG_DEBUG("Transaction was already aborted (TransactionId: %v)",
-                    transactionId);
+                YT_TLOG_DEBUG("Transaction was already aborted")
+                    .With("TransactionId", transactionId);
                 return;
             }
 
             // Pretty sure it is not possible.
             if (state == ETransactionState::Committed) {
-                YT_LOG_ALERT("Trying to abort a committed strongly ordered transaction (TransactionId: %v)",
-                    transactionId);
+                YT_TLOG_ALERT("Trying to abort a committed strongly ordered transaction")
+                    .With("TransactionId", transactionId);
                 THROW_ERROR WrapHydraError(TError("Transaction %v is committed",
                     transactionId));
             }
@@ -2358,22 +2358,19 @@ private:
             };
             TransactionManager_->AbortTransaction(transactionId, options);
         } catch (const std::exception& ex) {
-            YT_LOG_EVENT(
-                Logger(),
-                stronglyOrdered ? NLogging::ELogLevel::Alert : NLogging::ELogLevel::Debug,
-                ex,
-                "Participant failure (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                ECommitState::Abort,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_EVENT(Logger(), stronglyOrdered ? NLogging::ELogLevel::Alert : NLogging::ELogLevel::Debug, "Participant failure")
+                .With("TransactionId", transactionId)
+                .With("State", ECommitState::Abort)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
 
             THROW_ERROR WrapHydraError(ex);
         }
 
-        YT_LOG_DEBUG("Participant success (TransactionId: %v, State: %v, %v)",
-            transactionId,
-            ECommitState::Abort,
-            NRpc::GetCurrentAuthenticationIdentity());
+        YT_TLOG_DEBUG("Participant success")
+            .With("TransactionId", transactionId)
+            .With("State", ECommitState::Abort)
+            .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity());
 
         if (stronglyOrdered) {
             auto transactionsToCommit = StrongOrderingManager_.OnCommitAbort(transactionId, /*isCoordinator*/ false);
@@ -2498,8 +2495,9 @@ private:
 
     void SetCommitFailed(TCommit* commit, const TError& error)
     {
-        YT_LOG_DEBUG(error, "Transaction commit failed (TransactionId: %v)",
-            commit->GetTransactionId());
+        YT_TLOG_DEBUG("Transaction commit failed")
+            .With("TransactionId", commit->GetTransactionId())
+            .With(error);
 
         auto responseMessage = CreateErrorResponseMessage(error);
         SetCommitResponse(commit, std::move(responseMessage), /*remember*/ false);
@@ -2507,9 +2505,9 @@ private:
 
     void SetCommitSucceeded(TCommit* commit)
     {
-        YT_LOG_DEBUG("Transaction commit succeeded (TransactionId: %v, CommitTimestamps: %v)",
-            commit->GetTransactionId(),
-            commit->CommitTimestamps());
+        YT_TLOG_DEBUG("Transaction commit succeeded")
+            .With("TransactionId", commit->GetTransactionId())
+            .With("CommitTimestamps", commit->CommitTimestamps());
 
         NProto::NTransactionSupervisor::TRspCommitTransaction response;
         ToProto(response.mutable_commit_timestamps(), commit->CommitTimestamps());
@@ -2541,13 +2539,11 @@ private:
         auto stronglyOrdered = commit->IsStronglyOrderedForCell(SelfCellId_);
         auto latePrepare = prepareMode == ETransactionCoordinatorPrepareMode::Late;
 
-        YT_LOG_DEBUG(
-            "Preparing at coordinator (TransactionId: %v, PrepareTimestamp: %v@%v, PrepareMode: %v, StronglyOrdered: %v)",
-            transactionId,
-            commit->PrepareTimestamp(),
-            commit->PrepareTimestampClusterTag(),
-            prepareMode,
-            stronglyOrdered);
+        YT_TLOG_DEBUG("Preparing at coordinator")
+            .With("TransactionId", transactionId)
+            .WithFormat("PrepareTimestamp", "%v@%v", commit->PrepareTimestamp(), commit->PrepareTimestampClusterTag())
+            .With("PrepareMode", prepareMode)
+            .With("StronglyOrdered", stronglyOrdered);
 
         try {
             // Any exception thrown here is caught below.
@@ -2563,10 +2559,11 @@ private:
                 transactionId,
                 options);
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Coordinator failure; will abort (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                ECommitState::Prepare,
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_DEBUG("Coordinator failure; will abort")
+                .With("TransactionId", transactionId)
+                .With("State", ECommitState::Prepare)
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
 
             // If prepare mode is late, we have to abort transaction at all participants.
             // For early prepare mode it is sufficient to abort at coordinator only.
@@ -2581,7 +2578,7 @@ private:
                 auto error = TError(
                     NTransactionClient::EErrorCode::ParticipantFailedToPrepare,
                     "Coordinator has failed to prepare")
-                    << ex;
+                    .With(ex);
                 ChangeCommitTransientState(commit, ECommitState::Aborting, error);
                 return false;
             }
@@ -2594,16 +2591,16 @@ private:
                 };
                 TransactionManager_->AbortTransaction(transactionId, options);
             } catch (const std::exception& ex) {
-                YT_LOG_DEBUG(ex, "Error aborting transaction at coordinator; ignored (TransactionId: %v, %v)",
-                    transactionId,
-                    NRpc::GetCurrentAuthenticationIdentity());
+                YT_TLOG_DEBUG("Error aborting transaction at coordinator; ignored")
+                    .With("TransactionId", transactionId)
+                    .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                    .With(ex);
             }
             return false;
         }
 
-        YT_LOG_DEBUG(
-            "Coordinator prepared (TransactionId: %v)",
-            transactionId);
+        YT_TLOG_DEBUG("Coordinator prepared")
+            .With("TransactionId", transactionId);
 
         return true;
     }
@@ -2630,15 +2627,17 @@ private:
             };
             TransactionManager_->CommitTransaction(transactionId, options);
 
-            YT_LOG_DEBUG("Coordinator success (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                commit->GetPersistentState(),
-                NRpc::GetCurrentAuthenticationIdentity());
+            YT_TLOG_DEBUG("Coordinator success")
+                .With("TransactionId", transactionId)
+                .With("State", commit->GetPersistentState())
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity());
         } catch (const std::exception& ex) {
-            YT_LOG_ALERT(ex, "Coordinator failure; ignored (TransactionId: %v, State: %v, %v)",
-                transactionId,
-                commit->GetPersistentState(),
-                NRpc::GetCurrentAuthenticationIdentity());
+            auto stronglyOrdered = commit->IsStronglyOrderedForCell(SelfCellId_);
+            YT_TLOG_EVENT(Logger(), stronglyOrdered ? NLogging::ELogLevel::Fatal : NLogging::ELogLevel::Alert, "Coordinator failure")
+                .With("TransactionId", transactionId)
+                .With("State", commit->GetPersistentState())
+                .With("AuthenticationIdentity", NRpc::GetCurrentAuthenticationIdentity())
+                .With(ex);
         }
     }
 
@@ -2646,8 +2645,8 @@ private:
     {
         auto* commit = FindPersistentCommit(transactionId);
         if (!commit) {
-            YT_LOG_ALERT("Trying to commit strongly ordered transaction with a nonexistent commit (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_ALERT("Trying to commit strongly ordered transaction with a nonexistent commit")
+                .With("TransactionId", transactionId);
             return;
         }
 
@@ -2682,8 +2681,9 @@ private:
 
     void SetAbortFailed(TAbort* abort, const TError& error)
     {
-        YT_LOG_DEBUG(error, "Transaction abort failed (TransactionId: %v)",
-            abort->GetTransactionId());
+        YT_TLOG_DEBUG("Transaction abort failed")
+            .With("TransactionId", abort->GetTransactionId())
+            .With(error);
 
         auto responseMessage = CreateErrorResponseMessage(error);
         SetAbortResponse(abort, std::move(responseMessage), /*remember*/ false);
@@ -2691,8 +2691,8 @@ private:
 
     void SetAbortSucceeded(TAbort* abort)
     {
-        YT_LOG_DEBUG("Transaction abort succeeded (TransactionId: %v)",
-            abort->GetTransactionId());
+        YT_TLOG_DEBUG("Transaction abort succeeded")
+            .With("TransactionId", abort->GetTransactionId());
 
         NProto::NTransactionSupervisor::TRspAbortTransaction response;
 
@@ -2742,15 +2742,15 @@ private:
 
                 TFuture<TTimestamp> asyncTimestamp;
                 if (commit->GetInheritCommitTimestamp() && cellId != SelfCellId_) {
-                    YT_LOG_DEBUG("Inheriting commit timestamp (TransactionId: %v, ParticipantCellId: %v)",
-                        transactionId,
-                        cellId);
+                    YT_TLOG_DEBUG("Inheriting commit timestamp")
+                        .With("TransactionId", transactionId)
+                        .With("ParticipantCellId", cellId);
                     YT_VERIFY(asyncCoordinatorTimestamp);
                     asyncTimestamp = asyncCoordinatorTimestamp;
                 } else {
-                    YT_LOG_DEBUG("Generating commit timestamp (TransactionId: %v, ParticipantCellId: %v)",
-                        transactionId,
-                        cellId);
+                    YT_TLOG_DEBUG("Generating commit timestamp")
+                        .With("TransactionId", transactionId)
+                        .With("ParticipantCellId", cellId);
                     asyncTimestamp = TimestampProvider_->GenerateTimestamps(1);
                 }
                 asyncTimestamps.push_back(asyncTimestamp.Apply(BIND([=] (TTimestamp timestamp) {
@@ -2780,16 +2780,17 @@ private:
     {
         auto* commit = FindCommit(transactionId);
         if (!commit) {
-            YT_LOG_DEBUG("Commit timestamp generated for a non-existing transaction commit; ignored (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("Commit timestamp generated for a non-existing transaction commit; ignored")
+                .With("TransactionId", transactionId);
             return;
         }
 
         if (!timestampsOrError.IsOK()) {
             // If this is a distributed transaction then it's already prepared at coordinator and
             // at all participants. We _must_ forcefully abort it.
-            YT_LOG_DEBUG(timestampsOrError, "Error generating commit timestamps (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("Error generating commit timestamps")
+                .With("TransactionId", transactionId)
+                .With(timestampsOrError);
             YT_UNUSED_FUTURE(AbortTransaction(transactionId, true));
             return;
         }
@@ -2799,19 +2800,18 @@ private:
         TTimestampMap commitTimestamps;
         commitTimestamps.Timestamps.insert(commitTimestamps.Timestamps.end(), result.begin(), result.end());
 
-        YT_LOG_DEBUG("Commit timestamps generated (TransactionId: %v, CommitTimestamps: %v)",
-            transactionId,
-            commitTimestamps);
+        YT_TLOG_DEBUG("Commit timestamps generated")
+            .With("TransactionId", transactionId)
+            .With("CommitTimestamps", commitTimestamps);
 
         if (auto maxAllowedCommitTimestamp = commit->GetMaxAllowedCommitTimestamp()) {
             for (auto [cellTag, commitTimestamp] : result) {
                 if (commitTimestamp > maxAllowedCommitTimestamp) {
-                    YT_LOG_DEBUG("Generated commit timestamp exceeds max allowed commit timestamp "
-                        "(TransactionId: %v, CellTag: %v, CommitTimestamp: %v, MaxAllowedCommitTimestamp: %v)",
-                        transactionId,
-                        cellTag,
-                        commitTimestamp,
-                        maxAllowedCommitTimestamp);
+                    YT_TLOG_DEBUG("Generated commit timestamp exceeds max allowed commit timestamp")
+                        .With("TransactionId", transactionId)
+                        .With("CellTag", cellTag)
+                        .With("CommitTimestamp", commitTimestamp)
+                        .With("MaxAllowedCommitTimestamp", maxAllowedCommitTimestamp);
                     YT_UNUSED_FUTURE(AbortTransaction(transactionId, true));
                     return;
                 }
@@ -2847,8 +2847,8 @@ private:
         if (auto it = ParticipantMap_.find(cellId)) {
             participant = it->second;
             if (participant->GetState() == ETransactionParticipantState::Invalidated) {
-                YT_LOG_DEBUG("Invalidated participant unregistered (ParticipantCellId: %v)",
-                    cellId);
+                YT_TLOG_DEBUG("Invalidated participant unregistered")
+                    .With("ParticipantCellId", cellId);
                 ParticipantMap_.erase(it);
                 participant.Reset();
             }
@@ -2863,8 +2863,8 @@ private:
                 ParticipantProviders_,
                 Logger);
             YT_VERIFY(ParticipantMap_.emplace(cellId, participant).second);
-            YT_LOG_DEBUG("Participant registered (ParticipantCellId: %v)",
-                cellId);
+            YT_TLOG_DEBUG("Participant registered")
+                .With("ParticipantCellId", cellId);
         }
 
         participant->Touch();
@@ -2878,9 +2878,9 @@ private:
             auto jt = it++;
             const auto& participant = jt->second;
             if (participant->IsExpired()) {
-                YT_LOG_DEBUG("Participant expired (ParticipantCellId: %v, State: %v)",
-                    participant->GetCellId(),
-                    participant->GetState());
+                YT_TLOG_DEBUG("Participant expired")
+                    .With("ParticipantCellId", participant->GetCellId())
+                    .With("State", participant->GetState());
                 ParticipantMap_.erase(jt);
             }
         }
@@ -2892,10 +2892,9 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG("Commit transient state changed (TransactionId: %v, State: %v -> %v)",
-            commit->GetTransactionId(),
-            commit->GetTransientState(),
-            state);
+        YT_TLOG_DEBUG("Commit transient state changed")
+            .With("TransactionId", commit->GetTransactionId())
+            .WithFormat("State", "%v -> %v", commit->GetTransientState(), state);
         commit->SetTransientState(state);
         commit->RespondedCellIds().clear();
 
@@ -2939,10 +2938,9 @@ private:
 
     void ChangeCommitPersistentState(TCommit* commit, ECommitState state)
     {
-        YT_LOG_DEBUG("Commit persistent state changed (TransactionId: %v, State: %v -> %v)",
-            commit->GetTransactionId(),
-            commit->GetPersistentState(),
-            state);
+        YT_TLOG_DEBUG("Commit persistent state changed")
+            .With("TransactionId", commit->GetTransactionId())
+            .WithFormat("State", "%v -> %v", commit->GetPersistentState(), state);
         commit->SetPersistentState(state);
     }
 
@@ -2960,10 +2958,10 @@ private:
         auto state = commit->GetTransientState();
         if (state != ECommitState::Prepare && commit->IsPrepareOnlyParticipant(cellId)) {
             commit->RespondedCellIds().insert(cellId);
-            YT_LOG_DEBUG("Omitting participant request (TransactionId: %v, ParticipantCellId: %v, State: %v)",
-                commit->GetTransactionId(),
-                cellId,
-                state);
+            YT_TLOG_DEBUG("Omitting participant request")
+                .With("TransactionId", commit->GetTransactionId())
+                .With("ParticipantCellId", cellId)
+                .With("State", state);
             return;
         }
 
@@ -3007,11 +3005,10 @@ private:
         if (error.FindMatching(NTransactionClient::EErrorCode::NoSuchTransaction) &&
             commit->GetTransientState() != ECommitState::Prepare)
         {
-            YT_LOG_DEBUG("Transaction is missing at participant; still consider this a success "
-                "(TransactionId: %v, ParticipantCellId: %v, State: %v)",
-                commit->GetTransactionId(),
-                participant->GetCellId(),
-                commit->GetTransientState());
+            YT_TLOG_DEBUG("Transaction is missing at participant; still consider this a success")
+                .With("TransactionId", commit->GetTransactionId())
+                .With("ParticipantCellId", participant->GetCellId())
+                .With("State", commit->GetTransientState());
             return true;
         }
 
@@ -3039,28 +3036,26 @@ private:
 
         auto* commit = FindPersistentCommit(transactionId);
         if (!commit) {
-            YT_LOG_DEBUG("Received participant response for a non-existing commit; ignored (TransactionId: %v, ParticipantCellId: %v)",
-                transactionId,
-                participantCellId);
+            YT_TLOG_DEBUG("Received participant response for a non-existing commit; ignored")
+                .With("TransactionId", transactionId)
+                .With("ParticipantCellId", participantCellId);
             return;
         }
 
         if (state != commit->GetTransientState()) {
-            YT_LOG_DEBUG("Received participant response for a commit in wrong state; ignored (TransactionId: %v, "
-                "ParticipantCellId: %v, ExpectedState: %v, ActualState: %v)",
-                transactionId,
-                participantCellId,
-                state,
-                commit->GetTransientState());
+            YT_TLOG_DEBUG("Received participant response for a commit in wrong state; ignored")
+                .With("TransactionId", transactionId)
+                .With("ParticipantCellId", participantCellId)
+                .With("ExpectedState", state)
+                .With("ActualState", commit->GetTransientState());
             return;
         }
 
         if (IsParticipantResponseSuccessful(commit, participant, error)) {
-            YT_LOG_DEBUG("Coordinator observes participant success "
-                "(TransactionId: %v, ParticipantCellId: %v, State: %v)",
-                commit->GetTransactionId(),
-                participantCellId,
-                state);
+            YT_TLOG_DEBUG("Coordinator observes participant success")
+                .With("TransactionId", commit->GetTransactionId())
+                .With("ParticipantCellId", participantCellId)
+                .With("State", state);
 
             // NB: Duplicates are fine.
             commit->RespondedCellIds().insert(participantCellId);
@@ -3068,17 +3063,17 @@ private:
         } else {
             switch (state) {
                 case ECommitState::Prepare: {
-                    YT_LOG_DEBUG(error, "Coordinator observes participant failure; will abort "
-                        "(TransactionId: %v, ParticipantCellId: %v, State: %v)",
-                        commit->GetTransactionId(),
-                        participantCellId,
-                        state);
+                    YT_TLOG_DEBUG("Coordinator observes participant failure; will abort")
+                        .With("TransactionId", commit->GetTransactionId())
+                        .With("ParticipantCellId", participantCellId)
+                        .With("State", state)
+                        .With(error);
                     auto wrappedError = TError(
                         NTransactionClient::EErrorCode::ParticipantFailedToPrepare,
                         "Participant %v has failed to prepare",
                         participantCellId)
-                        << TErrorAttribute("participant_cell_id", participantCellId)
-                        << error;
+                        .With("participant_cell_id", participantCellId)
+                        .With(error);
                     ChangeCommitTransientState(commit, ECommitState::Aborting, wrappedError);
                     break;
                 }
@@ -3086,20 +3081,20 @@ private:
                 case ECommitState::Commit:
                 case ECommitState::Abort:
                 case ECommitState::ReadyToCommit:
-                    YT_LOG_DEBUG(error, "Coordinator observes participant failure; will retry "
-                        "(TransactionId: %v, ParticipantCellId: %v, State: %v)",
-                        commit->GetTransactionId(),
-                        participantCellId,
-                        state);
+                    YT_TLOG_DEBUG("Coordinator observes participant failure; will retry")
+                        .With("TransactionId", commit->GetTransactionId())
+                        .With("ParticipantCellId", participantCellId)
+                        .With("State", state)
+                        .With(error);
                     SendParticipantRequest(commit, participantCellId);
                     break;
 
                 default:
-                    YT_LOG_DEBUG(error, "Coordinator observes participant failure; ignored "
-                        "(TransactionId: %v, ParticipantCellId: %v, State: %v)",
-                        commit->GetTransactionId(),
-                        participantCellId,
-                        state);
+                    YT_TLOG_DEBUG("Coordinator observes participant failure; ignored")
+                        .With("TransactionId", commit->GetTransactionId())
+                        .With("ParticipantCellId", participantCellId)
+                        .With("State", state)
+                        .With(error);
                     break;
             }
             return;

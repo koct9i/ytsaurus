@@ -9,13 +9,12 @@
 #include "queue_controller.h"
 #include "queue_export_manager.h"
 #include "snapshot.h"
+#include "ytree_helpers.h"
 
 #include <yt/yt/server/lib/alert_manager/alert_manager.h>
 
-#include <yt/yt/ytlib/api/native/connection.h>
 #include <yt/yt/ytlib/api/native/config.h>
-
-#include <yt/yt/ytlib/discovery_client/member_client.h>
+#include <yt/yt/ytlib/api/native/connection.h>
 
 #include <yt/yt/ytlib/auth/native_authenticating_channel.h>
 
@@ -25,18 +24,23 @@
 
 #include <yt/yt/library/cypress_election/election_manager.h>
 
+#include <yt/yt/library/discovery_client/member_client.h>
+
 #include <yt/yt/library/orchid/orchid_ypath_service.h>
 
 #include <yt/yt/core/concurrency/periodic_executor.h>
 #include <yt/yt/core/concurrency/thread_pool.h>
 
 #include <yt/yt/core/misc/collection_helpers.h>
-#include <yt/yt/core/misc/range_helpers.h>
+
+#include <yt/yt/core/rpc/helpers.h>
 
 #include <yt/yt/core/ypath/token.h>
 
 #include <yt/yt/core/ytree/fluent.h>
 #include <yt/yt/core/ytree/virtual.h>
+
+#include <library/cpp/yt/misc/range_helpers.h>
 
 namespace NYT::NQueueAgent {
 
@@ -166,7 +170,7 @@ constinit const auto Logger = QueueAgentLogger;
 ////////////////////////////////////////////////////////////////////////////////
 
 class TObjectMapBoundService
-    : public TVirtualMapBase
+    : public TVirtualMapPartBase
 {
 public:
     TObjectMapBoundService(
@@ -247,10 +251,9 @@ public:
         }
 
         if (!Owner_->ObjectsWithOurStage_[ObjectKind_].contains(ref)) {
-            // NB(apachee): It is possible to try to access queue using consumers orchid (and vice versa), e.g.
-            // //queue_agent/consumers/<queue>, and previously that would've let to redirect, but
-            // this condition short-circuits resolving of such paths.
-            THROW_ERROR_EXCEPTION("Type of the object %v does not match with the path used", ref);
+            // The object is of a different kind and belongs to a sibling part of the merged map;
+            // returning null lets the merged service consult it instead of short-circuiting here.
+            return nullptr;
         }
 
         const auto& objectAgentId = objectToHostIt->second;
@@ -262,9 +265,9 @@ public:
                     "Object %v is not available from instance %v",
                     ref,
                     Owner_->AgentId_)
-                    << TErrorAttribute("cached_object_agent_id", objectAgentId);
+                    .With("cached_object_agent_id", objectAgentId);
                 THROW_ERROR_EXCEPTION(NRpc::EErrorCode::Unavailable, "Unavailable, retry later")
-                    << error;
+                    .With(error);
             }
 
             auto remoteRoot = Format("%v/%v", ProxyConfig_.RemoteQueryRoot, ToYPathLiteral(key));
@@ -293,6 +296,8 @@ private:
     };
     const TProxyConfig ProxyConfig_;
 };
+
+using TObjectMapBoundServicePtr = TIntrusivePtr<TObjectMapBoundService>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -490,7 +495,6 @@ TQueueAgent::TQueueAgent(
     std::string queueAgentUser,
     IInvokerPtr controlInvoker,
     TDynamicStatePtr dynamicState,
-    ICypressElectionManagerPtr electionManager,
     IAlertCollectorPtr alertCollector,
     std::string agentId)
     : Config_(std::move(config))
@@ -499,7 +503,6 @@ TQueueAgent::TQueueAgent(
     , QAClientDirectory_(New<TQueueAgentClientDirectory>(ClientDirectory_))
     , ControlInvoker_(std::move(controlInvoker))
     , DynamicState_(std::move(dynamicState))
-    , ElectionManager_(std::move(electionManager))
     , AlertCollector_(std::move(alertCollector))
     , ControllerThreadPool_(CreateThreadPool(DynamicConfig_->ControllerThreadCount, "Controller"))
     , PassExecutor_(New<TPeriodicExecutor>(
@@ -508,25 +511,43 @@ TQueueAgent::TQueueAgent(
         DynamicConfig_->PassPeriod))
     , PassProfiler_(QueueAgentProfiler())
     , AgentId_(std::move(agentId))
-    , QueueAgentChannelFactory_(nativeConnection->GetChannelFactory())
+    , BaseQueueAgentChannelFactory_(nativeConnection->GetChannelFactory())
+    , QueueAgentChannelFactory_(NRpc::CreateDefaultTimeoutChannelFactory(
+        BaseQueueAgentChannelFactory_,
+        DynamicConfig_->QueueAgentChannelRequestTimeout))
     , QueueExportManager_(CreateQueueExportManager(
         nativeConnection,
         std::move(queueAgentUser),
         Config_->QueueExportManager,
         DynamicConfig_->QueueExportManager))
 {
+    TEnumIndexedArray<EObjectKind, TObjectMapBoundServicePtr> objectServices;
+    TEnumIndexedArray<EObjectKind, TObjectMapBoundServicePtr> ownedObjectServices;
     for (auto objectKind : TEnumTraits<EObjectKind>::GetDomainValues()) {
-        ObjectServiceNodes_[objectKind] = CreateVirtualNode(
-            New<TObjectMapBoundService>(
-                this,
-                objectKind,
-                /*enableProxy*/ true));
+        objectServices[objectKind] = New<TObjectMapBoundService>(
+            this,
+            objectKind,
+            /*enableProxy*/ true);
+        ownedObjectServices[objectKind] = New<TObjectMapBoundService>(
+            this,
+            objectKind,
+            /*enableProxy*/ false);
+    }
 
-        OwnedObjectServiceNodes_[objectKind] = CreateVirtualNode(
-            New<TObjectMapBoundService>(
-                this,
-                objectKind,
-                /*enableProxy*/ false));
+    for (auto objectKind : TEnumTraits<EObjectKind>::GetDomainValues()) {
+        if (objectKind == EObjectKind::Consumer) {
+            ObjectServiceNodes_[objectKind] = CreateVirtualNode(CreateMergedVirtualMapService({
+                objectServices[EObjectKind::Consumer],
+                objectServices[EObjectKind::MultiConsumer],
+            }));
+            OwnedObjectServiceNodes_[objectKind] = CreateVirtualNode(CreateMergedVirtualMapService({
+                ownedObjectServices[EObjectKind::Consumer],
+                ownedObjectServices[EObjectKind::MultiConsumer],
+            }));
+        } else {
+            ObjectServiceNodes_[objectKind] = CreateVirtualNode(objectServices[objectKind]);
+            OwnedObjectServiceNodes_[objectKind] = CreateVirtualNode(ownedObjectServices[objectKind]);
+        }
     }
 }
 
@@ -534,7 +555,7 @@ void TQueueAgent::Start()
 {
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
-    YT_LOG_INFO("Starting queue agent");
+    YT_TLOG_INFO("Starting queue agent");
 
     PassExecutor_->Start();
 }
@@ -543,7 +564,8 @@ IMapNodePtr TQueueAgent::GetOrchidNode() const
 {
     YT_ASSERT_SERIALIZED_INVOKER_AFFINITY(ControlInvoker_);
 
-    YT_LOG_DEBUG("Executing orchid request (LastSuccessfulPassIndex: %v)", PassIndex_ - 1);
+    YT_TLOG_DEBUG("Executing orchid request")
+        .With("LastSuccessfulPassIndex", PassIndex_ - 1);
 
     auto virtualScalarNode = [] (auto callable) {
         return CreateVirtualNode(IYPathService::FromProducer(BIND([callable] (IYsonConsumer* consumer) {
@@ -587,6 +609,10 @@ void TQueueAgent::OnDynamicConfigChanged(
 
     ControllerThreadPool_->SetThreadCount(newConfig->ControllerThreadCount);
 
+    QueueAgentChannelFactory_.Store(NRpc::CreateDefaultTimeoutChannelFactory(
+        BaseQueueAgentChannelFactory_,
+        newConfig->QueueAgentChannelRequestTimeout));
+
     {
         auto guard = ReaderGuard(ObjectLock_);
 
@@ -600,10 +626,9 @@ void TQueueAgent::OnDynamicConfigChanged(
     QueueExportManager_->Reconfigure(
         newConfig->QueueExportManager);
 
-    YT_LOG_DEBUG(
-        "Updated queue agent dynamic config (OldConfig: %v, NewConfig: %v)",
-        ConvertToYsonString(oldConfig, EYsonFormat::Text),
-        ConvertToYsonString(newConfig, EYsonFormat::Text));
+    YT_TLOG_DEBUG("Updated queue agent dynamic config")
+        .With("OldConfig", ConvertToYsonString(oldConfig, EYsonFormat::Text))
+        .With("NewConfig", ConvertToYsonString(newConfig, EYsonFormat::Text));
 }
 
 TQueueSnapshotConstPtr TQueueAgent::FindQueueSnapshot(const TTablePath& path) const
@@ -665,16 +690,17 @@ void TQueueAgent::Pass()
     PassProfiler_.OnStart(PassIndex_, PassInstant_);
 
     auto traceContextGuard = TTraceContextGuard(TTraceContext::NewRoot("QueueAgent"));
-    auto Logger = QueueAgentLogger().WithTag("PassIndex: %v", PassIndex_);
+    auto Logger = QueueAgentLogger().WithTag("PassIndex", PassIndex_);
 
-    YT_LOG_INFO("Pass started");
+    YT_TLOG_INFO("Pass started");
 
     try {
         GuardedPass(Logger);
         PassError_ = TError();
     } catch (const std::exception& ex) {
         PassError_ = ex;
-        YT_LOG_ERROR(PassError_, "Error in Queue Agent pass");
+        YT_TLOG_ERROR("Error in Queue Agent pass")
+            .With(PassError_);
         AlertCollector_->StageAlert(CreateAlert(
             NAlerts::EErrorCode::QueueAgentPassFailed,
             "Error in Queue Agent pass",
@@ -685,7 +711,7 @@ void TQueueAgent::Pass()
 
     AlertCollector_->PublishAlerts();
     PassProfiler_.OnFinish(TInstant::Now() - PassInstant_);
-    YT_LOG_INFO("Pass finished");
+    YT_TLOG_INFO("Pass finished");
 }
 
 void TQueueAgent::GuardedPass(const TLogger& Logger)
@@ -708,7 +734,7 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
         asyncObjectMappingRows.AsVoid(),
     };
     if (auto error = WaitFor(AllSucceeded(futures)); !error.IsOK()) {
-        THROW_ERROR_EXCEPTION("Error while reading dynamic state") << error;
+        THROW_ERROR_EXCEPTION("Error while reading dynamic state").With(error);
     }
 
     auto queueRows = asyncQueueRows.AsUnique().GetOrCrash().Value();
@@ -735,19 +761,18 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
     if (replicatedTableMappingRowsOrError.IsOK()) {
         replicatedTableMappingRows = std::move(replicatedTableMappingRowsOrError.Value());
     } else {
-        YT_LOG_DEBUG(replicatedTableMappingRowsOrError, "Error while reading replicated table mapping");
+        YT_TLOG_DEBUG("Error while reading replicated table mapping")
+            .With(replicatedTableMappingRowsOrError);
     }
 
-    YT_LOG_INFO(
-        "State table rows collected (QueueRowCount: %v, ConsumerRowCount: %v, MultiConsumerRows: %v, "
-        "MultiConsumerNameRows: %v, RegistrationRowCount: %v, QueueAgentObjectMappingRows: %v, ReplicatedTableMappingRowCount: %v)",
-        queueRows.size(),
-        consumerInfos.size(),
-        multiConsumerRows.size(),
-        multiConsumerNameRows.size(),
-        registrationRows.size(),
-        objectMappingRows.size(),
-        replicatedTableMappingRows.size());
+    YT_TLOG_INFO("State table rows collected")
+        .With("QueueRowCount", queueRows.size())
+        .With("ConsumerRowCount", consumerInfos.size())
+        .With("MultiConsumerRowCount", multiConsumerRows.size())
+        .With("MultiConsumerNameRowCount", multiConsumerNameRows.size())
+        .With("RegistrationRowCount", registrationRows.size())
+        .With("QueueAgentObjectMappingRowCount", objectMappingRows.size())
+        .With("ReplicatedTableMappingRowCount", replicatedTableMappingRows.size());
 
     auto allMultiConsumers = GetHashTable<TTablePath>(multiConsumerRows);
 
@@ -794,9 +819,8 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
 
     if (skippedReplicatedTableObjects > 0) {
         YT_VERIFY(!DynamicConfig_->HandleReplicatedObjects);
-        YT_LOG_DEBUG(
-            "All (chaos) replicated table objects were skipped, since \"handle_replicated_objects\" is false in queue agent dynamic config "
-            "(SkippedReplicatedTableObjectCount: %v)", skippedReplicatedTableObjects);
+        YT_TLOG_DEBUG("All (chaos) replicated table objects were skipped, since \"handle_replicated_objects\" is false in queue agent dynamic config")
+            .With("SkippedReplicatedTableObjectCount", skippedReplicatedTableObjects);
     }
 
     // The remaining objects are considered leading for this queue agent.
@@ -814,10 +838,10 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
         for (const auto& entity : entities) {
             TGenericObjectReference ref(GetObjectReference(entity));
 
-            YT_LOG_TRACE("Processing row (Kind: %v, Ref: %v, Row: %v)",
-                objectKind,
-                ref,
-                ConvertToYsonString(GetTableRow(entity), EYsonFormat::Text).ToString());
+            YT_TLOG_TRACE("Processing row")
+                .With("Kind", objectKind)
+                .With("Ref", ref)
+                .With("Row", ConvertToYsonString(GetTableRow(entity), EYsonFormat::Text));
 
             auto& freshObject = freshObjects[objectKind][ref];
             auto& controller = freshObject.Controller;
@@ -832,13 +856,12 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
             // If we keep existing controller, we notify it of (potential) row change.
             auto recreated = updateController(controller, leading, entity, GetReplicatedTableMappingRow(replicatedTableMapping, GetTableRow(entity).Path));
 
-            YT_LOG_DEBUG(
-                "Controller updated (Kind: %v, Object: %v, Reused: %v, Recreated: %v, Leading: %v)",
-                objectKind,
-                ref,
-                reused,
-                recreated,
-                leading);
+            YT_TLOG_DEBUG("Controller updated")
+                .With("Kind", objectKind)
+                .With("Object", ref)
+                .With("Reused", reused)
+                .With("Recreated", recreated)
+                .With("Leading", leading);
         }
     };
 
@@ -957,7 +980,7 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
         auto guard = ReaderGuard(ObjectLock_);
 
         // NB(panesher): After swap we have here only old objects.
-        auto& oldObjects = freshObjects;
+        const auto& oldObjects = freshObjects;
 
         for (auto objectKind : TEnumTraits<EObjectKind>::GetDomainValues()) {
             for (const auto& [path, object] : oldObjects[objectKind]) {
@@ -967,7 +990,6 @@ void TQueueAgent::GuardedPass(const TLogger& Logger)
             }
         }
     }
-
 
     // Finally, update rows in the controllers. As best effort to prevent some inconsistencies (like enabling trimming
     // with obsolete list of vital registrations), we do that strictly after registration update.
@@ -1093,8 +1115,11 @@ NYTree::IYPathServicePtr TQueueAgent::RedirectYPathRequest(const std::string& ho
 {
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
-    YT_LOG_DEBUG("Redirecting orchid request (QueueAgentHost: %v, RemoteRoot: %v)", host, remoteRoot);
-    auto leaderChannel = QueueAgentChannelFactory_->CreateChannel(host);
+    YT_TLOG_DEBUG("Redirecting orchid request")
+        .With("QueueAgentHost", host)
+        .With("RemoteRoot", remoteRoot);
+
+    auto leaderChannel = QueueAgentChannelFactory_.Acquire()->CreateChannel(host);
     return CreateOrchidYPathService({
         .Channel = std::move(leaderChannel),
         .RemoteRoot = std::string(remoteRoot),
@@ -1126,6 +1151,7 @@ bool TQueueAgent::UpdateMultiConsumerController(
         controller,
         row,
         replicatedTableMappingRow,
+        /*store*/ this,
         DynamicConfig_->Controller,
         QAClientDirectory_,
         ControllerThreadPool_->GetInvoker(),

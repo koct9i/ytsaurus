@@ -157,10 +157,8 @@ TNodeId TChunkPlacement::TAllocationSession::PickRandomNode()
         WeightedRandomNodeChooser_->GetWeight(resultingPickNodeId));
     auto isInserted = false;
     for (auto removedNodeIt = RemovedNodes_.begin(); removedNodeIt != RemovedNodes_.end(); ++removedNodeIt) {
-        YT_LOG_ALERT_IF(
-            resultingPickNodeDescription == *removedNodeIt,
-            "Picked a node that was already chosen previously (NodeId: %v)",
-            resultingPickNodeId);
+        YT_TLOG_ALERT_IF(resultingPickNodeDescription == *removedNodeIt, "Picked a node that was already chosen previously")
+            .With("NodeId", resultingPickNodeId);
 
         if (resultingPickNodeDescription.LeftBound < removedNodeIt->LeftBound) {
             RemovedNodes_.insert(removedNodeIt, resultingPickNodeDescription);
@@ -202,6 +200,7 @@ void TChunkPlacement::Clear()
     IsNodeWriteSessionLimitForUserAllocationEnabled_ = false;
     StorageDataCenters_.clear();
     BannedStorageDataCenters_.clear();
+    TemporarilyUnavailableStorageDataCenters_.clear();
     FaultyStorageDataCenters_.clear();
     AliveStorageDataCenters_.clear();
     DataCenterSetErrors_.clear();
@@ -290,6 +289,11 @@ bool TChunkPlacement::IsDataCenterFeasible(const TDataCenter* dataCenter) const
     return AliveStorageDataCenters_.contains(dataCenter);
 }
 
+bool TChunkPlacement::IsDataCenterTemporarilyUnavailable(const TDataCenter* dataCenter) const
+{
+    return TemporarilyUnavailableStorageDataCenters_.contains(dataCenter);
+}
+
 THashSet<std::string> TChunkPlacement::GetFaultyStorageDataCenterNames() const
 {
     THashSet<std::string> result;
@@ -320,12 +324,17 @@ void TChunkPlacement::CheckFaultyDataCentersOnPrimaryMaster()
         }
 
         auto dataCenterIsEnabled = !oldFaultyStorageDataCenters.contains(dataCenter);
+        auto shouldReportFault =
+            !BannedStorageDataCenters_.contains(dataCenter) &&
+            !TemporarilyUnavailableStorageDataCenters_.contains(dataCenter);
 
         auto dataCenterStatistics = nodeTracker->GetDataCenterFlavoredNodeStatistics(dataCenter, ENodeFlavor::Data);
         if (!dataCenterStatistics) {
-            auto error = TError("Storage data center %Qv doesn't have statistics",
-                dataCenterName);
-            DataCenterFaultErrors_.push_back(std::move(error));
+            if (shouldReportFault) {
+                auto error = TError("Storage data center %Qv doesn't have statistics",
+                    dataCenterName);
+                DataCenterFaultErrors_.push_back(std::move(error));
+            }
 
             if (!dataCenterIsEnabled) {
                 InsertOrCrash(FaultyStorageDataCenters_, dataCenter);
@@ -335,7 +344,7 @@ void TChunkPlacement::CheckFaultyDataCentersOnPrimaryMaster()
 
         auto error = ComputeDataCenterFaultiness(dataCenter, *dataCenterStatistics, dataCenterIsEnabled);
         if (!error.IsOK()) {
-            if (!BannedStorageDataCenters_.contains(dataCenter)) {
+            if (shouldReportFault) {
                 DataCenterFaultErrors_.push_back(std::move(error));
             }
             InsertOrCrash(FaultyStorageDataCenters_, dataCenter);
@@ -374,6 +383,8 @@ TNodeList TChunkPlacement::GetConsistentPlacementWriteTargets(const TChunk* chun
 {
     YT_ASSERT(IsConsistentChunkPlacementEnabled());
     YT_VERIFY(chunk->HasConsistentReplicaPlacementHash());
+
+    // TODO(danilalexeev): YT-29395. Make consistent placement respect data center feasibility.
     return ConsistentPlacement_->GetWriteTargets(chunk, mediumIndex);
 }
 
@@ -511,15 +522,14 @@ std::optional<TNodeList> TChunkPlacement::FindConsistentPlacementWriteTargets(
         const auto& nodeTracker = Bootstrap_->GetNodeTracker();
         const auto& dataNodeStatistics = nodeTracker->GetFlavoredNodeStatistics(NNodeTrackerClient::ENodeFlavor::Data);
         if (desiredCount > dataNodeStatistics.OnlineNodeCount) {
-            YT_LOG_WARNING("Requested to allocate too many consistently placed chunk replica targets "
-                "(ChunkId: %v, ReplicaIndexes: %v, MediumIndex: %v, MinReplicaCount: %v, DesiredReplicaCount: %v, ConsistentPlacementReplicaCount: %v, OnlineDataNodeCount: %v)",
-                chunk->GetId(),
-                replicaIndexes,
-                mediumIndex,
-                minCount,
-                desiredCount,
-                std::ssize(result),
-                dataNodeStatistics.OnlineNodeCount);
+            YT_TLOG_WARNING("Requested to allocate too many consistently placed chunk replica targets")
+                .With("ChunkId", chunk->GetId())
+                .With("ReplicaIndexes", replicaIndexes)
+                .With("MediumIndex", mediumIndex)
+                .With("MinReplicaCount", minCount)
+                .With("DesiredReplicaCount", desiredCount)
+                .With("ConsistentPlacementReplicaCount", std::ssize(result))
+                .With("OnlineDataNodeCount", dataNodeStatistics.OnlineNodeCount);
         }
         return std::nullopt;
     }
@@ -532,12 +542,11 @@ std::optional<TNodeList> TChunkPlacement::FindConsistentPlacementWriteTargets(
             return replicaIndex >= std::ssize(result);
         })!= replicaIndexes.end())
     {
-        YT_LOG_ALERT("Target nodes dictated by consistent chunk placement are fewer than the specified replica index "
-            "(ChunkId: %v, MediumIndex: %v, ConsistentPlacementTargetNodeCount: %v, ReplicaIndexes: %v)",
-            chunk->GetId(),
-            mediumIndex,
-            std::ssize(result),
-            replicaIndexes);
+        YT_TLOG_ALERT("Target nodes dictated by consistent chunk placement are fewer than the specified replica index")
+            .With("ChunkId", chunk->GetId())
+            .With("MediumIndex", mediumIndex)
+            .With("ConsistentPlacementTargetNodeCount", std::ssize(result))
+            .With("ReplicaIndexes", replicaIndexes);
         return std::nullopt;
     }
 
@@ -678,12 +687,10 @@ TChunkLocation* TChunkPlacement::GetRemovalTarget(
     for (auto replica : replicas) {
         auto* locationReplica = replica.As<EStoredReplicaType::ChunkLocation>();
         if (!locationReplica) {
-            YT_LOG_ALERT(
-                "Non-chunk location stored replica was found during processing removal targets for chunk, ignored "
-                "(ChunkId: %v, ReplicaMediumIndex: %v, ReplicaIndex: %v)",
-                chunk->GetId(),
-                replica.GetEffectiveMediumIndex(),
-                replica.GetReplicaIndex());
+            YT_TLOG_ALERT("Non-chunk location stored replica was found during processing removal targets for chunk, ignored")
+                .With("ChunkId", chunk->GetId())
+                .With("ReplicaMediumIndex", replica.GetEffectiveMediumIndex())
+                .With("ReplicaIndex", replica.GetReplicaIndex());
             continue;
         }
         if (replica.GetEffectiveMediumIndex() != mediumIndex) {
@@ -775,7 +782,10 @@ TChunkLocation* TChunkPlacement::GetRemovalTarget(
             }
 
             if (auto dataCenter = rack->GetDataCenter()) {
-                auto maxReplicasPerDataCenter = GetMaxReplicasPerDataCenter(mediumIndex, chunk, dataCenter);
+                auto maxReplicasPerDataCenter = GetMaxReplicasPerDataCenter(
+                    mediumIndex,
+                    chunk,
+                    dataCenter);
                 if (perDataCenterCounters[dataCenter] > maxReplicasPerDataCenter) {
                     dataCenterWinner = location;
                 }
@@ -883,12 +893,14 @@ void TChunkPlacement::RecomputeDataCenterSets()
     // At first, clear everything.
     auto oldStorageDataCenters = std::exchange(StorageDataCenters_, {});
     auto oldBannedStorageDataCenters = std::exchange(BannedStorageDataCenters_, {});
+    auto oldTemporarilyUnavailableStorageDataCenters = std::exchange(TemporarilyUnavailableStorageDataCenters_, {});
     auto oldAliveStorageDataCenters = std::exchange(AliveStorageDataCenters_, {});
     DataCenterSetErrors_.clear();
 
     auto refreshGuard = Finally([&] () noexcept {
         if (StorageDataCenters_ != oldStorageDataCenters ||
             BannedStorageDataCenters_ != oldBannedStorageDataCenters ||
+            TemporarilyUnavailableStorageDataCenters_ != oldTemporarilyUnavailableStorageDataCenters ||
             AliveStorageDataCenters_ != oldAliveStorageDataCenters)
         {
             const auto& chunkManager = Bootstrap_->GetChunkManager();
@@ -912,21 +924,41 @@ void TChunkPlacement::RecomputeDataCenterSets()
         }
     }
 
-    for (const auto& bannedDataCenter : GetDynamicConfig()->BannedStorageDataCenters) {
-        if (auto* dataCenter = nodeTracker->FindDataCenterByName(bannedDataCenter); IsObjectAlive(dataCenter)) {
-            if (StorageDataCenters_.contains(dataCenter)) {
-                InsertOrCrash(BannedStorageDataCenters_, dataCenter);
-            } else {
-                auto error = TError("Banned data center %Qv is not a storage data center",
-                    bannedDataCenter);
-                DataCenterSetErrors_.push_back(error);
+    auto populateUnavailableDataCenterSet = [&] (
+        const THashSet<std::string>& configuredDataCenters,
+        THashSet<const TDataCenter*>* dataCenters,
+        TStringBuf dataCenterKind)
+    {
+        for (const auto& configuredDataCenter : configuredDataCenters) {
+            auto* dataCenter = nodeTracker->FindDataCenterByName(configuredDataCenter);
+            if (!IsObjectAlive(dataCenter)) {
+                DataCenterSetErrors_.push_back(TError(
+                    "%v data center %Qv is unknown",
+                    dataCenterKind,
+                    configuredDataCenter));
+                continue;
             }
-        } else {
-            auto error = TError("Banned data center %Qv is unknown",
-                bannedDataCenter);
-            DataCenterSetErrors_.push_back(error);
+
+            if (!StorageDataCenters_.contains(dataCenter)) {
+                DataCenterSetErrors_.push_back(TError(
+                    "%v data center %Qv is not a storage data center",
+                    dataCenterKind,
+                    configuredDataCenter));
+                continue;
+            }
+
+            InsertOrCrash(*dataCenters, dataCenter);
         }
-    }
+    };
+
+    populateUnavailableDataCenterSet(
+        GetDynamicConfig()->BannedStorageDataCenters,
+        &BannedStorageDataCenters_,
+        /*dataCenterKind*/ "Banned");
+    populateUnavailableDataCenterSet(
+        GetDynamicConfig()->TemporarilyUnavailableStorageDataCenters,
+        &TemporarilyUnavailableStorageDataCenters_,
+        /*dataCenterKind*/ "Temporarily unavailable");
 
     for (const auto& error : DataCenterFaultErrors_) {
         DataCenterSetErrors_.push_back(error);
@@ -934,8 +966,9 @@ void TChunkPlacement::RecomputeDataCenterSets()
 
     auto isStorageDataCenterAlive = [this] (const TDataCenter* dataCenter) {
         auto isBanned = BannedStorageDataCenters_.contains(dataCenter);
+        auto isTemporarilyUnavailable = TemporarilyUnavailableStorageDataCenters_.contains(dataCenter);
         auto isFaulty = FaultyStorageDataCenters_.contains(dataCenter);
-        return !isBanned && !isFaulty;
+        return !isBanned && !isTemporarilyUnavailable && !isFaulty;
     };
     for (auto* aliveDataCenter : StorageDataCenters_ | std::views::filter(isStorageDataCenterAlive)) {
         InsertOrCrash(AliveStorageDataCenters_, aliveDataCenter);

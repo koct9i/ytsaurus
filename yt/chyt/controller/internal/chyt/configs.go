@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -114,7 +115,7 @@ func applyConfigDefaults(configMapNode, defaultsMapNode map[string]any, configWi
 	}
 }
 
-func (c Controller) getPatchedClickHouseConfig(oplet *strawberry.Oplet, speclet *Speclet) (config any, err error) {
+func (c *Controller) getPatchedClickHouseConfig(oplet *strawberry.Oplet, speclet *Speclet) (config any, err error) {
 	config, err = cloneNode(speclet.ClickHouseConfig)
 	if err != nil {
 		return
@@ -194,7 +195,7 @@ func getDiscoveryServerAddresses(ctx context.Context, ytc yt.Client) (addresses 
 	return
 }
 
-func (c Controller) getPatchedYtConfig(ctx context.Context, oplet *strawberry.Oplet, speclet *Speclet) (config any, err error) {
+func (c *Controller) getPatchedYtConfig(ctx context.Context, oplet *strawberry.Oplet, speclet *Speclet) (config any, err error) {
 	config, err = cloneNode(speclet.YTConfig)
 	if err != nil {
 		return
@@ -235,6 +236,7 @@ func (c Controller) getPatchedYtConfig(ctx context.Context, oplet *strawberry.Op
 	if _, ok := configAsMap["clique_instance_count"]; !ok {
 		configAsMap["clique_instance_count"] = speclet.Resources.InstanceCount
 	}
+	configAsMap["orchid_root"] = c.orchidDir(oplet.Alias())
 	// TODO(max42): put to preprocessor similarly to yt/cpu_limit.
 	if _, ok := configAsMap["worker_thread_count"]; !ok {
 		configAsMap["worker_thread_count"] = *speclet.Resources.InstanceCPU
@@ -431,21 +433,31 @@ func (c *Controller) uploadYsonFile(ctx context.Context, alias string, filename 
 	return c.uploadFile(ctx, alias, filename, configYson)
 }
 
-func (c Controller) artifactDir(alias string) ypath.Path {
+func (c *Controller) artifactDir(alias string) ypath.Path {
 	return c.root.Child(alias).Child("artifacts")
 }
 
-func (c Controller) sqlUDFDir(alias string) ypath.Path {
+func (c *Controller) sqlUDFDir(alias string) ypath.Path {
 	return c.root.Child(alias).Child("user_defined_sql_functions")
 }
 
-func (c Controller) systemLogTableRootDir(alias string) ypath.Path {
+func (c *Controller) orchidDir(alias string) ypath.Path {
+	return c.root.Child(alias).Child("orchids")
+}
+
+func (c *Controller) systemLogTableRootDir(alias string) ypath.Path {
 	return c.artifactDir(alias).Child("system_log_tables")
 }
 
-func (c Controller) storageArtifactsDir(alias string) ypath.Path {
+func (c *Controller) storageArtifactsDir(alias string) ypath.Path {
 	return c.root.Child(alias).Child("storage_artifacts")
 }
+
+const (
+	defaultErrorLogFile = "./clickhouse.error.log"
+	defaultDebugLogFile = "./clickhouse.debug.log"
+	defaultInfoLogFile  = "./clickhouse.log"
+)
 
 func (c *Controller) appendConfigs(ctx context.Context, oplet *strawberry.Oplet, speclet *Speclet, filePaths *[]ypath.Rich) error {
 	r := speclet.Resources
@@ -485,6 +497,15 @@ func (c *Controller) appendConfigs(ctx context.Context, oplet *strawberry.Oplet,
 		}
 	}
 
+	errorLogFile := defaultErrorLogFile
+	debugLogFile := defaultDebugLogFile
+	infoLogFile := defaultInfoLogFile
+	if speclet.logsDir != nil {
+		errorLogFile = filepath.Join(*speclet.logsDir, "clickhouse-$YT_JOB_INDEX.error.log")
+		debugLogFile = filepath.Join(*speclet.logsDir, "clickhouse-$YT_JOB_INDEX.debug.log")
+		infoLogFile = filepath.Join(*speclet.logsDir, "clickhouse-$YT_JOB_INDEX.log")
+	}
+
 	ytServerClickHouseConfig := map[string]any{
 		"clickhouse":         clickhouseConfig,
 		"yt":                 ytConfig,
@@ -503,7 +524,7 @@ func (c *Controller) appendConfigs(ctx context.Context, oplet *strawberry.Oplet,
 			"rotation_check_period": 60000,
 			"writers": map[string]any{
 				"error": map[string]any{
-					"file_name":       "./clickhouse.error.log",
+					"file_name":       errorLogFile,
 					"type":            "file",
 					"rotation_policy": logRotationPolicy,
 				},
@@ -511,12 +532,12 @@ func (c *Controller) appendConfigs(ctx context.Context, oplet *strawberry.Oplet,
 					"type": "stderr",
 				},
 				"debug": map[string]any{
-					"file_name":       "./clickhouse.debug.log",
+					"file_name":       debugLogFile,
 					"type":            "file",
 					"rotation_policy": logRotationPolicy,
 				},
 				"info": map[string]any{
-					"file_name":       "./clickhouse.log",
+					"file_name":       infoLogFile,
 					"type":            "file",
 					"rotation_policy": logRotationPolicy,
 				},

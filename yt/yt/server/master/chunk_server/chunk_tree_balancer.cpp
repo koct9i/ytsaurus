@@ -27,7 +27,7 @@ bool TChunkTreeBalancer::IsRebalanceNeeded(TChunkList* root, EChunkTreeBalancerM
         return false;
     }
 
-    if (IsHunkRelatedChunkList(root)) {
+    if (root->GetKind() != EChunkListKind::Static) {
         return false;
     }
 
@@ -59,7 +59,6 @@ bool TChunkTreeBalancer::IsRebalanceNeeded(TChunkList* root, EChunkTreeBalancerM
 TChunkTreeBalancer::TRebalanceStatistics TChunkTreeBalancer::Rebalance(TChunkList* root)
 {
     YT_VERIFY(root->GetKind() == EChunkListKind::Static);
-    YT_VERIFY(!IsHunkRelatedChunkList(root));
 
     auto oldStatistics = root->Statistics();
 
@@ -104,6 +103,7 @@ TChunkTreeBalancer::TRebalanceStatistics TChunkTreeBalancer::Rebalance(TChunkLis
     YT_VERIFY(newStatistics.ErasureDiskSpace == oldStatistics.ErasureDiskSpace);
     YT_VERIFY(newStatistics.ChunkCount == oldStatistics.ChunkCount);
     YT_VERIFY(newStatistics.HunkDataWeight == oldStatistics.HunkDataWeight);
+    YT_VERIFY(newStatistics.LogicalHunkDataWeight == oldStatistics.LogicalHunkDataWeight);
     YT_VERIFY(newStatistics.HunkDataSize == oldStatistics.HunkDataSize);
     YT_VERIFY(newStatistics.HunkRegularDiskSpace == oldStatistics.HunkRegularDiskSpace);
     // NB: We do not compare HunkErasureDiskSpace field because it is unreliable
@@ -163,7 +163,7 @@ TChunkTreeBalancer::TRebalanceStatistics TChunkTreeBalancer::AppendChunkTree(
         auto& currentEntry = stack.top();
         auto* currentChunkTree = currentEntry.ChunkTree;
         YT_VERIFY(currentChunkTree->GetType() != EObjectType::ChunkList ||
-            !IsHunkRelatedChunkList(currentChunkTree->AsChunkList()));
+            !currentChunkTree->AsChunkList()->IsHunkRelated());
 
         if (currentChunkTree->GetType() == EObjectType::ChunkList &&
             currentChunkTree->AsChunkList()->GetRank() > 1)

@@ -1,12 +1,13 @@
 #include "yt_database_base.h"
 
 #include "storage_distributor.h"
+#include "storage_yt_materialized_view.h"
 #include "dictionary_source.h"
 #include "helpers.h"
 #include "query_context.h"
 #include "table.h"
 #include "host.h"
-#include "cypress_config_repository.h"
+#include "cypress_object_repository.h"
 
 #include <yt/yt/ytlib/api/native/client.h>
 #include <yt/yt/ytlib/api/native/rpc_helpers.h>
@@ -33,6 +34,7 @@
 #include <Storages/IStorage.h>
 #include <Storages/StorageDictionary.h>
 
+#include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ParserCreateQuery.h>
 #include <Parsers/parseQuery.h>
 
@@ -54,26 +56,33 @@ using namespace NStatisticPath;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TYtDatabaseBase::TYtDatabaseBase(String databaseName)
+TYtDatabaseBase::TYtDatabaseBase(String databaseName, THost* host)
     : DB::IDatabase(std::move(databaseName))
+    , Host_(host)
 { }
 
 void TYtDatabaseBase::createTable(
     const DB::ContextPtr context,
     const std::string& /*name*/,
     const DB::StoragePtr& table,
-    const DB::ASTPtr& /*query*/)
+    const DB::ASTPtr& query)
 {
     if (table->getName() == "Dictionary") {
-        auto* queryContext = GetQueryContext(context);
-        auto host = queryContext->Host;
-        host->GetCypressDictionaryConfigRepository()->WriteDictionary(
+        Host_->GetCypressObjectRepository()->WriteDictionary(
             context,
             table->getStorageID(),
             dynamic_pointer_cast<DB::StorageDictionary>(table)->getConfiguration());
-    }
-    else if (table->getName() != "StorageDistributor") {
-        THROW_ERROR_EXCEPTION("Table engine %Qv may not be stored in YT database: only YtTable and Dictionary engine are supported",
+
+    } else if (table->getName() == "MaterializedView") {
+        auto objectRepository = Host_->GetCypressObjectRepository();
+        auto config = BuildMaterializedViewConfiguration(context, table, query);
+        objectRepository->WriteMaterializedView(
+            context,
+            table->getStorageID(),
+            config);
+
+    } else if (table->getName() != "StorageDistributor") {
+        THROW_ERROR_EXCEPTION("Table engine %Qv may not be stored in YT database: only YtTable, Dictionary and MaterializedView engines are supported",
             table->getName());
     }
     // Table already created, nothing to do here.
@@ -119,7 +128,6 @@ DB::ASTPtr TYtDatabaseBase::getCreateDatabaseQuery() const
 void TYtDatabaseBase::dropTable(DB::ContextPtr context, const String& name, bool /*noDelay*/)
 {
     auto* queryContext = GetQueryContext(context);
-    auto* host = queryContext->Host;
     auto timerGuard = queryContext->CreateStatisticsTimerGuard(
         SlashedStatisticPath(
             Format("/%v_database/drop_table", AsciiStringToLower(getDatabaseName()))).ValueOrThrow());
@@ -130,9 +138,14 @@ void TYtDatabaseBase::dropTable(DB::ContextPtr context, const String& name, bool
     }
     #endif
 
-    DB::StorageID tableId(getDatabaseName(), name);
-    if (queryContext->LastResolvedDictionaryName == name) {
-        host->GetCypressDictionaryConfigRepository()->DeleteDictionary(context, tableId);
+    DB::StorageID storageId(getDatabaseName(), name);
+    if (queryContext->LastResolvedCliqueObject &&
+        queryContext->LastResolvedCliqueObject->StorageId == storageId)
+    {
+        const auto& resolvedObject = *queryContext->LastResolvedCliqueObject;
+        Host_->GetCypressObjectRepository()->DeleteObject(
+            context,
+            resolvedObject);
         return;
     }
 
@@ -183,11 +196,11 @@ void TYtDatabaseBase::renameTable(
     bool invalidateCache = queryContext->ParentTransactionId == NObjectClient::NullTransactionId;
 
     const auto& Logger = ClickHouseYtLogger;
-    YT_LOG_DEBUG("Renaming table (SrcPath: %v, DstPath: %v, Exchange: %v, InvalidateCache: %v)",
-        srcPath,
-        dstPath,
-        exchange,
-        invalidateCache);
+    YT_TLOG_DEBUG("Renaming table")
+        .With("SrcPath", srcPath)
+        .With("DstPath", dstPath)
+        .With("Exchange", exchange)
+        .With("InvalidateCache", invalidateCache);
 
     auto srcRefreshRevision = NHydra::NullRevision;
     if (exchange) {
@@ -229,6 +242,18 @@ void TYtDatabaseBase::renameTable(
 DB::ASTPtr TYtDatabaseBase::getCreateTableQueryImpl(const String& name, DB::ContextPtr context, bool throwOnError) const
 {
     auto* queryContext = GetQueryContext(context);
+
+    if (Host_->GetConfig()->CypressObjectRepository) {
+        if (auto materializedView = Host_->GetCypressObjectRepository()->TryGetMaterializedView(DB::StorageID(getDatabaseName(), name))) {
+            auto ast = std::move(materializedView->CreateQuery);
+            auto& create = ast->as<DB::ASTCreateQuery&>();
+            create.attach = false;
+            create.setDatabase(getDatabaseName());
+            create.setTable(name);
+            return ast;
+        }
+    }
+
     auto path = TRichYPath::Parse(getTableDataPath(name));
 
     TGetNodeOptions options;
@@ -278,32 +303,28 @@ DB::StoragePtr TYtDatabaseBase::DoGetTable(
     // Normally it's called with a query context.
     // In rare cases CH tries to find special tables (e.g. Dictionary)
     // outside of query execution and provides a global context.
-    // When called with a global context, we only attempt to retrieve dictionaries.
+    // When called with a global context, we only attempt to retrieve clique objects.
     if (context->isGlobalContext()) {
-        return DoGetDictionary(context, /*queryContext*/ nullptr, storageId);
+        return DoGetChytObject(context, /*queryContext*/ nullptr, storageId, /*resolvedObject*/ nullptr);
     }
 
     auto* queryContext = GetQueryContext(context);
     auto settings = queryContext->GetContextSettings(context);
-    auto invoker = queryContext->Host->GetClickHouseFetcherInvoker();
+    auto invoker = Host_->GetClickHouseFetcherInvoker();
 
     auto tableFuture = BIND(&TYtDatabaseBase::DoGetYTTable, Unretained(this),
         context,
         Unretained(queryContext),
         storageId).AsyncVia(invoker).Run();
-    auto dictionaryFuture = BIND(&TYtDatabaseBase::DoGetDictionary, Unretained(this),
-        context,
-        Unretained(queryContext),
-        storageId).AsyncVia(invoker).Run();
 
-    WaitFor(AllSucceeded(std::vector({tableFuture.AsVoid(), dictionaryFuture.AsVoid()})))
-        .ThrowOnError();
+    std::optional<TRepositoryObjectDescriptor> resolvedChytObject;
+    auto cliqueObject = DoGetChytObject(context, queryContext, storageId, &resolvedChytObject);
 
-    auto table = tableFuture.GetOrCrash().ValueOrThrow();
-    auto dictionary = dictionaryFuture.GetOrCrash().ValueOrThrow();
+    auto table = WaitFor(tableFuture)
+        .ValueOrThrow();
 
     DB::StoragePtr result;
-    if (table && dictionary) {
+    if (table && cliqueObject) {
         if (settings->StorageConflictResolveMode == EStorageConflictResolveMode::Throw) {
             THROW_ERROR_EXCEPTION(
                 "CHYT failed to resolve storage object from name %Qv "
@@ -311,13 +332,14 @@ DB::StoragePtr TYtDatabaseBase::DoGetTable(
                 "Specify setting chyt.storage_conflict_resolve_mode = {clique,yt} to choose which one to use",
                 name);
         }
-        result = settings->StorageConflictResolveMode == EStorageConflictResolveMode::Clique ? dictionary : table;
+        result = settings->StorageConflictResolveMode == EStorageConflictResolveMode::Clique ? cliqueObject : table;
     } else {
-        result = table ? table : dictionary;
+        result = table ? table : cliqueObject;
     }
 
-    if (result != nullptr && result->isDictionary()) {
-        queryContext->LastResolvedDictionaryName = name;
+    if (result && result == cliqueObject) {
+        YT_VERIFY(resolvedChytObject);
+        queryContext->LastResolvedCliqueObject = std::move(resolvedChytObject);
     }
 
     return result;
@@ -354,6 +376,45 @@ DB::StoragePtr TYtDatabaseBase::DoGetYTTable(DB::ContextPtr context, TQueryConte
     }
 }
 
+DB::StoragePtr TYtDatabaseBase::DoGetChytObject(
+    DB::ContextPtr context,
+    TQueryContext* queryContext,
+    const DB::StorageID& storageId,
+    std::optional<TRepositoryObjectDescriptor>* resolvedObject) const
+{
+    std::optional<TCypressObjectRepository::TMaterializedView> resolvedMaterializedView;
+    if (auto storage = DoGetMaterializedView(context, storageId, &resolvedMaterializedView)) {
+        YT_VERIFY(resolvedMaterializedView);
+        if (resolvedObject) {
+            *resolvedObject = TRepositoryObjectDescriptor{
+                .StorageId = storageId,
+                .Type = ERepositoryObjectType::MaterializedView,
+                .Revision = resolvedMaterializedView->Revision,
+            };
+        }
+        return storage;
+    }
+
+    auto storage = DoGetDictionary(context, queryContext, storageId);
+    if (!storage) {
+        return nullptr;
+    }
+
+    if (resolvedObject) {
+        *resolvedObject = TRepositoryObjectDescriptor{.StorageId = storageId, .Type = ERepositoryObjectType::Unknown};
+
+        auto dictionaryRevision = Host_->GetConfig()->CypressObjectRepository
+            ? Host_->GetCypressObjectRepository()->TryGetDictionaryRevision(storageId)
+            : std::nullopt;
+        if (dictionaryRevision) {
+            (*resolvedObject)->Type = ERepositoryObjectType::Dictionary;
+            (*resolvedObject)->Revision = *dictionaryRevision;
+        }
+    }
+
+    return storage;
+}
+
 DB::StoragePtr TYtDatabaseBase::DoGetDictionary(DB::ContextPtr context, TQueryContext* queryContext, const DB::StorageID& storageId) const {
     auto name = storageId.getInternalDictionaryName();
 
@@ -376,12 +437,37 @@ DB::StoragePtr TYtDatabaseBase::DoGetDictionary(DB::ContextPtr context, TQueryCo
         context);
 
     if (queryContext) {
-        if (TryGetTableDictionarySourcePath(result->getDictionary()->getSource())) {
+        if (TryGetTableDictionarySourcePath(*loadResult.config->config, loadResult.config->key_in_config)) {
             queryContext->Host->ValidateDictionaryGrants(context->getUserName(), storageId);
         }
     }
 
     return result;
+}
+
+DB::StoragePtr TYtDatabaseBase::DoGetMaterializedView(
+    DB::ContextPtr context,
+    const DB::StorageID& storageId,
+    std::optional<TCypressObjectRepository::TMaterializedView>* resolvedView) const
+{
+    if (!Host_->GetConfig()->CypressObjectRepository) {
+        return nullptr;
+    }
+
+    auto materializedView = Host_->GetCypressObjectRepository()->TryGetMaterializedView(storageId);
+    if (!materializedView) {
+        return nullptr;
+    }
+
+    auto storage = CreateStorageYtMaterializedView(
+        storageId,
+        materializedView->CreateQuery->as<DB::ASTCreateQuery&>(),
+        std::move(materializedView->TargetPath),
+        context);
+    if (resolvedView) {
+        *resolvedView = std::move(materializedView);
+    }
+    return storage;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

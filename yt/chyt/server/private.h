@@ -8,7 +8,7 @@
 
 #include <yt/yt/ytlib/chunk_client/public.h>
 
-#include <library/cpp/yt/misc/global.h>
+#include <library/cpp/yt/misc/leaky_global.h>
 
 #include <Common/COW.h>
 #include <Common/CurrentMetrics.h>
@@ -23,15 +23,15 @@ namespace NYT::NClickHouseServer {
 ////////////////////////////////////////////////////////////////////////////////
 
 //! General-purpose logger for our code.
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ClickHouseYtLogger, "ClickHouseYT");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ClickHouseYtLogger, "ClickHouseYT");
 //! Logger which is used by ClickHouse native code.
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ClickHouseNativeLogger, "ClickHouseNative");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ClickHouseNativeLogger, "ClickHouseNative");
 //! Root profiler for all metrics.
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ClickHouseProfiler, "/clickhouse");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ClickHouseProfiler, "/clickhouse");
 //! Profiler for our own metrics.
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ClickHouseYtProfiler, ClickHouseProfiler().WithPrefix("/yt"));
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ClickHouseYtProfiler, ClickHouseProfiler().WithPrefix("/yt"));
 //! Profiler exporting raw ClickHouse metrics.
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ClickHouseNativeProfiler, ClickHouseProfiler().WithPrefix("/native"));
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ClickHouseNativeProfiler, ClickHouseProfiler().WithPrefix("/native"));
 
 DEFINE_ENUM(EServerExitCode,
     ((GracefulInterruption)    (  0))
@@ -94,11 +94,13 @@ DECLARE_REFCOUNTED_STRUCT(TShowTablesConfig)
 DECLARE_REFCOUNTED_STRUCT(TSubqueryConfig)
 DECLARE_REFCOUNTED_STRUCT(TSystemLogConfig)
 DECLARE_REFCOUNTED_STRUCT(TPocoInvalidCertificateHandlerConfig)
-DECLARE_REFCOUNTED_CLASS(TPocoOpenSslConfigEntry)
+DECLARE_REFCOUNTED_STRUCT(TPocoOpenSslConfigEntry)
 DECLARE_REFCOUNTED_STRUCT(TPocoOpenSslConfig)
 DECLARE_REFCOUNTED_STRUCT(TQueryCacheConfig)
 DECLARE_REFCOUNTED_STRUCT(TUserDefinedSqlObjectsStorageConfig)
-DECLARE_REFCOUNTED_STRUCT(TDictionaryRepositoryConfig)
+DECLARE_REFCOUNTED_STRUCT(TCypressObjectRepositoryConfig)
+DECLARE_REFCOUNTED_STRUCT(TMaterializedViewsConfig)
+DECLARE_REFCOUNTED_CLASS(TMaterializedViewCoordinator)
 DECLARE_REFCOUNTED_STRUCT(TDictionaryAccessControlConfig)
 DECLARE_REFCOUNTED_STRUCT(TSystemLogTableExporterConfig)
 DECLARE_REFCOUNTED_STRUCT(TSystemLogTableExportersConfig)
@@ -113,34 +115,34 @@ DECLARE_REFCOUNTED_STRUCT(TClickHouseConfig)
 DECLARE_REFCOUNTED_STRUCT(TYtConfig)
 DECLARE_REFCOUNTED_STRUCT(IClickHouseHost)
 DECLARE_REFCOUNTED_STRUCT(IClickHouseServer)
-DECLARE_REFCOUNTED_CLASS(TQuerySettings)
+DECLARE_REFCOUNTED_STRUCT(TQuerySettings)
 DECLARE_REFCOUNTED_CLASS(THost)
 DECLARE_REFCOUNTED_STRUCT(TLauncherConfig)
 DECLARE_REFCOUNTED_STRUCT(TMemoryConfig)
 DECLARE_REFCOUNTED_CLASS(TMemoryWatchdog)
-DECLARE_REFCOUNTED_CLASS(TCompositeSettings)
-DECLARE_REFCOUNTED_CLASS(TLowCardinalitySettings)
-DECLARE_REFCOUNTED_CLASS(TConversionSettings)
-DECLARE_REFCOUNTED_CLASS(TDynamicTableSettings)
-DECLARE_REFCOUNTED_CLASS(TTestingSettings)
-DECLARE_REFCOUNTED_CLASS(TExecutionSettings)
+DECLARE_REFCOUNTED_STRUCT(TCompositeSettings)
+DECLARE_REFCOUNTED_STRUCT(TLowCardinalitySettings)
+DECLARE_REFCOUNTED_STRUCT(TConversionSettings)
+DECLARE_REFCOUNTED_STRUCT(TDynamicTableSettings)
+DECLARE_REFCOUNTED_STRUCT(TTestingSettings)
+DECLARE_REFCOUNTED_STRUCT(TExecutionSettings)
 DECLARE_REFCOUNTED_CLASS(TClickHouseIndex)
 DECLARE_REFCOUNTED_STRUCT(TGossipConfig)
 DECLARE_REFCOUNTED_STRUCT(TInvokerLivenessCheckerConfig)
 DECLARE_REFCOUNTED_STRUCT(TQueryRegistryConfig)
 DECLARE_REFCOUNTED_STRUCT(TQuerySamplingConfig)
 DECLARE_REFCOUNTED_STRUCT(TClickHouseTableConfig)
-DECLARE_REFCOUNTED_CLASS(TSerializableSpanContext)
-DECLARE_REFCOUNTED_CLASS(TSecondaryQueryHeader)
+DECLARE_REFCOUNTED_STRUCT(TSerializableSpanContext)
+DECLARE_REFCOUNTED_STRUCT(TSecondaryQueryHeader)
 DECLARE_REFCOUNTED_CLASS(TInvokerLivenessChecker)
-DECLARE_REFCOUNTED_CLASS(TConcatTablesSettings)
-DECLARE_REFCOUNTED_CLASS(TCachingSettings)
-DECLARE_REFCOUNTED_CLASS(TListDirSettings)
-DECLARE_REFCOUNTED_CLASS(TPrewhereSettings)
+DECLARE_REFCOUNTED_STRUCT(TConcatTablesSettings)
+DECLARE_REFCOUNTED_STRUCT(TCachingSettings)
+DECLARE_REFCOUNTED_STRUCT(TListDirSettings)
+DECLARE_REFCOUNTED_STRUCT(TPrewhereSettings)
 DECLARE_REFCOUNTED_STRUCT(TReadPlanWithFilter)
 DECLARE_REFCOUNTED_CLASS(TSecondaryQueryReadTaskPuller)
 DECLARE_REFCOUNTED_CLASS(TSecondaryQueryReadTaskIterator)
-DECLARE_REFCOUNTED_CLASS(TCypressDictionaryConfigRepository)
+DECLARE_REFCOUNTED_CLASS(TCypressObjectRepository)
 DECLARE_REFCOUNTED_CLASS(TTableSchemaCache)
 DECLARE_REFCOUNTED_CLASS(TCachedTableSchema)
 DECLARE_REFCOUNTED_STRUCT(IDictionaryAccessControl)
@@ -156,6 +158,7 @@ struct TSqlObjectInfo;
 struct TQueryFinishInfo;
 struct TQueryProgressValues;
 class TQueryProgress;
+struct TMaterializedViewConfiguration;
 
 struct IStorageDistributor;
 using IStorageDistributorPtr = std::shared_ptr<IStorageDistributor>;
@@ -267,6 +270,11 @@ DEFINE_ENUM(EStorageConflictResolveMode,
     ((YT)       (2) ("yt"))
 );
 
+DEFINE_ENUM(EMaterializedViewSourceType,
+    (StaticTable)
+    (TableRange)
+);
+
 ////////////////////////////////////////////////////////////////////////////////
 
 DEFINE_ENUM(EPreliminaryCheckPermissionResult,
@@ -288,6 +296,8 @@ YT_DEFINE_ERROR_ENUM(
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NClickHouseServer
+
+////////////////////////////////////////////////////////////////////////////////
 
 namespace DB {
 
@@ -367,6 +377,18 @@ void registerStorageBuffer(StorageFactory& factory);
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace DB
+
+////////////////////////////////////////////////////////////////////////////////
+
+namespace DBPoco::Util {
+
+////////////////////////////////////////////////////////////////////////////////
+
+class AbstractConfiguration;
+
+////////////////////////////////////////////////////////////////////////////////
+
+} // namespace DBPoco::Util
 
 ////////////////////////////////////////////////////////////////////////////////
 

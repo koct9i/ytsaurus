@@ -39,6 +39,8 @@ import pathlib
 
 HOST_PATHS = get_host_paths(arcadia_interop, ["ytserver-clickhouse", "clickhouse-trampoline", "ytserver-log-tailer"])
 
+DEFAULT_ORCHID_ROOT = "//sys/strawberry/chyt_orchids"
+
 DEFAULTS = {
     "memory_config": {
         "footprint": 1 * GB,
@@ -91,7 +93,9 @@ class Clique(object):
     tls_secrets = {}
     sql_udf_path = None
     query_log_table_path = None
-    dictionaries_path = None
+    storage_artifacts_path = None
+    materialized_views_path = None
+    election_lock_path = None
 
     def __init__(self, instance_count,
                  max_failed_job_count=0,
@@ -99,7 +103,8 @@ class Clique(object):
                  cpu_limit=None,
                  alias=None,
                  export_query_log=False,
-                 enable_dictionary_repository=True,
+                 enable_object_repository=True,
+                 remove_storage_artifacts_on_exit=True,
                  **kwargs):
         """
         alias: str
@@ -123,6 +128,7 @@ class Clique(object):
 
         discovery_patch = {
             "yt": {
+                "orchid_root": "{}/{}".format(DEFAULT_ORCHID_ROOT, self.alias),
                 "discovery": {
                     "version": 2,
                     "heartbeat_period": 400,
@@ -142,6 +148,7 @@ class Clique(object):
             create("map_node", system_log_table_dir, recursive=True)
 
             self.query_log_table_path = f"{system_log_table_dir}/query_log/0"
+            self.election_lock_path = f"//sys/strawberry/chyt/{self.alias}/leader_lock"
 
             log_table_config_patch = {
                 "yt": {
@@ -153,6 +160,10 @@ class Clique(object):
                             "reporting_period": 100,
                         },
                     },
+                    "election_manager": {
+                        "lock_path": self.election_lock_path,
+                        "lock_acquisition_period": 300,
+                    },
                 },
             }
             config = update(config, log_table_config_patch)
@@ -160,6 +171,7 @@ class Clique(object):
         if config_patch is not None:
             config = update(config, config_patch)
 
+        self.orchid_root = config["yt"]["orchid_root"]
         self.discovery_version = config["yt"]["discovery"]["version"]
         self.discovery_servers = ls("//sys/discovery_servers")
 
@@ -174,12 +186,24 @@ class Clique(object):
         config["yt"]["user_defined_sql_objects_storage"]["path"] = self.sql_udf_path
         config["yt"]["user_defined_sql_objects_storage"]["enabled"] = True
 
-        if enable_dictionary_repository:
-            config["yt"]["dictionary_repository"] = dict()
-            self.dictionaries_path = "//sys/strawberry/chyt/{}/storage_artifacts".format(self.alias)
-            config["yt"]["dictionary_repository"]["root_path"] = self.dictionaries_path
-            create("map_node", self.dictionaries_path, recursive=True, ignore_existing=True, attributes={
+        self.remove_storage_artifacts_on_exit = remove_storage_artifacts_on_exit
+        if enable_object_repository:
+            config["yt"]["object_repository"] = dict()
+            self.storage_artifacts_path = "//sys/strawberry/chyt/{}/storage_artifacts".format(self.alias)
+            self.materialized_views_path = "//sys/strawberry/chyt/{}/materialized_views".format(self.alias)
+            config["yt"]["object_repository"]["root_path"] = self.storage_artifacts_path
+            materialized_views_config = config["yt"].setdefault("materialized_views", {})
+            materialized_views_config.setdefault("root_path", self.materialized_views_path)
+            materialized_views_ace = make_ace(
+                "allow",
+                config["yt"]["user"],
+                ["read", "write", "remove"],
+            )
+            create("map_node", self.storage_artifacts_path, recursive=True, ignore_existing=True, attributes={
                 "acl": [ace],
+            })
+            create("map_node", self.materialized_views_path, recursive=True, ignore_existing=True, attributes={
+                "acl": [ace, materialized_views_ace],
             })
 
         spec = {"pool": None}
@@ -292,7 +316,7 @@ class Clique(object):
 
         self.instance_count = instance_count
 
-        create_access_control_object(name=self.alias, namespace="chyt")
+        create_access_control_object(name=self.alias, namespace="chyt", ignore_existing=True)
 
     def _upload_llvm_symbolizer(self, llvm_symbolizer_path):
         with open(yatest.common.binary_path("contrib/libs/llvm20/tools/llvm-symbolizer/llvm-symbolizer"), 'rb') as f:
@@ -346,6 +370,23 @@ class Clique(object):
 
     def get_active_instance_count(self):
         return len(self.get_active_instances())
+
+    # Returns the job cookie of the instance holding the leader lock or None if there is no leader.
+    def get_leader_instance_cookie(self):
+        assert self.election_lock_path is not None
+        if not exists(self.election_lock_path, verbose=False):
+            return None
+
+        # Lock transaction title is "Lock transaction for <group name>:<member name>".
+        title_prefix = "Lock transaction for clique:"
+
+        for election_lock in get(self.election_lock_path + "/@locks", verbose=False):
+            if election_lock["state"] != "acquired":
+                continue
+            title = get("#{}/@title".format(election_lock["transaction_id"]), default="", verbose=False)
+            if title.startswith(title_prefix):
+                return int(title[len(title_prefix):])
+        return None
 
     # Validate number of rows that were read from storage.
     def make_query_and_validate_read_row_count(self, query, exact=None, min=None, max=None, verbose=True, **kwargs):
@@ -432,11 +473,21 @@ class Clique(object):
         def check_all_instance_pairs():
             clique_size_per_instance = []
             for instance in self.get_active_instances():
-                clique_size = self.make_direct_query(instance, "select count(*) from system.clique", verbose=False)[0][
-                    "count()"
-                ]
+                try:
+                    clique_size = self.make_direct_query(instance, "select count(*) from system.clique", verbose=False)[0][
+                        "count()"
+                    ]
+                except YtError as err:
+                    if not err.contains_code(InstanceUnavailableCode):
+                        raise
+                    # The discovery group is shared between incarnations of a clique with
+                    # the same alias, so it may contain a stale member of a dead instance
+                    # until its lease expires.
+                    return False
                 clique_size_per_instance.append(clique_size)
             # print_debug("Clique sizes over all instances: {}".format(clique_size_per_instance))
+            if not clique_size_per_instance:
+                return False
             return min(clique_size_per_instance) == self.instance_count
 
         wait(check_all_instance_pairs)
@@ -451,8 +502,10 @@ class Clique(object):
 
             if self.sql_udf_path:
                 remove(self.sql_udf_path, recursive=True, force=True)
-            if self.dictionaries_path:
-                remove(self.dictionaries_path, recursive=True, force=True)
+            if self.storage_artifacts_path and self.remove_storage_artifacts_on_exit:
+                remove(self.storage_artifacts_path, recursive=True, force=True)
+            if self.materialized_views_path and self.remove_storage_artifacts_on_exit:
+                remove(self.materialized_views_path, recursive=True, force=True)
 
         except YtError as err:
             print_debug("Error while completing clique operation:", err)
@@ -745,14 +798,14 @@ class Clique(object):
         return t
 
     def get_orchid(self, instance, path, verbose=True):
-        orchid_path = "//sys/clickhouse/orchids/{}/{}".format(self.op.id, instance.attributes["job_cookie"])
+        orchid_path = "{}/{}".format(self.orchid_root, instance.attributes["job_cookie"])
         return get(orchid_path + path, verbose=verbose)
 
     def get_profiler(self, instance_id=None):
         if instance_id is None:
             instance_id = self.get_active_instances()[0].attributes["job_cookie"]
 
-        sensors_path = "//sys/clickhouse/orchids/{}/{}/sensors".format(self.op.id, instance_id)
+        sensors_path = "{}/{}/sensors".format(self.orchid_root, instance_id)
 
         return Profiler(self.yt_client, sensors_path)
 
@@ -820,6 +873,10 @@ class Clique(object):
             nonlocal result
             result = self.get_query_log_rows(query_id, include_secondary_queries)
             return validate_query_log_rows(result)
+
+        # Query log table is created on the first flush.
+        wait(lambda: exists(self.query_log_table_path))
+        wait(lambda: get(self.query_log_table_path + "/@tablet_state") == "mounted")
 
         wait(get_and_validate_query_log_rows)
 
@@ -917,6 +974,9 @@ class ClickHouseTestBase(YTEnvSetup):
             os.mkdir(Clique.core_dump_path)
             os.chmod(Clique.core_dump_path, 0o777)
 
+        if not exists(DEFAULT_ORCHID_ROOT):
+            create("map_node", DEFAULT_ORCHID_ROOT, recursive=True)
+
         if exists("//sys/clickhouse"):
             return
 
@@ -979,6 +1039,10 @@ class ClickHouseTestBase(YTEnvSetup):
         create_user("yt-clickhouse-cache")
         create_user("yt-clickhouse")
         create_user("yt-clickhouse-dictionaries")
+        yt_set(
+            DEFAULT_ORCHID_ROOT + "/@acl/end",
+            make_ace("allow", "yt-clickhouse", ["write", "remove"]),
+        )
 
         create_user("chyt-sql-objects")
         yt_set("//sys/accounts/sys/@acl/end", make_ace("allow", "chyt-sql-objects", "use"))

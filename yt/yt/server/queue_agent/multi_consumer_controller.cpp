@@ -1,11 +1,11 @@
 #include "multi_consumer_controller.h"
 
-#include "snapshot.h"
 #include "config.h"
 #include "helpers.h"
-#include "pass_profiler.h"
 #include "multi_consumer_profile_manager.h"
 #include "object.h"
+#include "pass_profiler.h"
+#include "snapshot.h"
 #include "snapshot_representation.h"
 
 #include <yt/yt/server/lib/alert_manager/alert_manager.h>
@@ -22,6 +22,7 @@
 #include <yt/yt/client/table_client/helpers.h>
 
 #include <yt/yt/client/transaction_client/helpers.h>
+#include <yt/yt/client/transaction_client/timestamp_provider.h>
 
 #include <yt/yt/core/concurrency/periodic_executor.h>
 
@@ -41,6 +42,7 @@ using namespace NAlertManager;
 using namespace NQueryClient;
 using namespace NQueueClient;
 using namespace NTabletClient;
+using namespace NTransactionClient;
 using namespace NLogging;
 using namespace NConcurrency;
 using namespace NApi;
@@ -55,6 +57,81 @@ using namespace std::placeholders;
 
 namespace {
 
+////////////////////////////////////////////////////////////////////////////////
+
+constexpr int MaxSelectConsumerNamesIterations = 10'000;
+
+//! Fetches the set of distinct consumer names from a multi consumer user table.
+THashSet<std::string> SelectConsumerNamesFromUserTable(
+    const IClientPtr& client,
+    const TYPath& path,
+    i64 batchSize,
+    const TLogger& Logger)
+{
+    YT_VERIFY(batchSize > 0);
+
+    THashSet<std::string> consumerNames;
+    std::optional<std::string> lastName;
+    auto timestamp = WaitFor(client->GetTimestampProvider()->GenerateTimestamps())
+        .ValueOrThrow();
+
+    for (int iteration = 0; iteration < MaxSelectConsumerNamesIterations; ++iteration) {
+        TSelectRowsOptions options;
+        options.Timestamp = timestamp;
+        TStringBuf where;
+        if (lastName) {
+            where = "WHERE queue_consumer_name > {last_name}";
+            options.PlaceholderValues = BuildYsonStringFluently()
+                .BeginMap()
+                    .Item("last_name").Value(*lastName)
+                .EndMap();
+        }
+
+        // NB: queue_consumer_name is the first key column, so WHERE is a PK prefix and not a full scan.
+        auto query = Format(
+            "queue_consumer_name FROM [%v] %v ORDER BY queue_consumer_name LIMIT %v",
+            path,
+            where,
+            batchSize);
+
+        auto selectResult = WaitFor(client->SelectRows(query, options))
+            .ValueOrThrow();
+        auto rows = selectResult.Rowset->GetRows();
+
+        // NB: A truncated result would look like missing names and cause spurious deletes from state.
+        if (selectResult.Statistics.IncompleteInput || selectResult.Statistics.IncompleteOutput) {
+            auto error = TError("Incomplete result while selecting consumer names from user table")
+                .With("path", path)
+                .With("batch_size", batchSize);
+            YT_LOG_ALERT_AND_THROW(error);
+        }
+
+        for (const auto& row : rows) {
+            THROW_ERROR_EXCEPTION_IF(row.GetCount() != 1, "Expected 1 value in row while selecting \"queue_consumer_name\"");
+            consumerNames.insert(FromUnversionedValue<std::string>(row[0]));
+        }
+
+        if (std::ssize(rows) < batchSize) {
+            return consumerNames;
+        }
+
+        auto newLastName = FromUnversionedValue<std::string>(rows.Back()[0]);
+        YT_VERIFY(!lastName || newLastName > *lastName);
+        lastName = std::move(newLastName);
+    }
+
+    auto error = TError("Exceeded maximum number of iterations while selecting consumer names from user table")
+        .With("path", path)
+        .With("batch_size", batchSize)
+        .With("max_iterations", MaxSelectConsumerNamesIterations)
+        .With("consumer_name_count", consumerNames.size())
+        .With("last_name", lastName);
+
+    YT_LOG_ALERT_AND_THROW(error);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TMultiConsumerController
     : public IObjectController
 {
@@ -65,13 +142,15 @@ public:
         const TQueueControllerDynamicConfigPtr& dynamicConfig,
         const TProfiler& profiler,
         TQueueAgentClientDirectoryPtr clientDirectory,
+        const IObjectStore* store,
         IInvokerPtr invoker,
         TMultiConsumerNameTablePtr multiConsumerTable)
         : Path_(row->Path)
         , MultiConsumerTable_(std::move(multiConsumerTable))
         , ClientDirectory_(std::move(clientDirectory))
+        , ObjectStore_(store)
         , Invoker_(std::move(invoker))
-        , Logger(MultiConsumerControllerLogger().WithTag("MultiConsumer: %v", Path_))
+        , Logger(MultiConsumerControllerLogger().WithTag("MultiConsumer", Path_))
         , PassExecutor_(New<TPeriodicExecutor>(
             Invoker_,
             BIND(&TMultiConsumerController::Pass, MakeWeak(this)),
@@ -101,7 +180,7 @@ public:
         PassExecutor_->Start();
         AlertManager_.Acquire()->Start();
 
-        YT_LOG_INFO("Multi consumer controller started");
+        YT_TLOG_INFO("Multi consumer controller started");
     }
 
     void Stop() override
@@ -151,10 +230,9 @@ public:
 
         PassExecutor_->SetPeriod(newConfig->PassPeriod);
 
-        YT_LOG_DEBUG(
-            "Updated multi consumer controller dynamic config (OldConfig: %v, NewConfig: %v)",
-            ConvertToYsonString(oldConfig, EYsonFormat::Text),
-            ConvertToYsonString(newConfig, EYsonFormat::Text));
+        YT_TLOG_DEBUG("Updated multi consumer controller dynamic config")
+            .With("OldConfig", ConvertToYsonString(oldConfig, EYsonFormat::Text))
+            .With("NewConfig", ConvertToYsonString(newConfig, EYsonFormat::Text));
     }
 
     TRefCountedPtr GetLatestSnapshot() const override
@@ -168,8 +246,11 @@ public:
 
         auto snapshot = Snapshot_.Acquire();
 
-        YT_LOG_DEBUG("Building multi consumer controller orchid (PassIndex: %v, TotalConsumersCount: %v)",
-            snapshot->PassIndex, snapshot->QueueConsumerNames.size());
+        YT_TLOG_DEBUG("Building multi consumer controller orchid")
+            .With("PassIndex", snapshot->PassIndex)
+            .With("QueueConsumerCount", snapshot->QueueConsumerNames.size());
+
+        auto consumerOrchids = GetConsumerOrchids(snapshot->QueueConsumerNames);
 
         BuildYsonFluently(consumer)
             .BeginMap()
@@ -177,7 +258,11 @@ public:
                 .Item("pass_instant").Value(snapshot->PassInstant)
                 .Item("row").Value(snapshot->Row)
                 .Item("replicated_table_mapping_row").Value(snapshot->ReplicatedTableMappingRow)
-                .Item("status").Do(std::bind_front(BuildMultiConsumerStatusYson, snapshot, AlertManager_.Acquire()))
+                .Item("status").Do(std::bind_front(BuildMultiConsumerStatusYson, snapshot, consumerOrchids, AlertManager_.Acquire()))
+                .Item("partitions")
+                    .BeginMap()
+                        .Item("consumers").DoMapFor(consumerOrchids, std::bind_front(BuildChildOrErrorYson, "partitions"))
+                    .EndMap()
             .EndMap();
     }
 
@@ -191,6 +276,7 @@ private:
 
     const TMultiConsumerNameTablePtr MultiConsumerTable_;
     const TQueueAgentClientDirectoryPtr ClientDirectory_;
+    const IObjectStore* const ObjectStore_;
     const IInvokerPtr Invoker_;
 
     using TMultiConsumerSnapshotAtomicPtr = TAtomicIntrusivePtr<TMultiConsumerSnapshot>;
@@ -221,7 +307,8 @@ private:
         YT_VERIFY(previousSnapshot);
         auto passIndex = previousSnapshot->PassIndex + 1;
 
-        YT_LOG_INFO("Multi consumer controller pass started (PassIndex: %v)", passIndex);
+        YT_TLOG_INFO("Multi consumer controller pass started")
+            .With("PassIndex", passIndex);
 
         auto passProfiler = PassProfiler_.Acquire();
         YT_VERIFY(passProfiler);
@@ -230,7 +317,8 @@ private:
         try {
             GuardedPass(previousSnapshot, startTime);
         } catch (const std::exception& ex) {
-            YT_LOG_ERROR(ex, "Multi consumer controller pass failed");
+            YT_TLOG_ERROR("Multi consumer controller pass failed")
+                .With(ex);
             SynchronizationAlertCollector_.Acquire()->StageAlert(CreateAlert(
                 NAlerts::EErrorCode::QueueAgentMultiConsumerControllerPassFailed,
                 "Multi consumer controller pass failed",
@@ -239,7 +327,8 @@ private:
             passProfiler->OnError();
         }
 
-        YT_LOG_INFO("Multi consumer controller pass finished (PassIndex: %v)", passIndex);
+        YT_TLOG_INFO("Multi consumer controller pass finished")
+            .With("PassIndex", passIndex);
         passProfiler->OnFinish(TInstant::Now() - startTime);
         SynchronizationAlertCollector_.Acquire()->PublishAlerts();
     }
@@ -253,20 +342,21 @@ private:
 
         if (auto error = WaitFor(AllSucceeded(std::vector{snapshotFuture.AsVoid(), consumerNamesInStateFuture.AsVoid()})); !error.IsOK()) {
             THROW_ERROR_EXCEPTION("Failed to build snapshot or fetch consumer names in state")
-                << error;
+                .With(error);
         }
         auto snapshot = snapshotFuture.GetOrCrash().Value();
         Snapshot_.Store(snapshot);
 
-        YT_LOG_DEBUG("Multi consumer snapshot updated");
+        YT_TLOG_DEBUG("Multi consumer snapshot updated");
 
         if (snapshot->Banned) {
-            YT_LOG_INFO(snapshot->Error, "Multi consumer is banned");
+            YT_TLOG_INFO("Multi consumer is banned")
+                .With(snapshot->Error);
             return;
         }
         if (!snapshot->Error.IsOK()) {
             THROW_ERROR_EXCEPTION("Multi consumer controller has snapshot error")
-                << snapshot->Error;
+                .With(snapshot->Error);
         }
 
         auto consumerNamesInState = consumerNamesInStateFuture.GetOrCrash().Value();
@@ -285,12 +375,15 @@ private:
             })
             | RangeTo<THashSet<std::string>>();
 
-        YT_LOG_DEBUG("Performing mutating operations (NamesToWriteCount: %v, NamesToDeleteCount: %v, ConsumersInStateCount: %v, ConsumersInTableCount: %v)",
-            namesToWrite.size(), namesToDelete.size(), consumersInStateSize, snapshot->QueueConsumerNames.size());
+        YT_TLOG_DEBUG("Performing mutating operations")
+            .With("NamesToWriteCount", namesToWrite.size())
+            .With("NamesToDeleteCount", namesToDelete.size())
+            .With("ConsumersInStateCount", consumersInStateSize)
+            .With("ConsumersInTableCount", snapshot->QueueConsumerNames.size());
         if (auto error = WaitFor(SyncConsumerNamesInState(namesToWrite, namesToDelete));
                 !error.IsOK()) {
             THROW_ERROR_EXCEPTION("Error while synchronizing multi_consumer_names table")
-                << error;
+                .With(error);
         }
 
         ProfileManager_.Acquire()->Profile(previousSnapshot, snapshot);
@@ -320,7 +413,7 @@ private:
             }
 
             snapshot->Error = TError("Multi consumer is banned by \"queue_agent_banned\" attribute")
-                << TErrorAttribute("banned_since", snapshot->BannedSince);
+                .With("banned_since", snapshot->BannedSince);
 
             return MakeFuture(snapshot);
         }
@@ -329,37 +422,28 @@ private:
             ValidateConsumer(*snapshot->Row, snapshot->ReplicatedTableMappingRow);
         } catch (const std::exception& ex) {
             snapshot->Error = ex;
-            YT_LOG_WARNING(snapshot->Error, "Invalid multi consumer");
+            YT_TLOG_WARNING("Invalid multi consumer")
+                .With(snapshot->Error);
             return MakeFuture(snapshot);
         }
 
-        return SelectConsumerNamesFromUserTable(snapshot)
+        auto clientContext = ClientDirectory_->GetDataReadContext(*snapshot->Row, snapshot->ReplicatedTableMappingRow, /*onlyDataReplicas*/ true);
+        return BIND(
+            &SelectConsumerNamesFromUserTable,
+            clientContext.Client,
+            clientContext.Path,
+            DynamicConfig_.Acquire()->MultiConsumerSelectBatchSize,
+            Logger)
+            .AsyncVia(Invoker_)
+            .Run()
             .Apply(BIND([snapshot] (const TErrorOr<THashSet<std::string>>& consumerNamesOrError) {
                 if (consumerNamesOrError.IsOK()) {
                     snapshot->QueueConsumerNames = consumerNamesOrError.Value();
                 } else {
                     snapshot->Error = TError("Error while selecting from user table")
-                        << consumerNamesOrError;
+                        .With(consumerNamesOrError);
                 }
                 return snapshot;
-            }));
-    }
-
-    TFuture<THashSet<std::string>> SelectConsumerNamesFromUserTable(const TMultiConsumerSnapshotPtr& snapshot) const
-    {
-        YT_ASSERT_INVOKER_AFFINITY(Invoker_);
-
-        // TODO(YT-28372): This might work incorrectly if there are a too many rows in the table. We might need to add pagination here.
-        auto clientContext = ClientDirectory_->GetDataReadContext(*snapshot->Row, snapshot->ReplicatedTableMappingRow, /*onlyDataReplicas*/ true);
-        auto query = Format("queue_consumer_name FROM [%v] GROUP BY queue_consumer_name", clientContext.Path);
-        return clientContext.Client->SelectRows(query)
-            .Apply(BIND([] (const TSelectRowsResult& selectResult) {
-                return selectResult.Rowset->GetRows()
-                    | std::views::transform([] (const auto& row) {
-                        THROW_ERROR_EXCEPTION_IF(row.GetCount() != 1, "Expected 1 value in row while selecting \"queue_consumer_name\"");
-                        return FromUnversionedValue<std::string>(row[0]);
-                    })
-                    | RangeTo<THashSet<std::string>>();
             }));
     }
 
@@ -410,6 +494,35 @@ private:
         }
         return AllSucceeded(futures);
     }
+
+    THashMap<std::string, TErrorOr<IMapNodePtr>> GetConsumerOrchids(const THashSet<std::string>& queueConsumerNames) const
+    {
+        auto consumerService = ObjectStore_->GetObjectService(EObjectKind::Consumer);
+        std::vector<TFuture<TYsonString>> consumerFutures;
+        for (const auto& name : queueConsumerNames) {
+            TNamedConsumerReference namedRef(
+                Path_.GetPath(),
+                *MakeConsumerAttributes(Path_.GetCluster().value(), name));
+
+            consumerFutures.push_back(AsyncYPathGet(
+                consumerService,
+                Format("/%v", ToYPathLiteral(ToString(namedRef)))));
+        }
+
+        auto consumerStatuses = WaitForFast(AllSet(consumerFutures))
+            .ValueOrThrow();
+
+        THashMap<std::string, TErrorOr<IMapNodePtr>> result;
+        result.reserve(queueConsumerNames.size());
+        for (const auto& [name, ysonStatusOrError] : Zip(queueConsumerNames, consumerStatuses)) {
+            if (ysonStatusOrError.IsOK()) {
+                result[name] = ConvertToNode(ysonStatusOrError.Value())->AsMap();
+            } else {
+                result[name] = TError(ysonStatusOrError);
+            }
+        }
+        return result;
+    }
 };
 
 } // namespace
@@ -421,6 +534,7 @@ bool UpdateMultiConsumerController(
     IObjectControllerPtr& controller,
     TConsumerTableRowConstPtr row,
     const std::optional<NQueueClient::TReplicatedTableMappingTableRow>& replicatedTableMappingRow,
+    const IObjectStore* store,
     const TQueueControllerDynamicConfigPtr& dynamicConfig,
     const TQueueAgentClientDirectoryPtr& clientDirectory,
     IInvokerPtr invoker,
@@ -436,6 +550,7 @@ bool UpdateMultiConsumerController(
         dynamicConfig,
         QueueAgentProfiler(),
         clientDirectory,
+        store,
         std::move(invoker),
         dynamicState->MultiConsumerNames);
     newController->Initialize();

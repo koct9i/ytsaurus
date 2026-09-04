@@ -3,6 +3,7 @@
 #include "private.h"
 
 #include "cluster_nodes.h"
+#include "cypress_object_repository.h"
 #include "object_lock.h"
 #include "query_progress.h"
 #include "secondary_query_input_puller.h"
@@ -16,6 +17,8 @@
 #include <yt/yt/client/table_client/row_buffer.h>
 
 #include <yt/yt/core/concurrency/public.h>
+
+#include <yt/yt/client/hydra/public.h>
 
 #include <yt/yt/core/ytree/public.h>
 
@@ -53,11 +56,12 @@ DEFINE_REFCOUNTED_TYPE(TStorageContext)
 ////////////////////////////////////////////////////////////////////////////////
 
 DB::ContextMutablePtr PrepareContextForQuery(
-        std::shared_ptr<DB::Session> session,
-        const std::string& dataBaseUser,
-        TDuration timeout,
-        THost* host,
-        std::string traceContextRoot);
+    std::shared_ptr<DB::Session> session,
+    const std::string& dataBaseUser,
+    TDuration timeout,
+    THost* host,
+    std::string traceContextRoot,
+    NTransactionClient::TTransactionId parentTransactionId = {});
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -89,7 +93,7 @@ public:
     std::optional<TString> YqlOperationId;
 
     // Transactionality
-    //! It is the id of some external acording to chyt query transaction that was passed to the query.
+    //! Id of an external transaction passed in as a query parameter.
     NTransactionClient::TTransactionId ParentTransactionId;
     //! ReadTransactionId is the id of the query transaction in which snapshot locks are taken.
     NTransactionClient::TTransactionId ReadTransactionId;
@@ -107,9 +111,10 @@ public:
     //! InterpreterDropQuery performs a basic check for matching the type of the object and the type of the query (table/dictionary).
     //! However, there is a chance that after checking, but before the actual call of YtDatabase::dropTable,
     //! the object was deleted, and we may unexpectedly delete an object of a different type.
-    //! For this reason, LastResolvedDictionaryName stores the name of the dictionary that was resolved last within the current query.
+    //! For this reason, LastResolvedCliqueObject stores the identity and revision of the clique object
+    //! that was resolved last within the current query.
     //! It helps consistently resolve storage in YtDatabase::dropTable call.
-    std::string LastResolvedDictionaryName;
+    std::optional<TRepositoryObjectDescriptor> LastResolvedCliqueObject;
 
     //! if |true|, query registry should keep QueryFinishInfo after the query context is destroyed.
     //! Invoker affinity: query registry invoker.

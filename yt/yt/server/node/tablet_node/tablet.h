@@ -38,8 +38,6 @@
 
 #include <yt/yt/core/actions/public.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <yt/yt/core/concurrency/async_barrier.h>
 
 #include <yt/yt/core/ytree/fluent.h>
@@ -54,6 +52,8 @@
 
 #include <library/cpp/yt/memory/atomic_intrusive_ptr.h>
 #include <library/cpp/yt/memory/ref_tracked.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 #include <library/cpp/yt/threading/atomic_object.h>
 
@@ -235,7 +235,7 @@ struct TTabletSnapshot
     NHydra::TCellId CellId;
     TWeakPtr<NHydra::ISimpleHydraManager> HydraManager;
     NTabletClient::TTabletId TabletId;
-    std::string LoggingTag;
+    NLogging::TLoggingTagList LoggingTags;
     NYPath::TYPath TablePath;
     TTableSettings Settings;
     TRawTableSettings RawSettings;
@@ -357,7 +357,7 @@ struct TTabletSnapshot
     void ValidateCellId(NElection::TCellId cellId);
     void ValidateMountRevision(NHydra::TRevision mountRevision);
     [[nodiscard]]
-    TError ValidateServantIsActive(const NHiveClient::ICellDirectoryPtr& cellDirectory);
+    TError ValidateServantIsActive(const NHiveClient::ICellDirectoryPtr& cellDirectory, bool waitForActivation = true);
     void MaybeReplyWithReshardRedirectionHint();
     void WaitOnLocks(TTimestamp timestamp) const;
 };
@@ -572,10 +572,15 @@ public:
 
     DEFINE_BYREF_RW_PROPERTY(TPromise<void>, TargetActivationPromise);
 
+    DEFINE_BYREF_RW_PROPERTY(TPromise<void>, LockBarrierPromise);
+    DEFINE_BYREF_RW_PROPERTY(TFuture<void>, LockBarrierFuture);
+
 public:
-    void ValidateWriteToTablet(TTabletId tabletId) const;
+    bool IsWriteToTabletAllowed() const;
     bool IsTabletStoresUpdateAllowed(bool isCommonFlush) const;
     bool ShouldForwardMutation() const;
+    bool IsInWaitingForLocksStage() const;
+    void InitializeLockBarrierFuture();
 
     void Persist(const TPersistenceContext& context);
 
@@ -867,6 +872,10 @@ public:
     const TSortedDynamicRowKeyComparer& GetRowKeyComparer() const;
 
     void ValidateMountRevision(NHydra::TRevision mountRevision);
+    [[nodiscard]]
+    TError ValidateServantIsWritable(
+        const NHiveClient::ICellDirectoryPtr& cellDirectory,
+        bool retryable = false);
 
     NHydra::TRevision GetActiveServantMountRevision() const;
 
@@ -904,7 +913,7 @@ public:
 
     void UpdateReplicaCounters();
 
-    const std::string& GetLoggingTag() const;
+    const NLogging::TLoggingTagList& GetLoggingTags() const;
 
     std::optional<std::string> GetPoolTagByMemoryCategory(EMemoryCategory category) const;
 
@@ -1021,7 +1030,7 @@ private:
 
     TTableSettings Settings_;
 
-    std::string LoggingTag_;
+    NLogging::TLoggingTagList LoggingTags_;
 
     IStoreManagerPtr StoreManager_;
 
@@ -1099,6 +1108,12 @@ NConcurrency::IThroughputThrottlerPtr GetBlobMediumReadThrottler(
 
 bool IsInUnmountWorkflow(ETabletState state);
 bool IsInFreezeWorkflow(ETabletState state);
+
+//! Applies when the tablet is not writable due to an unsuitable smooth movement stage.
+void WaitUntilServantIsWritable(
+    TTablet* tablet,
+    const NHiveClient::ICellDirectoryPtr& cellDirectory,
+    TDuration waitForLockBarrierTimeout);
 
 ////////////////////////////////////////////////////////////////////////////////
 

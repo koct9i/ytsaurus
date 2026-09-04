@@ -2,6 +2,7 @@
 #include "config.h"
 #include "connection.h"
 #include "encoded_row_stream.h"
+#include "helpers.h"
 #include "table_reader.h"
 #include "partition_tables.h"
 #include "skynet.h"
@@ -160,11 +161,12 @@ std::vector<TColumnarStatistics> TClient::DoGetColumnarStatistics(
         });
 
     for (const auto& path : paths) {
-        YT_LOG_INFO("Collecting table input chunks (Path: %v)", path);
+        YT_TLOG_INFO("Collecting table input chunks")
+            .With("Path", path);
 
         if (!path.GetColumns().has_value()) {
             THROW_ERROR_EXCEPTION("Received YPath without column selectors")
-                << TErrorAttribute("ypath", path);
+                .With("ypath", path);
         }
 
         auto transactionId = path.GetTransactionId();
@@ -197,9 +199,9 @@ std::vector<TColumnarStatistics> TClient::DoGetColumnarStatistics(
         }
     }
 
-    YT_LOG_INFO("Fetching columnar statistics (FetcherMode: %v, TotalChunkCount: %v)",
-        options.FetcherMode,
-        totalChunkCount);
+    YT_TLOG_INFO("Fetching columnar statistics")
+        .With("FetcherMode", options.FetcherMode)
+        .With("TotalChunkCount", totalChunkCount);
 
     WaitFor(fetcher->Fetch())
         .ThrowOnError();
@@ -229,7 +231,9 @@ TMultiTablePartitions TClient::DoPartitionTables(
         options,
         Options_.GetAuthenticatedUser(),
         // TODO(galtsev): OperationId
-        Logger().WithTag("Name: Root").WithTag("OperationId: %v", NJobTrackerClient::NullOperationId));
+        Logger()
+            .WithTag("Name", "Root")
+            .WithTag("OperationId", NJobTrackerClient::NullOperationId));
 
     return partitioner.PartitionTables();
 }
@@ -247,8 +251,8 @@ TFuture<ITablePartitionReaderPtr> TClient::CreateTablePartitionReader(
 
             if (cookieProto.user() != Options_.GetAuthenticatedUser()) {
                 THROW_ERROR_EXCEPTION("Partition must be read by the same user who created it")
-                    << TErrorAttribute("read_partition_user", Options_.GetAuthenticatedUser())
-                    << TErrorAttribute("partition_tables_user", cookieProto.user());
+                    .With("read_partition_user", Options_.GetAuthenticatedUser())
+                    .With("partition_tables_user", cookieProto.user());
             }
 
             auto dataSliceDescriptors = UnpackDataSliceDescriptors(cookieProto.table_input_specs());
@@ -267,7 +271,13 @@ TFuture<ITablePartitionReaderPtr> TClient::CreateTablePartitionReader(
             auto columnFilter = TColumnFilter{};
             auto tableReaderOptions = ToInternalTableReaderOptions(options);
             auto tableReaderConfig = options.Config ? options.Config : New<TTableReaderConfig>();
-            TClientChunkReadOptions chunkReadOptions;
+
+            auto readSessionId = TReadSessionId::Create();
+            auto chunkReadOptions = MakeChunkReadOptions(
+                readSessionId,
+                HeavyRequestMemoryUsageTracker_,
+                tableReaderConfig,
+                /*yPath*/ {});
 
             bool isParallel = false;
             if (cookieProto.has_partition_mode()) {

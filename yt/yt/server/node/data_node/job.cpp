@@ -129,8 +129,8 @@ using namespace NYTree;
 using namespace NQueryClient;
 
 using NChunkClient::TChunkReaderStatistics;
-using NYT::ToProto;
 using NYT::FromProto;
+using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -145,10 +145,9 @@ TMasterJobBase::TMasterJobBase(
     , JobId_(jobId)
     , JobSpec_(jobSpec)
     , JobTrackerAddress_(jobTrackerAddress)
-    , Logger(DataNodeLogger().WithTag(
-        "JobId: %v, JobType: %v",
-        jobId,
-        FromProto<EJobType>(jobSpec.type())))
+    , Logger(DataNodeLogger()
+        .WithTag("JobId", jobId)
+        .WithTag("JobType", FromProto<EJobType>(jobSpec.type())))
     , ResourceHolder_(TResourceHolder::CreateResourceHolder(
         jobId.Underlying(),
         bootstrap->GetJobResourceManager().Get(),
@@ -316,7 +315,7 @@ void TMasterJobBase::SetCompleted()
 {
     YT_ASSERT_THREAD_AFFINITY(JobThread);
 
-    YT_LOG_INFO("Job completed");
+    YT_TLOG_INFO("Job completed");
     DoSetFinished(EJobState::Completed, TError());
 }
 
@@ -324,7 +323,8 @@ void TMasterJobBase::SetFailed(const TError& error)
 {
     YT_ASSERT_THREAD_AFFINITY(JobThread);
 
-    YT_LOG_ERROR(error, "Job failed");
+    YT_TLOG_ERROR("Job failed")
+        .With(error);
     DoSetFinished(EJobState::Failed, error);
 }
 
@@ -332,7 +332,8 @@ void TMasterJobBase::SetAborted(const TError& error)
 {
     YT_ASSERT_THREAD_AFFINITY(JobThread);
 
-    YT_LOG_INFO(error, "Job aborted");
+    YT_TLOG_INFO("Job aborted")
+        .With(error);
     DoSetFinished(EJobState::Aborted, error);
 }
 
@@ -389,10 +390,8 @@ void TMasterJobBase::DoSetFinished(
 
     if (auto jobFuture = JobFuture_) {
         jobFuture.Subscribe(BIND([=, this, this_ = MakeStrong(this)] (const TError& error) {
-            YT_LOG_DEBUG_IF(
-                !error.IsOK(),
-                error,
-                "Master job finished with error");
+            YT_TLOG_DEBUG_IF(!error.IsOK(), "Master job finished with error")
+                .With(error);
 
             ResourceHolder_->ReleaseBaseResources();
         })
@@ -424,7 +423,7 @@ public:
         , ChunkId_(FromProto<TChunkId>(JobSpecExt_.chunk_id()))
         , DynamicConfig_(Bootstrap_->GetDynamicConfigManager()->GetConfig()->DataNode->RemoveChunkJob)
     {
-        Logger.AddTag("ChunkId: %v", ChunkId_);
+        Logger.AddTag("ChunkId", ChunkId_);
     }
 
 private:
@@ -452,11 +451,11 @@ private:
         int mediumIndex = JobSpecExt_.has_medium_index() ? JobSpecExt_.medium_index() : -1;
         auto locationUuid = JobSpecExt_.has_location_uuid() ? FromProto<TChunkLocationUuid>(JobSpecExt_.location_uuid()) : InvalidChunkLocationUuid;
 
-        YT_LOG_INFO("Chunk removal job started (MediumIndex: %v, ChunkLocationUuid: %v, ChunkIsDead: %v, DelayBeforeStartRemoveChunk: %v)",
-            mediumIndex,
-            locationUuid,
-            chunkIsDead,
-            DynamicConfig_->DelayBeforeStartRemoveChunk);
+        YT_TLOG_INFO("Chunk removal job started")
+            .With("MediumIndex", mediumIndex)
+            .With("ChunkLocationUuid", locationUuid)
+            .With("ChunkIsDead", chunkIsDead)
+            .With("DelayBeforeStartRemoveChunk", DynamicConfig_->DelayBeforeStartRemoveChunk);
 
         // TODO(ifsmirnov, akozhikhov): Consider DRT here.
 
@@ -477,11 +476,11 @@ private:
 
         if (!chunk) {
             YT_VERIFY(chunkIsDead);
-            YT_LOG_INFO("Dead chunk is missing, reporting success");
+            YT_TLOG_INFO("Dead chunk is missing, reporting success");
             if (locationUuid != InvalidChunkLocationUuid) {
-                YT_LOG_INFO("\"Removing\" nonexistent chunk (ChunkId: %v, LocationUuid: %v)",
-                    ChunkId_,
-                    locationUuid);
+                YT_TLOG_INFO("\"Removing\" nonexistent chunk")
+                    .With("ChunkId", ChunkId_)
+                    .With("LocationUuid", locationUuid);
 
                 chunkStore->RemoveNonexistentChunk(ChunkId_, locationUuid);
             }
@@ -514,7 +513,7 @@ public:
         , ChunkId_(FromProto<TChunkId>(JobSpecExt_.chunk_id()))
         , DynamicConfig_(Bootstrap_->GetDynamicConfigManager()->GetConfig()->DataNode->ReplicateChunkJob)
     {
-        Logger.AddTag("ChunkId: %v", ChunkId_);
+        Logger.AddTag("ChunkId", ChunkId_);
     }
 
 private:
@@ -547,10 +546,10 @@ private:
         int targetMediumIndex = targetReplicas[0].GetMediumIndex();
         auto sessionId = TSessionId(ChunkId_, targetMediumIndex);
 
-        YT_LOG_INFO("Chunk replication job started (SourceMediumIndex: %v, TargetReplicas: %v, IsPullReplicationJob: %v)",
-            sourceMediumIndex,
-            MakeFormattableView(targetReplicas, TChunkReplicaAddressFormatter(NodeDirectory_)),
-            isPullReplicationJob);
+        YT_TLOG_INFO("Chunk replication job started")
+            .With("SourceMediumIndex", sourceMediumIndex)
+            .With("TargetReplicas", MakeFormattableView(targetReplicas, TChunkReplicaAddressFormatter(NodeDirectory_)))
+            .With("IsPullReplicationJob", isPullReplicationJob);
 
         TWorkloadDescriptor workloadDescriptor;
         workloadDescriptor.Category = EWorkloadCategory::SystemReplication;
@@ -562,7 +561,9 @@ private:
 
         TChunkReadOptions chunkReadOptions;
         chunkReadOptions.WorkloadDescriptor = workloadDescriptor;
-        chunkReadOptions.BlockCache = DynamicConfig_->UseBlockCache ? Bootstrap_->GetBlockCache() : GetNullBlockCache();
+        chunkReadOptions.BlockCache = DynamicConfig_->UseBlockCache
+            ? Bootstrap_->GetBlockCacheForMedium(chunk->GetLocation()->GetMediumIndex())
+            : GetNullBlockCache();
         chunkReadOptions.ChunkReaderStatistics = New<TChunkReaderStatistics>();
         chunkReadOptions.MemoryUsageTracker = Bootstrap_->GetSystemJobsMemoryUsageTracker();
 
@@ -570,13 +571,13 @@ private:
 
         TRefCountedChunkMetaPtr meta;
         {
-            YT_LOG_DEBUG("Fetching chunk meta");
+            YT_TLOG_DEBUG("Fetching chunk meta");
 
             auto asyncMeta = chunk->ReadMeta(chunkReadOptions);
             meta = WaitFor(asyncMeta)
                 .ValueOrThrow();
 
-            YT_LOG_DEBUG("Chunk meta fetched");
+            YT_TLOG_DEBUG("Chunk meta fetched");
         }
 
         auto options = New<TRemoteWriterOptions>();
@@ -595,12 +596,12 @@ private:
             Bootstrap_->GetThrottler(EDataNodeThrottlerKind::ReplicationOut));
 
         {
-            YT_LOG_DEBUG("Started opening writer");
+            YT_TLOG_DEBUG("Started opening writer");
 
             WaitFor(writer->Open())
                 .ThrowOnError();
 
-            YT_LOG_DEBUG("Writer opened");
+            YT_TLOG_DEBUG("Writer opened");
         }
 
         int currentBlockIndex = 0;
@@ -663,9 +664,8 @@ private:
                 writeBlocks.push_back(block);
             }
 
-            YT_LOG_DEBUG("Enqueuing blocks for replication (Blocks: %v)",
-                FormatBlocks(currentBlockIndex,
-                    currentBlockIndex + std::ssize(writeBlocks) - 1));
+            YT_TLOG_DEBUG("Enqueuing blocks for replication")
+                .With("Blocks", FormatBlockIndexRange(currentBlockIndex, currentBlockIndex + std::ssize(writeBlocks) - 1));
 
             auto writeResult = writer->WriteBlocks(writeBlocksOptions, workloadDescriptor, writeBlocks);
             if (!writeResult) {
@@ -676,10 +676,10 @@ private:
             currentBlockIndex += writeBlocks.size();
         }
 
-        YT_LOG_DEBUG("All blocks are enqueued for replication");
+        YT_TLOG_DEBUG("All blocks are enqueued for replication");
 
         {
-            YT_LOG_DEBUG("Started closing writer");
+            YT_TLOG_DEBUG("Started closing writer");
 
             auto deferredMeta = New<TDeferredChunkMeta>();
             deferredMeta->MergeFrom(*meta);
@@ -687,7 +687,7 @@ private:
             WaitFor(writer->Close(writeBlocksOptions, workloadDescriptor, deferredMeta))
                 .ThrowOnError();
 
-            YT_LOG_DEBUG("Writer closed");
+            YT_TLOG_DEBUG("Writer closed");
         }
     }
 
@@ -774,7 +774,7 @@ public:
         , Sensors_(std::move(sensors))
         , DynamicConfig_(Bootstrap_->GetDynamicConfigManager()->GetConfig()->DataNode->RepairChunkJob)
     {
-        Logger.AddTag("ChunkId: %v", ChunkId_);
+        Logger.AddTag("ChunkId", ChunkId_);
     }
 
 private:
@@ -886,12 +886,11 @@ private:
 
         // TODO(gritukan): Implement adaptive repair for striped erasure.
         if (readerConfig->EnableAutoRepair && !stripedErasure) {
-            YT_LOG_INFO("Executing adaptive chunk repair (ReplicationReaderSpeedLimitPerSec: %v, "
-                "SlowReaderExpirationTimeout: %v, ReplicationReaderTimeout: %v, ReplicationReaderFailureTimeout: %v)",
-                readerConfig->ReplicationReaderSpeedLimitPerSec,
-                readerConfig->SlowReaderExpirationTimeout,
-                readerConfig->ReplicationReaderTimeout,
-                readerConfig->ReplicationReaderFailureTimeout);
+            YT_TLOG_INFO("Executing adaptive chunk repair")
+                .With("ReplicationReaderSpeedLimitPerSec", readerConfig->ReplicationReaderSpeedLimitPerSec)
+                .With("SlowReaderExpirationTimeout", readerConfig->SlowReaderExpirationTimeout)
+                .With("ReplicationReaderTimeout", readerConfig->ReplicationReaderTimeout)
+                .With("ReplicationReaderFailureTimeout", readerConfig->ReplicationReaderFailureTimeout);
 
             std::vector<IChunkReaderAllowingRepairPtr> readers;
             for (int partIndex = 0; partIndex < codec->GetTotalPartCount(); ++partIndex) {
@@ -987,13 +986,12 @@ private:
 
         NodeDirectory_->MergeFrom(JobSpecExt_.node_directory());
 
-        YT_LOG_INFO("Chunk repair job started (Codec: %v, "
-            "SourceReplicas: %v, TargetReplicas: %v, Decommission: %v, RowCount: %v)",
-            codecId,
-            MakeFormattableView(SourceReplicas_, TChunkReplicaAddressFormatter(NodeDirectory_)),
-            MakeFormattableView(TargetReplicas_, TChunkReplicaAddressFormatter(NodeDirectory_)),
-            decommission,
-            rowCount);
+        YT_TLOG_INFO("Chunk repair job started")
+            .With("Codec", codecId)
+            .With("SourceReplicas", MakeFormattableView(SourceReplicas_, TChunkReplicaAddressFormatter(NodeDirectory_)))
+            .With("TargetReplicas", MakeFormattableView(TargetReplicas_, TChunkReplicaAddressFormatter(NodeDirectory_)))
+            .With("Decommission", decommission)
+            .With("RowCount", rowCount);
 
         TWorkloadDescriptor workloadDescriptor;
         workloadDescriptor.Category = decommission ? EWorkloadCategory::SystemReplication : EWorkloadCategory::SystemRepair;
@@ -1096,7 +1094,7 @@ public:
         , ChunkId_(FromProto<TChunkId>(JobSpecExt_.chunk_id()))
         , DynamicConfig_(Bootstrap_->GetDynamicConfigManager()->GetConfig()->DataNode->SealChunkJob)
     {
-        Logger.AddTag("ChunkId: %v", ChunkId_);
+        Logger.AddTag("ChunkId", ChunkId_);
     }
 
 private:
@@ -1124,11 +1122,11 @@ private:
 
         NodeDirectory_->MergeFrom(JobSpecExt_.node_directory());
 
-        YT_LOG_INFO("Chunk seal job started (MediumIndex: %v, Codec: %v, SourceReplicas: %v, RowCount: %v)",
-            mediumIndex,
-            codecId,
-            MakeFormattableView(sourceReplicas, TChunkReplicaAddressFormatter(NodeDirectory_)),
-            sealRowCount);
+        YT_TLOG_INFO("Chunk seal job started")
+            .With("MediumIndex", mediumIndex)
+            .With("Codec", codecId)
+            .With("SourceReplicas", MakeFormattableView(sourceReplicas, TChunkReplicaAddressFormatter(NodeDirectory_)))
+            .With("RowCount", sealRowCount);
 
         auto chunk = GetLocalChunkOrThrow(ChunkId_, mediumIndex);
         if (!chunk->IsJournalChunk()) {
@@ -1138,7 +1136,7 @@ private:
 
         auto journalChunk = chunk->AsJournalChunk();
         if (journalChunk->IsSealed()) {
-            YT_LOG_INFO("Chunk is already sealed");
+            YT_TLOG_INFO("Chunk is already sealed");
             return;
         }
 
@@ -1156,9 +1154,8 @@ private:
 
         i64 currentRowCount = changelog->GetRecordCount();
         if (currentRowCount < sealRowCount) {
-            YT_LOG_DEBUG("Job will read missing journal chunk rows (Rows: %v-%v)",
-                currentRowCount,
-                sealRowCount - 1);
+            YT_TLOG_DEBUG("Job will read missing journal chunk rows")
+                .WithFormat("Rows", "%v-%v", currentRowCount, sealRowCount - 1);
 
             auto chunkReaderHost = New<TChunkReaderHost>(
                 Bootstrap_->GetClient(),
@@ -1187,9 +1184,8 @@ private:
             };
 
             while (currentRowCount < sealRowCount) {
-                YT_LOG_DEBUG("Reading rows (Rows: %v-%v)",
-                    currentRowCount,
-                    sealRowCount - 1);
+                YT_TLOG_DEBUG("Reading rows")
+                    .WithFormat("Rows", "%v-%v", currentRowCount, sealRowCount - 1);
 
                 auto asyncBlocks = reader->ReadBlocks(
                     readBlocksOptions,
@@ -1206,9 +1202,8 @@ private:
                         ChunkId_);
                 }
 
-                YT_LOG_DEBUG("Rows received (Rows: %v-%v)",
-                    currentRowCount,
-                    currentRowCount + blockCount - 1);
+                YT_TLOG_DEBUG("Rows received")
+                    .WithFormat("Rows", "%v-%v", currentRowCount, currentRowCount + blockCount - 1);
 
                 std::vector<TSharedRef> records;
                 records.reserve(blocks.size());
@@ -1244,13 +1239,13 @@ private:
             WaitFor(changelog->Flush())
                 .ThrowOnError();
 
-            YT_LOG_DEBUG("Finished downloading missing journal chunk rows");
+            YT_TLOG_DEBUG("Finished downloading missing journal chunk rows");
         }
 
         // TODO(akozhikhov): Truncate excess rows?
 
-        YT_LOG_DEBUG("Started sealing journal chunk (RowCount: %v)",
-            sealRowCount);
+        YT_TLOG_DEBUG("Started sealing journal chunk")
+            .With("RowCount", sealRowCount);
 
         WaitFor(journalChunk->ExecuteSeal())
             .ThrowOnError();
@@ -1263,9 +1258,9 @@ private:
             auto dataSize = changelog->GetDataSize();
 
             journalChunk->SetSealed();
-            YT_LOG_DEBUG("Finished sealing journal chunk (RowCount: %v, DataSize: %v)",
-                recordCount,
-                dataSize);
+            YT_TLOG_DEBUG("Finished sealing journal chunk")
+                .With("RowCount", recordCount)
+                .With("DataSize", dataSize);
             journalChunk->UpdateFlushedRowCount(recordCount);
             journalChunk->UpdateDataSize(dataSize);
 
@@ -1469,15 +1464,14 @@ private:
         ToProto(jobResultExt->mutable_shallow_merge_validation_error(), ShallowMergeValidationError_);
         ToProto(jobResultExt->mutable_chunk_meta_validation_error(), ChunkMetaValidationError_);
 
-        auto validateError = [this, this_ = MakeStrong(this)] (auto error, auto message) {
-            if (!error.IsOK()) {
-                YT_LOG_ALERT(error, "%v", message);
-                THROW_ERROR error;
-            }
-        };
-
-        validateError(ShallowMergeValidationError_, "Shallow merge validation failed");
-        validateError(ChunkMetaValidationError_, "Chunk meta validation failed");
+        try {
+            THROW_ERROR_EXCEPTION_IF_FAILED(ShallowMergeValidationError_, "Shallow merge validation failed");
+            THROW_ERROR_EXCEPTION_IF_FAILED(ChunkMetaValidationError_, "Chunk meta validation failed");
+        } catch (const std::exception& ex) {
+            YT_TLOG_ALERT("Validation failed")
+                .With(ex);
+            throw;
+        }
     }
 
     TFuture<void> DoRun() override
@@ -1515,7 +1509,8 @@ private:
         }
 
         MergeMode_ = FromProto<EChunkMergerMode>(chunkMergerWriterOptions.merge_mode());
-        YT_LOG_INFO("Chunk merge job started (Mode: %v)", MergeMode_);
+        YT_TLOG_INFO("Chunk merge job started")
+            .With("Mode", MergeMode_);
 
         PrepareInputChunkReadContexts();
         switch (MergeMode_) {
@@ -1532,7 +1527,8 @@ private:
                     if (ex.Error().GetCode() != NChunkClient::EErrorCode::IncompatibleChunkMetas) {
                         throw;
                     }
-                    YT_LOG_DEBUG(ex, "Unable to merge chunks using shallow mode, falling back to deep merge");
+                    YT_TLOG_DEBUG("Unable to merge chunks using shallow mode, falling back to deep merge")
+                        .With(ex);
                     DeepMergeFallbackOccurred_ = true;
                     MergeDeep();
                 }
@@ -1738,11 +1734,11 @@ private:
         for (const auto& context : InputChunkReadContexts_) {
             auto miscExt = GetProtoExtension<TMiscExt>(context.Meta->extensions());
             if (miscExt.has_min_timestamp()) {
-                auto currentMinTs = miscExt.min_timestamp();
+                auto currentMinTs = FromProto<NTransactionClient::TTimestamp>(miscExt.min_timestamp());
                 minTs = minTs == NullTimestamp ? currentMinTs : std::min(minTs, currentMinTs);
             }
             if (miscExt.has_max_timestamp()) {
-                auto currentMaxTs = miscExt.max_timestamp();
+                auto currentMaxTs = FromProto<NTransactionClient::TTimestamp>(miscExt.max_timestamp());
                 maxTs = maxTs == NullTimestamp ? currentMaxTs : std::max(maxTs, currentMaxTs);
             }
         }
@@ -1831,8 +1827,8 @@ private:
     IChunkReaderPtr CreateReader(const NChunkClient::NProto::TMergeChunkInfo& chunk)
     {
         auto inputChunkId = FromProto<TChunkId>(chunk.id());
-        YT_LOG_INFO("Reading input chunk (ChunkId: %v)",
-            inputChunkId);
+        YT_TLOG_INFO("Reading input chunk")
+            .With("ChunkId", inputChunkId);
 
         auto erasureReaderConfig = New<TErasureReaderConfig>();
         erasureReaderConfig->EnableAutoRepair = false;
@@ -1876,7 +1872,7 @@ private:
         const IMetaAggregatingWriterPtr& writer,
         const IMultiReaderMemoryManagerPtr& multiReaderMemoryManager)
     {
-        YT_LOG_INFO("Validating shallow merge result");
+        YT_TLOG_INFO("Validating shallow merge result");
 
         if (DynamicConfig_->FailShallowMergeValidation) {
             return TError("Testing error");
@@ -1933,8 +1929,8 @@ private:
 
         if (inputChunksRowCount != outputChunkRowCount) {
             return TError("Total number of rows in input chunks differs from number of rows in output chunk")
-                << TErrorAttribute("input_chunks_row_count", inputChunksRowCount)
-                << TErrorAttribute("output_chunk_row_count", outputChunkRowCount);
+                .With("input_chunks_row_count", inputChunksRowCount)
+                .With("output_chunk_row_count", outputChunkRowCount);
         }
 
         i64 rowIndex = 0;
@@ -1980,22 +1976,22 @@ private:
 
             if (inputChunksRowsRead > inputChunksRowCount) {
                 return TError("Actual number of rows in input chunks is greater than expected")
-                    << TErrorAttribute("rows_read", inputChunksRowsRead)
-                    << TErrorAttribute("expected_rows", inputChunksRowCount);
+                    .With("rows_read", inputChunksRowsRead)
+                    .With("expected_rows", inputChunksRowCount);
             } else if (inputExhausted && inputChunksRowsRead < inputChunksRowCount) {
                 return TError("Actual number of rows in input chunks is less than expected")
-                    << TErrorAttribute("rows_read", inputChunksRowsRead)
-                    << TErrorAttribute("expected_rows", inputChunksRowCount);
+                    .With("rows_read", inputChunksRowsRead)
+                    .With("expected_rows", inputChunksRowCount);
             }
 
             if (outputChunkRowsRead > outputChunkRowCount) {
                 return TError("Actual number of rows in output chunk is greater than expected")
-                    << TErrorAttribute("rows_read", outputChunkRowsRead)
-                    << TErrorAttribute("expected_rows", outputChunkRowCount);
+                    .With("rows_read", outputChunkRowsRead)
+                    .With("expected_rows", outputChunkRowCount);
             } else if (outputExhausted && outputChunkRowsRead < outputChunkRowCount) {
                 return TError("Actual number of rows in output chunk is less than expected")
-                    << TErrorAttribute("rows_read", outputChunkRowsRead)
-                    << TErrorAttribute("expected_rows", outputChunkRowCount);
+                    .With("rows_read", outputChunkRowsRead)
+                    .With("expected_rows", outputChunkRowCount);
             }
 
             if (inputExhausted && outputExhausted) {
@@ -2003,8 +1999,8 @@ private:
                 YT_VERIFY(outputChunkRowsRead == outputChunkRowCount);
                 YT_VERIFY(inputChunksRowCount == outputChunkRowCount);
 
-                YT_LOG_DEBUG("Shallow merge result validated (RowCount: %v)",
-                    inputChunksRowsRead);
+                YT_TLOG_DEBUG("Shallow merge result validated")
+                    .With("RowCount", inputChunksRowsRead);
 
                 return TError();
             }
@@ -2023,10 +2019,10 @@ private:
                     TStringBuilder rowDiffBuilder;
                     TBitwiseUnversionedRowEqual::FormatDiff(&rowDiffBuilder, inputRow, outputRow);
                     return TError("Row differs in input and output chunks")
-                        << TErrorAttribute("row_index", rowIndex)
-                        << TErrorAttribute("input_row", inputRow)
-                        << TErrorAttribute("output_row", outputRow)
-                        << TErrorAttribute("row_diff", rowDiffBuilder.Flush());
+                        .With("row_index", rowIndex)
+                        .With("input_row", inputRow)
+                        .With("output_row", outputRow)
+                        .With("row_diff", rowDiffBuilder.Flush());
                 }
 
                 ++rowIndex;
@@ -2370,10 +2366,10 @@ private:
         TChunkTimestamps chunkTimestamps;
         if (auto misc = GetChunkMiscExt(oldChunkMeta)) {
             if (misc->has_min_timestamp()) {
-                chunkTimestamps.MinTimestamp = misc->min_timestamp();
+                chunkTimestamps.MinTimestamp = FromProto<NTransactionClient::TTimestamp>(misc->min_timestamp());
             }
             if (misc->has_max_timestamp()) {
-                chunkTimestamps.MaxTimestamp = misc->max_timestamp();
+                chunkTimestamps.MaxTimestamp = FromProto<NTransactionClient::TTimestamp>(misc->max_timestamp());
             }
         }
 
@@ -2504,7 +2500,7 @@ private:
             THROW_ERROR_EXCEPTION("Testing failure");
         }
         if (DynamicConfig_->SleepInJobs) {
-            YT_LOG_WARNING("Sleeping forever");
+            YT_TLOG_WARNING("Sleeping forever");
             TDelayedExecutor::WaitForDuration(TDuration::Max());
         }
 
@@ -2544,8 +2540,8 @@ private:
 
     std::vector<TChunkReplicaDescriptor> AbortBodyChunkSessions()
     {
-        YT_LOG_DEBUG("Aborting body chunk sessions (BodyChunkId: %v)",
-            BodyChunkId_);
+        YT_TLOG_DEBUG("Aborting body chunk sessions")
+            .With("BodyChunkId", BodyChunkId_);
 
         auto bodyChunkReplicas = FromProto<TChunkReplicaWithMediumList>(JobSpecExt_.body_chunk_replicas());
 
@@ -2571,9 +2567,9 @@ private:
         auto abortedBodyChunkReplicas = WaitFor(future)
             .ValueOrThrow();
 
-        YT_LOG_DEBUG("Body chunk replicas aborted (BodyChunkId: %v, AbortedReplicas: %v)",
-            BodyChunkId_,
-            abortedBodyChunkReplicas);
+        YT_TLOG_DEBUG("Body chunk replicas aborted")
+            .With("BodyChunkId", BodyChunkId_)
+            .With("AbortedReplicas", abortedBodyChunkReplicas);
 
         return abortedBodyChunkReplicas;
     }
@@ -2582,8 +2578,8 @@ private:
         const std::vector<TChunkReplicaDescriptor>& abortedBodyChunkReplicas,
         i64* totalRowCount)
     {
-        YT_LOG_DEBUG("Computing body chunk row count (BodyChunkId: %v)",
-            BodyChunkId_);
+        YT_TLOG_DEBUG("Computing body chunk row count")
+            .With("BodyChunkId", BodyChunkId_);
 
         auto nodeChannelFactory = GetNodeChannelFactory();
 
@@ -2629,13 +2625,12 @@ private:
                 chunkSealInfo.set_uncompressed_data_size(miscExt.uncompressed_data_size());
                 replicaInfos.push_back(chunkSealInfo);
 
-                YT_LOG_DEBUG("Body chunk replica info received "
-                    "(BodyChunkId: %v, Address: %v, LogicalRowCount: %v, PhysicalRowCount: %v, LocationUuid: %v)",
-                    BodyChunkId_,
-                    address,
-                    chunkSealInfo.row_count(),
-                    miscExt.row_count(),
-                    locationUuid);
+                YT_TLOG_DEBUG("Body chunk replica info received")
+                    .With("BodyChunkId", BodyChunkId_)
+                    .With("Address", address)
+                    .With("LogicalRowCount", chunkSealInfo.row_count())
+                    .With("PhysicalRowCount", miscExt.row_count())
+                    .With("LocationUuid", locationUuid);
 
                 if (locationUuidToAddress.contains(locationUuid)) {
                     THROW_ERROR_EXCEPTION("Coinciding location uuid %v reported by nodes %v and %v",
@@ -2646,9 +2641,10 @@ private:
                     YT_VERIFY(locationUuidToAddress.emplace(locationUuid, address).second);
                 }
             } else {
-                YT_LOG_DEBUG(rspOrError, "Failed to get body chunk replica info (BodyChunkId: %v, Address: %v)",
-                    BodyChunkId_,
-                    address);
+                YT_TLOG_DEBUG("Failed to get body chunk replica info")
+                    .With("BodyChunkId", BodyChunkId_)
+                    .With("Address", address)
+                    .With(rspOrError);
             }
         }
 
@@ -2674,23 +2670,21 @@ private:
             : ReadQuorum_ - 1;
         *totalRowCount = replicaInfos[readQuorumInfoIndex].row_count();
 
-        YT_LOG_DEBUG("Body chunk seal info computed "
-            "(BodyChunkId: %v, ReadQuorum: %v, BodyChunkLogicalRowCount: %v, BodyChunkPhysicalRowCount: %v, TotalRowCount: %v)",
-            BodyChunkId_,
-            ReadQuorum_,
-            bodyChunkSealInfo.row_count(),
-            GetPhysicalChunkRowCount(bodyChunkLogicalRowCount, Overlayed_),
-            *totalRowCount);
+        YT_TLOG_DEBUG("Body chunk seal info computed")
+            .With("BodyChunkId", BodyChunkId_)
+            .With("ReadQuorum", ReadQuorum_)
+            .With("BodyChunkLogicalRowCount", bodyChunkSealInfo.row_count())
+            .With("BodyChunkPhysicalRowCount", GetPhysicalChunkRowCount(bodyChunkLogicalRowCount, Overlayed_))
+            .With("TotalRowCount", *totalRowCount);
 
         return bodyChunkSealInfo;
     }
 
     std::vector<TSharedRef> ReadBodyChunkRows(i64 firstRowIndex, i64 lastRowIndex)
     {
-        YT_LOG_DEBUG("Reading body chunk rows (BodyChunkId: %v, Rows: %v-%v)",
-            BodyChunkId_,
-            firstRowIndex,
-            lastRowIndex - 1);
+        YT_TLOG_DEBUG("Reading body chunk rows")
+            .With("BodyChunkId", BodyChunkId_)
+            .WithFormat("Rows", "%v-%v", firstRowIndex, lastRowIndex - 1);
 
         if (firstRowIndex >= lastRowIndex) {
             return {};
@@ -2726,9 +2720,8 @@ private:
         std::vector<TSharedRef> rows;
         rows.reserve(lastRowIndex - firstRowIndex);
         while (firstRowIndex < lastRowIndex) {
-            YT_LOG_DEBUG("Reading rows (Rows: %v-%v)",
-                firstRowIndex,
-                lastRowIndex - 1);
+            YT_TLOG_DEBUG("Reading rows")
+                .WithFormat("Rows", "%v-%v", firstRowIndex, lastRowIndex - 1);
 
             auto asyncBlocks = reader->ReadBlocks(
                 readBlocksOptions,
@@ -2745,9 +2738,8 @@ private:
                     BodyChunkId_);
             }
 
-            YT_LOG_DEBUG("Rows received (Rows: %v-%v)",
-                firstRowIndex,
-                firstRowIndex + blockCount - 1);
+            YT_TLOG_DEBUG("Rows received")
+                .WithFormat("Rows", "%v-%v", firstRowIndex, firstRowIndex + blockCount - 1);
 
             for (const auto& block : blocks) {
                 const auto& row = block.Data;
@@ -2757,7 +2749,7 @@ private:
             firstRowIndex += blockCount;
         }
 
-        YT_LOG_DEBUG("Body chunk reading completed");
+        YT_TLOG_DEBUG("Body chunk reading completed");
 
         return rows;
     }
@@ -2768,8 +2760,8 @@ private:
         NJournalClient::NProto::TOverlayedJournalChunkHeader header;
         header.set_first_row_index(tailFirstRowIndex);
 
-        YT_LOG_DEBUG("Created tail chunk header row (TailFirstRowIndex: %v)",
-            tailFirstRowIndex);
+        YT_TLOG_DEBUG("Created tail chunk header row")
+            .With("TailFirstRowIndex", tailFirstRowIndex);
 
         return SerializeProtoToRef(header);
     }
@@ -2788,9 +2780,9 @@ private:
     {
         auto writeSessionId = TSessionId(TailChunkId_, MediumIndex_);
 
-        YT_LOG_DEBUG("Creating tail chunk writers (TailChunkId: %v, SessionId: %v)",
-            TailChunkId_,
-            writeSessionId);
+        YT_TLOG_DEBUG("Creating tail chunk writers")
+            .With("TailChunkId", TailChunkId_)
+            .With("SessionId", writeSessionId);
 
         if (IsErasure()) {
             auto* erasureCodec = NErasure::GetCodec(ErasureCodecId_);
@@ -2871,9 +2863,9 @@ private:
         const std::vector<std::vector<TSharedRef>>& parts,
         const std::vector<TChunkWriterWithIndex>& writers)
     {
-        YT_LOG_DEBUG("Started tail chunk write (TailChunkId: %v, RowCount: %v)",
-            TailChunkId_,
-            parts[0].size());
+        YT_TLOG_DEBUG("Started tail chunk write")
+            .With("TailChunkId", TailChunkId_)
+            .With("RowCount", parts[0].size());
 
         YT_VERIFY(parts.size() == writers.size());
 
@@ -2891,18 +2883,17 @@ private:
 
             auto future = BIND([&, index, jobLogger = Logger] {
                 auto Logger = jobLogger
-                    .WithTag("TailChunkId: %v, WriterIndex: %v",
-                        TailChunkId_,
-                        index);
+                    .WithTag("TailChunkId", TailChunkId_)
+                    .WithTag("WriterIndex", index);
 
                 auto& chunkWriter = writer.ChunkWriter;
 
-                YT_LOG_DEBUG("Opening writer");
+                YT_TLOG_DEBUG("Opening writer");
 
                 WaitFor(chunkWriter->Open())
                     .ThrowOnError();
 
-                YT_LOG_DEBUG("Writing rows");
+                YT_TLOG_DEBUG("Writing rows");
 
                 std::vector<TBlock> blocks;
                 blocks.reserve(part.size());
@@ -2911,12 +2902,12 @@ private:
                 }
                 chunkWriter->WriteBlocks(writeBlocksOptions, workloadDescriptor, blocks);
 
-                YT_LOG_DEBUG("Closing writer");
+                YT_TLOG_DEBUG("Closing writer");
 
                 WaitFor(chunkWriter->Close(writeBlocksOptions, workloadDescriptor))
                     .ThrowOnError();
 
-                YT_LOG_DEBUG("Writer closed");
+                YT_TLOG_DEBUG("Writer closed");
             })
                 .AsyncVia(GetCurrentInvoker())
                 .Run();
@@ -2936,11 +2927,16 @@ private:
             if (replicaOrError.IsOK()) {
                 succeededWriters.push_back(writers[index]);
             } else {
-                auto error = TError("Tail replica writer failed")
-                    << TErrorAttribute("tail_chunk_id", TailChunkId_)
-                    << TErrorAttribute("writer_index", index)
-                    << replicaOrError;
-                YT_LOG_WARNING(error);
+                static constexpr auto Message = "Tail replica writer failed"_sb;
+
+                YT_TLOG_WARNING(Message)
+                    .With("TailChunkId", TailChunkId_)
+                    .With("WriterIndex", index)
+                    .With(replicaOrError);
+                auto error = TError(Message)
+                    .With("tail_chunk_id", TailChunkId_)
+                    .With("writer_index", index)
+                    .With(replicaOrError);
                 writerErrors.push_back(std::move(error));
             }
         }
@@ -2949,7 +2945,7 @@ private:
             THROW_ERROR_EXCEPTION("Too few tail chunk writers finished successfully: %v completed, %v needed",
                 succeededWriters.size(),
                 WriteQuorum_)
-                << writerErrors;
+                .With(writerErrors);
         }
 
         return succeededWriters;
@@ -2957,8 +2953,8 @@ private:
 
     void ConfirmTailChunk(const std::vector<TChunkWriterWithIndex>& succeededWriters)
     {
-        YT_LOG_DEBUG("Confirming tail chunk (ChunkId: %v)",
-            TailChunkId_);
+        YT_TLOG_DEBUG("Confirming tail chunk")
+            .With("ChunkId", TailChunkId_);
 
         TChunkReplicaWithLocationList writtenReplicas;
         for (const auto& writer : succeededWriters) {
@@ -3014,8 +3010,8 @@ private:
             "Error confirming tail chunk %v",
             TailChunkId_);
 
-        YT_LOG_DEBUG("Tail chunk confirmed (ChunkId: %v)",
-            TailChunkId_);
+        YT_TLOG_DEBUG("Tail chunk confirmed")
+            .With("ChunkId", TailChunkId_);
     }
 
     void SetJobResult(

@@ -4,6 +4,7 @@
 
 #include <yt/yt/core/test_framework/framework.h>
 
+#include <library/cpp/yt/memory/blob.h>
 #include <library/cpp/yt/memory/chunked_memory_pool.h>
 
 namespace NYT::NPushBasedShuffleClient {
@@ -15,7 +16,7 @@ using namespace NTableClient;
 
 TEST(ShuffleRecordFormat, EmptyFlushReturnsNullopt)
 {
-    TShuffleRecordBuilder builder(/*mapperId*/ 42, /*startRowId*/ 100);
+    TShuffleRecordBuilder builder(/*writerId*/ 42, /*startRowId*/ 100);
     EXPECT_FALSE(builder.FlushRecord().has_value());
     // Idempotent: still empty after one failed flush.
     EXPECT_FALSE(builder.FlushRecord().has_value());
@@ -25,7 +26,7 @@ TEST(ShuffleRecordFormat, EmptyFlushReturnsNullopt)
 
 TEST(ShuffleRecordFormat, MultiFlushAdvancesNextRowId)
 {
-    TShuffleRecordBuilder builder(/*mapperId*/ 7, /*startRowId*/ 1000);
+    TShuffleRecordBuilder builder(/*writerId*/ 7, /*startRowId*/ 1000);
 
     // First batch: 3 rows.
     TUnversionedRowBuilder rowBuilder;
@@ -36,7 +37,7 @@ TEST(ShuffleRecordFormat, MultiFlushAdvancesNextRowId)
     }
     auto a = builder.FlushRecord();
     ASSERT_TRUE(a.has_value());
-    EXPECT_EQ(a->Header.MapperId, 7);
+    EXPECT_EQ(a->Header.WriterId, 7);
     EXPECT_EQ(a->Header.StartRow, 1000);
     EXPECT_EQ(a->Header.RowCount, 3);
 
@@ -48,7 +49,7 @@ TEST(ShuffleRecordFormat, MultiFlushAdvancesNextRowId)
     }
     auto b = builder.FlushRecord();
     ASSERT_TRUE(b.has_value());
-    EXPECT_EQ(b->Header.MapperId, 7);
+    EXPECT_EQ(b->Header.WriterId, 7);
     EXPECT_EQ(b->Header.StartRow, 1003);   // 1000 + 3
     EXPECT_EQ(b->Header.RowCount, 5);
 }
@@ -57,12 +58,12 @@ TEST(ShuffleRecordFormat, MultiFlushAdvancesNextRowId)
 
 TEST(ShuffleRecordFormat, RoundTripMixedTypesLz4)
 {
-    constexpr i32 MapperId = 999;
+    constexpr i32 WriterId = 999;
     constexpr i64 StartRowId = 50;
     constexpr auto Codec = NCompression::ECodec::Lz4;
 
     // Build two rows with varied types.
-    TShuffleRecordBuilder builder(MapperId, StartRowId);
+    TShuffleRecordBuilder builder(WriterId, StartRowId);
 
     TUnversionedRowBuilder rb;
     rb.AddValue(MakeUnversionedInt64Value(-7, /*id*/ 0));
@@ -84,12 +85,12 @@ TEST(ShuffleRecordFormat, RoundTripMixedTypesLz4)
 
     // Cheap header peek should match without decompression.
     auto peeked = ReadShuffleRecordHeader(wire);
-    EXPECT_EQ(peeked.MapperId, MapperId);
+    EXPECT_EQ(peeked.WriterId, WriterId);
     EXPECT_EQ(peeked.StartRow, StartRowId);
     EXPECT_EQ(peeked.RowCount, 2);
 
     auto decompressed = DecompressShuffleRecord(wire, Codec);
-    EXPECT_EQ(decompressed.Header.MapperId, MapperId);
+    EXPECT_EQ(decompressed.Header.WriterId, WriterId);
     EXPECT_EQ(decompressed.Header.StartRow, StartRowId);
     EXPECT_EQ(decompressed.Header.RowCount, 2);
 
@@ -130,11 +131,86 @@ TEST(ShuffleRecordFormat, RoundTripMixedTypesLz4)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+TEST(ShuffleRecordFormat, ParseAppendsIdentityValues)
+{
+    TShuffleRecordBuilder builder(/*writerId*/ 7, /*startRowId*/ 100);
+
+    TUnversionedRowBuilder rowBuilder;
+    rowBuilder.AddValue(MakeUnversionedInt64Value(1, /*id*/ 0));
+    rowBuilder.AddValue(MakeUnversionedInt64Value(10, /*id*/ 1));
+    builder.AddRow(rowBuilder.GetRow());
+
+    rowBuilder.Reset();
+    rowBuilder.AddValue(MakeUnversionedInt64Value(2, /*id*/ 0));
+    rowBuilder.AddValue(MakeUnversionedInt64Value(20, /*id*/ 1));
+    builder.AddRow(rowBuilder.GetRow());
+
+    auto record = builder.FlushRecord();
+    ASSERT_TRUE(record);
+
+    TChunkedMemoryPool pool;
+    auto parsed = ParseShuffleRecord(
+        std::move(*record),
+        &pool,
+        TIdentityColumnIds{
+            .WriterId = 10,
+            .RowId = 11,
+        });
+
+    ASSERT_EQ(std::ssize(parsed.Rows), 2);
+    for (int index = 0; index < 2; ++index) {
+        auto row = parsed.Rows[index];
+        ASSERT_EQ(row.GetCount(), 4u);
+        EXPECT_EQ(row[0].Data.Int64, index + 1);
+        EXPECT_EQ(row[1].Data.Int64, (index + 1) * 10);
+        EXPECT_EQ(row[2].Id, 10u);
+        EXPECT_EQ(row[2].Type, EValueType::Int64);
+        EXPECT_EQ(row[2].Data.Int64, 7);
+        EXPECT_EQ(row[3].Id, 11u);
+        EXPECT_EQ(row[3].Type, EValueType::Int64);
+        EXPECT_EQ(row[3].Data.Int64, 100 + index);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TEST(ShuffleRecordFormat, SingleRefOverloads)
+{
+    constexpr auto Codec = NCompression::ECodec::Lz4;
+
+    TShuffleRecordBuilder builder(/*writerId*/ 7, /*startRowId*/ 100);
+    TUnversionedRowBuilder rowBuilder;
+    rowBuilder.AddValue(MakeUnversionedInt64Value(42, /*id*/ 0));
+    builder.AddRow(rowBuilder.GetRow());
+
+    auto record = builder.FlushRecord();
+    ASSERT_TRUE(record);
+    auto wire = MergeRefsToRef<TDefaultBlobTag>(CompressShuffleRecord(*record, Codec));
+
+    auto header = ReadShuffleRecordHeader(wire);
+    EXPECT_EQ(header.WriterId, 7);
+    EXPECT_EQ(header.StartRow, 100);
+    EXPECT_EQ(header.RowCount, 1);
+
+    auto decompressed = DecompressShuffleRecord(wire, Codec);
+    EXPECT_EQ(decompressed.Header.WriterId, 7);
+    EXPECT_EQ(decompressed.Header.StartRow, 100);
+    EXPECT_EQ(decompressed.Header.RowCount, 1);
+
+    TChunkedMemoryPool pool;
+    auto parsed = ParseShuffleRecord(std::move(decompressed), &pool);
+    ASSERT_EQ(std::ssize(parsed.Rows), 1);
+    ASSERT_EQ(parsed.Rows[0].GetCount(), 1u);
+    EXPECT_EQ(parsed.Rows[0][0].Data.Int64, 42);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 TEST(ShuffleRecordFormat, CompositeNormalizesToAny)
 {
     constexpr auto Codec = NCompression::ECodec::None;
 
-    TShuffleRecordBuilder builder(/*mapperId*/ 1, /*startRowId*/ 0);
+    TShuffleRecordBuilder builder(/*writerId*/ 1, /*startRowId*/ 0);
 
     TUnversionedRowBuilder rb;
     rb.AddValue(MakeUnversionedCompositeValue("[1;2;3]", /*id*/ 0));
@@ -162,7 +238,7 @@ TEST(ShuffleRecordFormat, CompositeNormalizesToAny)
 TEST(ShuffleRecordFormat, ReadHeaderRejectsShortRecord)
 {
     std::vector<TSharedRef> tooShort = {
-        TSharedRef::FromString("fifteen bytes!!"),  // 15 bytes < sizeof(TRecordHeader) == 16
+        TSharedRef::FromString(std::string("fifteen bytes!!")),  // 15 bytes < sizeof(TRecordHeader) == 16
     };
     EXPECT_THROW_WITH_SUBSTRING(
         ReadShuffleRecordHeader(tooShort),
@@ -174,7 +250,7 @@ TEST(ShuffleRecordFormat, ReadHeaderRejectsShortRecord)
 TEST(ShuffleRecordFormat, ReadHeaderHandlesSplitHeader)
 {
     // Header bytes split across two refs to exercise the multi-ref walk.
-    TRecordHeader header{.RowCount = 7, .MapperId = 42, .StartRow = 1000};
+    TRecordHeader header{.RowCount = 7, .WriterId = 42, .StartRow = 1000};
     auto bytes = TSharedRef::FromString(std::string(
         reinterpret_cast<const char*>(&header), sizeof(TRecordHeader)));
     std::vector<TSharedRef> wire = {
@@ -183,7 +259,7 @@ TEST(ShuffleRecordFormat, ReadHeaderHandlesSplitHeader)
     };
     auto peeked = ReadShuffleRecordHeader(wire);
     EXPECT_EQ(peeked.RowCount, 7);
-    EXPECT_EQ(peeked.MapperId, 42);
+    EXPECT_EQ(peeked.WriterId, 42);
     EXPECT_EQ(peeked.StartRow, 1000);
 }
 
@@ -196,7 +272,7 @@ TEST(ShuffleRecordFormat, ParseHandlesMultiRefPayload)
     // branch.
     constexpr auto Codec = NCompression::ECodec::None;
 
-    TShuffleRecordBuilder builder(/*mapperId*/ 1, /*startRowId*/ 0);
+    TShuffleRecordBuilder builder(/*writerId*/ 1, /*startRowId*/ 0);
     TUnversionedRowBuilder rb;
     rb.AddValue(MakeUnversionedInt64Value(11, /*id*/ 0));
     builder.AddRow(rb.GetRow());
@@ -232,10 +308,10 @@ TEST(ShuffleRecordFormat, ParseRejectsNegativeRowCount)
     TShuffleRecord record{
         .Header = TRecordHeader{
             .RowCount = -1,
-            .MapperId = 0,
+            .WriterId = 0,
             .StartRow = 0,
         },
-        .UncompressedPayload = {TSharedRef::FromString("")},
+        .UncompressedPayload = {TSharedRef::FromString(std::string(""))},
     };
 
     TChunkedMemoryPool pool;

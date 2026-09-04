@@ -19,7 +19,7 @@ DEFINE_ENUM_UNKNOWN_VALUE(EFilesystemType, Unknown);
 ////////////////////////////////////////////////////////////////////////////////
 
 struct TBlockDeviceConfigBase
-    : public NYTree::TYsonStruct
+    : public virtual NYTree::TYsonStruct
 {
     REGISTER_YSON_STRUCT(TBlockDeviceConfigBase);
 
@@ -27,72 +27,6 @@ struct TBlockDeviceConfigBase
 };
 
 DEFINE_REFCOUNTED_TYPE(TBlockDeviceConfigBase)
-
-////////////////////////////////////////////////////////////////////////////////
-
-struct TChunkBlockDeviceConfig
-    : public TBlockDeviceConfigBase
-{
-    i64 Size;
-    int MediumIndex;
-    EFilesystemType FsType;
-    TDuration KeepSessionAlivePeriod;
-    TDuration DataNodeNbdServiceRpcTimeout;
-    //! Time to create chunk and make filesystem in it.
-    TDuration DataNodeNbdServiceMakeTimeout;
-    //! Number of TCP connections to use for NBD RPC requests.
-    int MultiplexingParallelism;
-
-    REGISTER_YSON_STRUCT(TChunkBlockDeviceConfig);
-
-    static void Register(TRegistrar registrar);
-};
-
-DEFINE_REFCOUNTED_TYPE(TChunkBlockDeviceConfig)
-
-////////////////////////////////////////////////////////////////////////////////
-
-struct TFileSystemBlockDeviceConfig
-    : public TBlockDeviceConfigBase
-{
-    REGISTER_YSON_STRUCT(TFileSystemBlockDeviceConfig);
-
-    static void Register(TRegistrar registrar);
-};
-
-DEFINE_REFCOUNTED_TYPE(TFileSystemBlockDeviceConfig)
-
-////////////////////////////////////////////////////////////////////////////////
-
-struct TMemoryBlockDeviceConfig
-    : public TBlockDeviceConfigBase
-{
-    i64 Size;
-
-    REGISTER_YSON_STRUCT(TMemoryBlockDeviceConfig);
-
-    static void Register(TRegistrar registrar);
-};
-
-DEFINE_REFCOUNTED_TYPE(TMemoryBlockDeviceConfig)
-
-////////////////////////////////////////////////////////////////////////////////
-
-struct TDynamicTableBlockDeviceConfig
-    : public TBlockDeviceConfigBase
-{
-    i64 Size;
-    i64 BlockSize;
-    i64 ReadBatchSize;
-    i64 WriteBatchSize;
-    NYPath::TYPath TablePath;
-
-    REGISTER_YSON_STRUCT(TDynamicTableBlockDeviceConfig);
-
-    static void Register(TRegistrar registrar);
-};
-
-DEFINE_REFCOUNTED_TYPE(TDynamicTableBlockDeviceConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -155,6 +89,13 @@ struct TNbdServerConfig
     int ThreadCount;
     // For testing purposes.
     TNbdTestOptionsPtr TestOptions;
+
+    //! When set, an HTTP server is exposed on this port: a REST API for managing devices, plus a
+    //! status endpoint dumping the server orchid.
+    std::optional<int> HttpPort;
+
+    //! The listen address: the unix domain socket path or ":<port>".
+    std::string GetAddress() const;
 
     REGISTER_YSON_STRUCT(TNbdServerConfig);
 

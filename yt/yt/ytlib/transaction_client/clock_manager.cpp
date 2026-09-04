@@ -70,7 +70,7 @@ public:
         if (clockClusterTag != NativeCellTag_ && clockClusterTag != InvalidCellTag)
         {
             THROW_ERROR_EXCEPTION("%v: clock source is configured to non-native clock", message)
-                << TErrorAttribute("clock_cluster_tag", clockClusterTag);
+                .With("clock_cluster_tag", clockClusterTag);
         }
     }
 
@@ -84,7 +84,8 @@ public:
         auto clockClusterTag = newConfig->ClockClusterTag;
         ClockClusterTag_ = clockClusterTag;
 
-        YT_LOG_DEBUG("Clock manager reconfigured (ClockClusterTag: %v)", clockClusterTag);
+        YT_TLOG_DEBUG("Clock manager reconfigured")
+            .With("ClockClusterTag", clockClusterTag);
     }
 
 private:

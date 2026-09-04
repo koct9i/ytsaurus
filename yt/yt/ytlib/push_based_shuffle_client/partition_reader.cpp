@@ -4,7 +4,7 @@
 #include "public.h"
 #include "record_format.h"
 
-#include <yt/yt/ytlib/distributed_chunk_session_client/distributed_chunk_session_reader.h>
+#include <yt/yt/ytlib/distributed_chunk_session_client/session_reader.h>
 
 #include <yt/yt/client/chunk_client/chunk_replica.h>
 
@@ -14,7 +14,10 @@
 
 #include <library/cpp/yt/memory/shared_range.h>
 
+#include <util/generic/hash_set.h>
+
 #include <algorithm>
+#include <deque>
 
 namespace NYT::NPushBasedShuffleClient {
 
@@ -53,12 +56,9 @@ struct TBatchPayloadsHolder
 struct TChunkReadState
 {
     IDistributedChunkSessionReaderPtr ChunkSessionReader;
-
-    //! Latest unconsumed chunk session read result. We issue the next Read()
-    //! only after the previous one's callback completes, so there's never
-    //! more than one in flight (no "in flight" companion needed); finished
-    //! chunks are evicted from ChunkStates_ (no Finished flag needed).
+    TFuture<TChunkReadResult> ReadFuture;
     std::optional<TChunkReadResult> ReadyResult;
+    int NextRecordIndex = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -71,29 +71,35 @@ public:
         TPartitionReaderConfigPtr config,
         TCreateChunkSessionReaderCallback createDistributedChunkSessionReader,
         TRecordHeaderFilter recordHeaderFilter,
+        std::optional<TIdentityColumnIds> identityColumnIds,
         IInvokerPtr invoker)
         : Config_(std::move(config))
         , CreateDistributedChunkSessionReader_(std::move(createDistributedChunkSessionReader))
         , RecordHeaderFilter_(std::move(recordHeaderFilter))
+        , IdentityColumnIds_(std::move(identityColumnIds))
         , SerializedInvoker_(CreateSerializedInvoker(std::move(invoker)))
         , Logger(PushBasedShuffleLogger())
     {
         YT_VERIFY(Config_);
         YT_VERIFY(CreateDistributedChunkSessionReader_);
+        YT_VERIFY(!IdentityColumnIds_ || IdentityColumnIds_->AreValid());
 
-        YT_LOG_INFO(
-            "Push-based shuffle reader created (Codec: %v, MaxBytesPerRead: %v, "
-            "RowBufferStartChunkSize: %v, HasHeaderFilter: %v)",
-            Config_->Codec,
-            Config_->MaxBytesPerRead,
-            Config_->RowBufferStartChunkSize,
-            static_cast<bool>(RecordHeaderFilter_));
+        YT_TLOG_INFO("Push-based shuffle reader created")
+            .With("Codec", Config_->Codec)
+            .With("MaxBytesPerRead", Config_->MaxBytesPerRead)
+            .With("RowBufferStartChunkSize", Config_->RowBufferStartChunkSize)
+            .With("HasHeaderFilter", static_cast<bool>(RecordHeaderFilter_))
+            .With("HasIdentityColumns", static_cast<bool>(IdentityColumnIds_));
     }
 
     TFuture<TShuffleReadBatchPtr> Read() override
     {
         auto promise = NewPromise<TShuffleReadBatchPtr>();
-        auto future = promise.ToFuture().ToUncancelable();
+        auto future = promise.ToFuture();
+        promise.OnCanceled(BIND_NO_PROPAGATE(
+            &TPushBasedPartitionReader::OnReadCanceled,
+            MakeWeak(this))
+            .Via(SerializedInvoker_));
         SerializedInvoker_->Invoke(BIND_NO_PROPAGATE(
             &TPushBasedPartitionReader::DoRead,
             MakeWeak(this),
@@ -123,14 +129,24 @@ public:
             MakeWeak(this)));
     }
 
+    void FinishAtCurrentCommittedRecordCount() override
+    {
+        SerializedInvoker_->Invoke(BIND_NO_PROPAGATE(
+            &TPushBasedPartitionReader::DoFinishAtCurrentCommittedRecordCount,
+            MakeWeak(this)));
+    }
+
 private:
     const TPartitionReaderConfigPtr Config_;
     const TCreateChunkSessionReaderCallback CreateDistributedChunkSessionReader_;
-    const TRecordHeaderFilter RecordHeaderFilter_;
+    TRecordHeaderFilter RecordHeaderFilter_;
+    const std::optional<TIdentityColumnIds> IdentityColumnIds_;
     const IInvokerPtr SerializedInvoker_;
     const TLogger Logger;
 
     THashMap<TChunkId, TChunkReadState> ChunkStates_;
+    std::deque<TChunkId> ReadyChunkIds_;
+    THashSet<std::pair<i32, i64>> SeenRecords_;
     bool NoMoreChunks_ = false;
     bool FinishedLogged_ = false;
     TError TerminalError_;
@@ -164,15 +180,14 @@ private:
 
         TChunkReadState state;
         state.ChunkSessionReader = sessionReader;
-        SubscribeToChunkSessionRead(chunkId, sessionReader->Read());
+        StartChunkSessionRead(chunkId, &state);
 
         ChunkStates_[chunkId] = std::move(state);
 
-        YT_LOG_DEBUG(
-            "Chunk added (ChunkId: %v, StartRecordIndex: %v, RangeEndRecordIndex: %v)",
-            chunkId,
-            startRecordIndex,
-            rangeEndRecordIndex);
+        YT_TLOG_DEBUG("Chunk added")
+            .With("ChunkId", chunkId)
+            .With("StartRecordIndex", startRecordIndex)
+            .With("RangeEndRecordIndex", rangeEndRecordIndex);
     }
 
     void DoSetNoMoreChunks() noexcept
@@ -186,12 +201,25 @@ private:
             return;
         }
         NoMoreChunks_ = true;
+        MaybeResolveRead();
+
+        YT_TLOG_DEBUG("No more chunks will be added to shuffle reader");
+    }
+
+    void DoFinishAtCurrentCommittedRecordCount() noexcept
+    {
+        YT_ASSERT_INVOKER_AFFINITY(SerializedInvoker_);
+
+        if (!TerminalError_.IsOK()) {
+            return;
+        }
+        YT_VERIFY(NoMoreChunks_);
+
         for (auto& [_, state] : ChunkStates_) {
             state.ChunkSessionReader->SetAllWritersFinished();
         }
-        MaybeResolveRead();
 
-        YT_LOG_DEBUG("Shuffle reader sealed");
+        YT_TLOG_DEBUG("Finishing shuffle reader at current committed record count");
     }
 
     void DoRead(TPromise<TShuffleReadBatchPtr> promise) noexcept
@@ -202,9 +230,17 @@ private:
         MaybeResolveRead();
     }
 
-    void SubscribeToChunkSessionRead(TChunkId chunkId, TFuture<TChunkReadResult> readFuture) noexcept
+    void OnReadCanceled(const TError& error) noexcept
     {
-        readFuture.Subscribe(BIND_NO_PROPAGATE(
+        YT_ASSERT_INVOKER_AFFINITY(SerializedInvoker_);
+
+        FailReader(TError(NYT::EErrorCode::Canceled, "Partition reader canceled").With(error));
+    }
+
+    void StartChunkSessionRead(TChunkId chunkId, TChunkReadState* state) noexcept
+    {
+        state->ReadFuture = state->ChunkSessionReader->Read();
+        state->ReadFuture.Subscribe(BIND_NO_PROPAGATE(
             &TPushBasedPartitionReader::OnChunkSessionReadComplete,
             MakeWeak(this),
             chunkId)
@@ -215,26 +251,30 @@ private:
     {
         YT_ASSERT_INVOKER_AFFINITY(SerializedInvoker_);
 
+        if (!TerminalError_.IsOK()) {
+            if (!resultOrError.IsOK() &&
+                !resultOrError.FindMatching(NYT::EErrorCode::Canceled))
+            {
+                YT_TLOG_DEBUG("Shuffle reader received subsequent failure")
+                    .With(resultOrError);
+            }
+            return;
+        }
+
         auto stateIt = ChunkStates_.find(chunkId);
         YT_VERIFY(stateIt != ChunkStates_.end());
         auto& state = stateIt->second;
+        state.ReadFuture.Reset();
 
         if (!resultOrError.IsOK()) {
             FailReader(resultOrError);
             return;
         }
 
-        // Drop late successes once the reader has failed: no consumer will
-        // ever drain this result (MaybeResolveRead resolves the pending
-        // promise with TerminalError_ and skips the drain loop), so storing
-        // it would keep the blob buffers pinned until reader teardown for
-        // no purpose. Letting `resultOrError` die at function exit releases
-        // them immediately.
-        if (!TerminalError_.IsOK()) {
-            return;
-        }
-
+        YT_VERIFY(!state.ReadyResult);
+        YT_VERIFY(state.NextRecordIndex == 0);
         state.ReadyResult = std::move(resultOrError.Value());
+        ReadyChunkIds_.push_back(chunkId);
         MaybeResolveRead();
     }
 
@@ -251,33 +291,16 @@ private:
             return;
         }
 
-        // Nothing queued: skip the batch/holder/RowBuffer alloc. Also
-        // covers the terminal empty Finished=true resolution once every
-        // chunk has been drained and NoMoreChunks_ is set.
-        bool anyReady = std::any_of(
-            ChunkStates_.begin(),
-            ChunkStates_.end(),
-            [] (const auto& kv) { return kv.second.ReadyResult.has_value(); });
-        if (!anyReady) {
+        if (ReadyChunkIds_.empty()) {
             if (NoMoreChunks_ && ChunkStates_.empty()) {
                 auto emptyBatch = New<TShuffleReadBatch>();
                 emptyBatch->Finished = true;
+                ReleaseRecordFilterState();
                 auto promise = std::move(PendingReadPromise_);
                 promise.Set(std::move(emptyBatch));
                 MaybeLogFinished();
             }
             return;
-        }
-
-        // Reserve from the sum of ready-chunk records: one walk avoids
-        // log2(N) reallocs in the drain. Sum can be zero — a chunk session
-        // may report {Records=[], Finished=true}, and the drain loop still
-        // needs to run to evict the finished entry.
-        i64 expectedRecordCount = 0;
-        for (auto& [_, state] : ChunkStates_) {
-            if (state.ReadyResult) {
-                expectedRecordCount += std::ssize(state.ReadyResult->Records);
-            }
         }
 
         auto batch = New<TShuffleReadBatch>();
@@ -286,66 +309,81 @@ private:
             TDefaultRowBufferPoolTag(),
             Config_->RowBufferStartChunkSize);
 
-        holder->Payloads.reserve(expectedRecordCount);
-        batch->Records.reserve(expectedRecordCount);
-
-        // Finished chunks are collected here and erased AFTER the drain loop:
-        // erasing mid-iteration would invalidate the iterator we're holding.
-        std::vector<TChunkId> finishedChunks;
-        i64 drainedBytes = 0;
-        for (auto& [chunkId, state] : ChunkStates_) {
-            if (!state.ReadyResult) {
-                continue;
+        const auto& firstState = GetOrCrash(ChunkStates_, ReadyChunkIds_.front());
+        YT_VERIFY(firstState.ReadyResult);
+        const auto& firstRecords = firstState.ReadyResult->Records;
+        int remainingRecordCount = std::ssize(firstRecords) - firstState.NextRecordIndex;
+        if (remainingRecordCount > 0) {
+            constexpr int RecordSizeSampleCount = 32;
+            int sampleCount = std::min(remainingRecordCount, RecordSizeSampleCount);
+            i64 sampleBytes = 0;
+            for (int index = 0; index < sampleCount; ++index) {
+                sampleBytes += std::ssize(firstRecords[firstState.NextRecordIndex + index]);
             }
-            auto& records = state.ReadyResult->Records;
-            i64 consumed = 0;
-            for (; consumed < std::ssize(records); ++consumed) {
+            i64 averageRecordSize = std::max<i64>(1, sampleBytes / sampleCount);
+            i64 expectedRecordCount = std::min<i64>(
+                remainingRecordCount,
+                Config_->MaxBytesPerRead / averageRecordSize + 1);
+            holder->Payloads.reserve(expectedRecordCount);
+            batch->Records.reserve(expectedRecordCount);
+        }
+
+        i64 drainedBytes = 0;
+        while (!ReadyChunkIds_.empty()) {
+            auto chunkId = ReadyChunkIds_.front();
+            auto stateIt = ChunkStates_.find(chunkId);
+            YT_VERIFY(stateIt != ChunkStates_.end());
+            auto& state = stateIt->second;
+            YT_VERIFY(state.ReadyResult);
+
+            auto& result = *state.ReadyResult;
+            while (state.NextRecordIndex < std::ssize(result.Records)) {
                 if (drainedBytes >= Config_->MaxBytesPerRead) {
                     break;
                 }
-                auto& blob = records[consumed];
+                auto& blob = result.Records[state.NextRecordIndex++];
                 drainedBytes += std::ssize(blob);
                 try {
-                    if (RecordHeaderFilter_) {
-                        auto header = ReadShuffleRecordHeader(TRange(&blob, 1));
-                        if (!RecordHeaderFilter_(header)) {
-                            continue;
-                        }
+                    auto header = ReadShuffleRecordHeader(blob);
+                    if (!SeenRecords_.emplace(header.WriterId, header.StartRow).second ||
+                        (RecordHeaderFilter_ && !RecordHeaderFilter_(header)))
+                    {
+                        continue;
                     }
-                    auto record = DecompressShuffleRecord(TRange(&blob, 1), Config_->Codec);
-                    auto parsed = ParseShuffleRecord(std::move(record), holder->RowBuffer->GetPool());
+                    auto record = DecompressShuffleRecord(blob, Config_->Codec);
+                    auto parsed = ParseShuffleRecord(
+                        std::move(record),
+                        holder->RowBuffer->GetPool(),
+                        IdentityColumnIds_,
+                        Config_->ValidateIdentityColumnIds);
                     holder->Payloads.push_back(std::move(parsed.UncompressedPayload));
                     batch->Records.push_back({
                         parsed.Header,
                         TSharedRange<TUnversionedRow>(parsed.Rows, holder),
                     });
                 } catch (const std::exception& ex) {
-                    state.ReadyResult.reset();
                     FailReader(TError(ex));
                     return;
                 }
             }
-            if (consumed < std::ssize(records)) {
-                // Cap hit mid-chunk; slice off consumed records and leave the
-                // tail (along with any Finished=true marker) in ReadyResult
-                // for the next Read to pick up.
-                records.erase(records.begin(), records.begin() + consumed);
+            if (state.NextRecordIndex < std::ssize(result.Records)) {
                 break;
             }
-            bool wasFinished = state.ReadyResult->Finished;
+
+            bool wasFinished = result.Finished;
             state.ReadyResult.reset();
+            state.NextRecordIndex = 0;
+            ReadyChunkIds_.pop_front();
             if (wasFinished) {
-                finishedChunks.push_back(chunkId);
+                ChunkStates_.erase(stateIt);
             } else {
-                SubscribeToChunkSessionRead(chunkId, state.ChunkSessionReader->Read());
+                StartChunkSessionRead(chunkId, &state);
             }
-        }
-        for (auto chunkId : finishedChunks) {
-            ChunkStates_.erase(chunkId);
         }
 
         batch->Finished = NoMoreChunks_ && ChunkStates_.empty();
         if (batch->Finished) {
+            ReleaseRecordFilterState();
             MaybeLogFinished();
         }
         auto promise = std::move(PendingReadPromise_);
@@ -358,17 +396,24 @@ private:
 
         if (TerminalError_.IsOK()) {
             TerminalError_ = error;
-            YT_LOG_WARNING(TerminalError_, "Shuffle reader failed");
+            YT_TLOG_WARNING("Shuffle reader failed")
+                .With(TerminalError_);
 
-            // Wind down outstanding chunk session reads so they don't poll forever.
+            ReadyChunkIds_.clear();
+            ReleaseRecordFilterState();
             for (auto& [_, state] : ChunkStates_) {
                 state.ChunkSessionReader->SetAllWritersFinished();
+                if (state.ReadFuture) {
+                    state.ReadFuture.Cancel(TerminalError_);
+                }
             }
+            ChunkStates_.clear();
         } else {
             // First failure wins; later errors are observability noise — log them
             // at DEBUG so the diagnostic info isn't silently dropped, but don't
             // overwrite TerminalError_ (downstream code is keyed on the first).
-            YT_LOG_DEBUG(error, "Shuffle reader received subsequent failure");
+            YT_TLOG_DEBUG("Shuffle reader received subsequent failure")
+                .With(error);
         }
         if (PendingReadPromise_) {
             auto promise = std::move(PendingReadPromise_);
@@ -376,12 +421,18 @@ private:
         }
     }
 
+    void ReleaseRecordFilterState() noexcept
+    {
+        RecordHeaderFilter_ = {};
+        SeenRecords_ = THashSet<std::pair<i32, i64>>();
+    }
+
     void MaybeLogFinished() noexcept
     {
         if (FinishedLogged_) {
             return;
         }
-        YT_LOG_INFO("Shuffle reader finished");
+        YT_TLOG_INFO("Shuffle reader finished");
         FinishedLogged_ = true;
     }
 };
@@ -394,12 +445,14 @@ IPushBasedPartitionReaderPtr CreatePushBasedPartitionReaderForTesting(
     TPartitionReaderConfigPtr config,
     TCreateChunkSessionReaderCallback createDistributedChunkSessionReader,
     IInvokerPtr invoker,
-    TRecordHeaderFilter recordHeaderFilter)
+    TRecordHeaderFilter recordHeaderFilter,
+    std::optional<TIdentityColumnIds> identityColumnIds)
 {
     return New<TPushBasedPartitionReader>(
         std::move(config),
         std::move(createDistributedChunkSessionReader),
         std::move(recordHeaderFilter),
+        std::move(identityColumnIds),
         std::move(invoker));
 }
 
@@ -411,7 +464,8 @@ IPushBasedPartitionReaderPtr CreatePushBasedPartitionReader(
     TChunkReaderHostPtr chunkReaderHost,
     int readQuorum,
     IInvokerPtr invoker,
-    TRecordHeaderFilter recordHeaderFilter)
+    TRecordHeaderFilter recordHeaderFilter,
+    std::optional<TIdentityColumnIds> identityColumnIds)
 {
     auto createSessionReader = [
         config,
@@ -441,6 +495,7 @@ IPushBasedPartitionReaderPtr CreatePushBasedPartitionReader(
         std::move(config),
         std::move(createSessionReader),
         std::move(recordHeaderFilter),
+        std::move(identityColumnIds),
         std::move(invoker));
 }
 

@@ -276,9 +276,9 @@ void TCriJobEnvironmentConfig::Register(TRegistrar registrar)
         .Default();
 
     registrar.Parameter("pod_descriptor", &TThis::PodDescriptor)
-        .DefaultNew();
+        .Default();
     registrar.Parameter("pod_spec", &TThis::PodSpec)
-        .DefaultNew();
+        .Default();
     registrar.Parameter("gpu_config", &TThis::GpuConfig)
         .Default();
 }
@@ -342,6 +342,12 @@ void TJobProxyInternalConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("input_pipe_blinker_period", &TThis::InputPipeBlinkerPeriod)
         .Default(TDuration::Seconds(1));
+
+    registrar.Parameter("enable_job_io_statistics", &TThis::EnableJobIoStatistics)
+        .Default(false);
+
+    registrar.Parameter("job_io_meter_max_history_duration", &TThis::JobIoMeterMaxHistoryDuration)
+        .Default(TDuration::Hours(1));
 
     registrar.Parameter("job_environment", &TThis::JobEnvironment);
 
@@ -476,7 +482,8 @@ void TJobProxyInternalConfig::Register(TRegistrar registrar)
     registrar.Parameter("pipe_reader_timeout_threshold", &TThis::PipeReaderTimeoutThreshold)
         .Default(TDuration::Seconds(30));
 
-    registrar.Parameter("enable_root_volume_disk_quota", &TThis::EnableRootVolumeDiskQuota)
+    registrar.Parameter("disable_rbind_root_volume", &TThis::DisableRbindRootVolume)
+        .Alias("enable_root_volume_disk_quota")
         .Default(false);
 
     registrar.Parameter("restrict_porto_place", &TThis::RestrictPortoPlace)
@@ -490,6 +497,9 @@ void TJobProxyInternalConfig::Register(TRegistrar registrar)
         .Default()
         .GreaterThanOrEqual(-1000)
         .LessThanOrEqual(1000);
+
+    registrar.Parameter("read_oom_score_adj_before_update", &TThis::ReadOomScoreAdjBeforeUpdate)
+        .Default(false);
 
     registrar.Parameter("use_new_delivery_fenced_connection", &TThis::UseNewDeliveryFencedConnection)
         .Default(true);
@@ -538,6 +548,9 @@ void TJobProxyDynamicConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("jaeger", &TThis::Jaeger)
         .DefaultNew();
+
+    registrar.Parameter("enable_job_io_statistics", &TThis::EnableJobIoStatistics)
+        .Default(false);
 
     registrar.Parameter("enable_job_shell_seccomp", &TThis::EnableJobShellSeccopm)
         .Default(true);
@@ -588,6 +601,9 @@ void TJobProxyDynamicConfig::Register(TRegistrar registrar)
         .Default()
         .GreaterThanOrEqual(-1000)
         .LessThanOrEqual(1000);
+
+    registrar.Parameter("read_oom_score_adj_before_update", &TThis::ReadOomScoreAdjBeforeUpdate)
+        .Default(false);
 
     registrar.Parameter("use_new_delivery_fenced_connection", &TThis::UseNewDeliveryFencedConnection)
         .Default(true);

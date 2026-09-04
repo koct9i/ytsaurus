@@ -161,22 +161,29 @@ public:
     {
         VerifyPersistentStateRead();
 
+        const auto& chunkManagerConfig = GetDynamicConfig();
+
+        if (!chunkManagerConfig->EnableChunkRefresh) {
+            YT_TLOG_DEBUG("Skipping Sequoia location refresh as chunk refresh is disabled")
+                .With("LocationId", location->GetId())
+                .With("NodeAddress", location->GetNode()->GetDefaultAddress());
+            return;
+        }
+
         auto guard = Guard(Lock_);
 
-        const auto node = location->GetNode();
+        const auto* node = location->GetNode().Get();
         if (!IsObjectAlive(node)) {
-            YT_LOG_ALERT(
-                "Location scheduled for Sequoia refresh belongs to non alive node (LocationId: %v, LocationIndex: %v)",
-                location->GetId(),
-                location->GetIndex());
+            YT_TLOG_ALERT("Location scheduled for Sequoia refresh belongs to non alive node")
+                .With("LocationId", location->GetId())
+                .With("LocationIndex", location->GetIndex());
             return;
         }
 
         if (!Status_.LocationRefreshEnabled) {
-            YT_LOG_WARNING(
-                "Sequoia refresh will not occur for location as Sequoia location refresh is disabled (LocationId: %v, NodeAddress: %v)",
-                location->GetId(),
-                node->GetDefaultAddress());
+            YT_TLOG_WARNING("Sequoia refresh will not occur for location as Sequoia location refresh is disabled")
+                .With("LocationId", location->GetId())
+                .With("NodeAddress", node->GetDefaultAddress());
 
             // We intentionally do not return here. The locations will be waiting until location refresh is enabled.
         }
@@ -186,25 +193,21 @@ public:
             .LocationIndex = location->GetIndex(),
             .FailedAttempts = 0,
         });
-        YT_LOG_DEBUG("Scheduling Sequoia location refresh (NodeId: %v, NodeAddress: %v, LocationIndex: %v)",
-            node->GetId(),
-            node->GetDefaultAddress(),
-            location->GetIndex());
+        YT_TLOG_DEBUG("Scheduling Sequoia location refresh")
+            .With("NodeId", node->GetId())
+            .With("NodeAddress", node->GetDefaultAddress())
+            .With("LocationIndex", location->GetIndex());
 
         const auto& sequoiaReplicasConfig = GetDynamicConfig()->SequoiaChunkReplicas;
         if (std::ssize(LocationsAwaitingRefresh_) > sequoiaReplicasConfig->MaxLocationsAwaitingRefresh) {
             if (!Status_.GlobalRefreshEnabled) {
-                YT_LOG_ALERT(
-                    "Too many locations awaiting Sequoia location refresh, can not trigger global Sequoia chunk refresh "
-                    "LocationsAwaitingRefresh: %v, MaxLocationsAwaitingRefresh: %v",
-                    LocationsAwaitingRefresh_.size(),
-                    sequoiaReplicasConfig->MaxLocationsAwaitingRefresh);
+                YT_TLOG_ALERT("Too many locations awaiting Sequoia location refresh, cannot trigger global Sequoia chunk refresh")
+                    .With("LocationsAwaitingRefresh", LocationsAwaitingRefresh_.size())
+                    .With("MaxLocationsAwaitingRefresh", sequoiaReplicasConfig->MaxLocationsAwaitingRefresh);
             } else {
-                YT_LOG_WARNING(
-                    "Too many locations awaiting Sequoia location refresh, will trigger global Sequoia chunk refresh "
-                    "LocationsAwaitingRefresh: %v, MaxLocationsAwaitingRefresh: %v",
-                    LocationsAwaitingRefresh_.size(),
-                    sequoiaReplicasConfig->MaxLocationsAwaitingRefresh);
+                YT_TLOG_WARNING("Too many locations awaiting Sequoia location refresh, will trigger global Sequoia chunk refresh")
+                    .With("LocationsAwaitingRefresh", LocationsAwaitingRefresh_.size())
+                    .With("MaxLocationsAwaitingRefresh", sequoiaReplicasConfig->MaxLocationsAwaitingRefresh);
                 StartNewGlobalRefreshEpoch(guard);
             }
         }
@@ -310,10 +313,10 @@ private:
 
                 Status_.Shards[shardIndex].ResetGlobalRefreshChunksProcessed();
 
-                YT_LOG_DEBUG("Sequoia chunk refresher shard updated (ShardIndex: %v, Active: %v, Epoch: %v)",
-                    shardIndex,
-                    Status_.Shards[shardIndex].Active,
-                    Status_.Shards[shardIndex].Epoch);
+                YT_TLOG_DEBUG("Sequoia chunk refresher shard updated")
+                    .With("ShardIndex", shardIndex)
+                    .With("Active", Status_.Shards[shardIndex].Active)
+                    .With("Epoch", Status_.Shards[shardIndex].Epoch);
             }
         }
     }
@@ -328,7 +331,7 @@ private:
         MaxUnsuccessfulSequoiaChunkRefreshIterations_ = sequoiaReplicasConfig->MaxUnsuccessfulSequoiaChunkRefreshIterations;
 
         if (!Status_.SequoiaChunkRefreshEnabled) {
-            YT_LOG_DEBUG("Starting Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Starting Sequoia chunk refresh");
             Status_.SequoiaChunkRefreshEnabled = true;
             ++Status_.SequoiaChunkRefreshEpoch;
             UnsuccessfulSequoiaChunkRefreshIterations_ = 0;
@@ -348,7 +351,7 @@ private:
     void StopSequoiaChunkRefresh(const TGuard<NThreading::TSpinLock>&)
     {
         if (Status_.SequoiaChunkRefreshEnabled) {
-            YT_LOG_DEBUG("Stopping Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Stopping Sequoia chunk refresh");
             Status_.SequoiaChunkRefreshEnabled = false;
         }
 
@@ -368,7 +371,7 @@ private:
         MaxUnsuccessfulGlobalRefreshIterations_ = sequoiaReplicasConfig->MaxUnsuccessfulGlobalSequoiaChunkRefreshIterations;
 
         if (!Status_.GlobalRefreshEnabled) {
-            YT_LOG_DEBUG("Enabling global Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Enabling global Sequoia chunk refresh");
             StartNewGlobalRefreshEpoch(guard);
         }
 
@@ -405,7 +408,7 @@ private:
     void StopGlobalRefresh(const TGuard<NThreading::TSpinLock>&)
     {
         if (Status_.GlobalRefreshEnabled) {
-            YT_LOG_DEBUG("Stopping global Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Stopping global Sequoia chunk refresh");
             Status_.GlobalRefreshEnabled = false;
 
             for (auto& shard : Status_.Shards) {
@@ -430,7 +433,7 @@ private:
         MaxUnsuccessfulLocationRefreshAttempts_ = sequoiaReplicasConfig->MaxUnsuccessfulLocationRefreshAttempts;
 
         if (!Status_.LocationRefreshEnabled) {
-            YT_LOG_DEBUG("Starting Sequoia location refresh");
+            YT_TLOG_DEBUG("Starting Sequoia location refresh");
             Status_.LocationRefreshEnabled = true;
         }
 
@@ -448,7 +451,7 @@ private:
     void StopLocationRefresh(const TGuard<NThreading::TSpinLock>&)
     {
         if (Status_.LocationRefreshEnabled) {
-            YT_LOG_DEBUG("Stopping Sequoia location refresh");
+            YT_TLOG_DEBUG("Stopping Sequoia location refresh");
             Status_.LocationRefreshEnabled = false;
         }
 
@@ -465,23 +468,19 @@ private:
     {
         for (int shardIndex = 0; shardIndex < ChunkShardCount; ++shardIndex) {
             if (shards[shardIndex].Active != Status_.Shards[shardIndex].Active) {
-                YT_LOG_DEBUG(
-                    "Aborting iteration, shard active mismatch "
-                    "(ExecutorName: %Qv, ShardIndex: %v, RefreshIterationShardActive: %v, ActualShardActive: %v)",
-                    executorName,
-                    shardIndex,
-                    shards[shardIndex].Active,
-                    Status_.Shards[shardIndex].Active);
+                YT_TLOG_DEBUG("Aborting iteration, shard active mismatch")
+                    .With("ExecutorName", executorName)
+                    .With("ShardIndex", shardIndex)
+                    .With("RefreshIterationShardActive", shards[shardIndex].Active)
+                    .With("ActualShardActive", Status_.Shards[shardIndex].Active);
                 return true;
             }
             if (shards[shardIndex].Epoch != Status_.Shards[shardIndex].Epoch) {
-                YT_LOG_DEBUG(
-                    "Aborting iteration, shard epoch mismatch "
-                    "(ExecutorName: %Qv,ShardIndex: %v, RefreshIterationEpoch: %v, ActualShardEpoch: %v)",
-                    executorName,
-                    shardIndex,
-                    shards[shardIndex].Epoch,
-                    Status_.Shards[shardIndex].Epoch);
+                YT_TLOG_DEBUG("Aborting iteration, shard epoch mismatch")
+                    .With("ExecutorName", executorName)
+                    .With("ShardIndex", shardIndex)
+                    .With("RefreshIterationEpoch", shards[shardIndex].Epoch)
+                    .With("ActualShardEpoch", Status_.Shards[shardIndex].Epoch);
                 return true;
             }
         }
@@ -511,7 +510,7 @@ private:
             limit = SequoiaChunkCountToFetchFromRefreshQueue_;
         }
 
-        YT_LOG_DEBUG("Sequoia chunk refresh iteration started");
+        YT_TLOG_DEBUG("Sequoia chunk refresh iteration started");
 
         std::vector<TFuture<std::vector<NRecords::TChunkRefreshQueue>>> getChunksFutures;
         std::vector<int> indices;
@@ -531,16 +530,14 @@ private:
             const auto& shards)
         {
             if (!Status_.SequoiaChunkRefreshEnabled) {
-                YT_LOG_DEBUG("Aborting Sequoia chunk refresh iteration, Sequoia chunk refresh is disabled");
+                YT_TLOG_DEBUG("Aborting Sequoia chunk refresh iteration, Sequoia chunk refresh is disabled");
                 return true;
             }
 
             if (Status_.SequoiaChunkRefreshEpoch != epoch) {
-                YT_LOG_DEBUG(
-                    "Aborting Sequoia chunk refresh iteration, epoch mismatch "
-                    "(RefreshIterationEpoch: %v, ActualEpoch: %v)",
-                    epoch,
-                    Status_.SequoiaChunkRefreshEpoch);
+                YT_TLOG_DEBUG("Aborting Sequoia chunk refresh iteration, epoch mismatch")
+                    .With("RefreshIterationEpoch", epoch)
+                    .With("ActualEpoch", Status_.SequoiaChunkRefreshEpoch);
                 return true;
             }
 
@@ -551,14 +548,14 @@ private:
 
         try {
             if (!allSetResult.IsOK()) {
-                THROW_ERROR_EXCEPTION("Error getting chunks to refresh") << std::move(allSetResult);
+                THROW_ERROR_EXCEPTION("Error getting chunks to refresh").With(std::move(allSetResult));
             }
 
             const auto& hydraManager = Bootstrap_->GetHydraFacade()->GetHydraManager();
             // We should have state not older than the state at which chunks were added to refresh queue.
             auto leaderSyncResult = WaitFor(hydraManager->SyncWithLeader());
             if (!leaderSyncResult.IsOK()) {
-                THROW_ERROR_EXCEPTION("Error syncing with leader") << std::move(leaderSyncResult);
+                THROW_ERROR_EXCEPTION("Error syncing with leader").With(std::move(leaderSyncResult));
             }
 
             const auto& results = allSetResult.Value();
@@ -569,13 +566,13 @@ private:
                     THROW_ERROR_EXCEPTION(
                         "Error getting chunks to refresh from shard %v",
                         shardIndex)
-                        << std::move(result);
+                        .With(std::move(result));
                 }
 
                 const auto& refreshRecords = result.Value();
-                YT_LOG_DEBUG("Fetched chunks for Sequoia chunk refresh (ShardIndex: %v, ChunkCount: %v)",
-                    shardIndex,
-                    refreshRecords.size());
+                YT_TLOG_DEBUG("Fetched chunks for Sequoia chunk refresh")
+                    .With("ShardIndex", shardIndex)
+                    .With("ChunkCount", refreshRecords.size());
                 for (const auto& refreshRecord : refreshRecords) {
                     chunkIdsToRefresh.push_back(refreshRecord.ChunkId);
                 }
@@ -586,8 +583,8 @@ private:
             }
             SortUnique(chunkIdsToRefresh);
 
-            YT_LOG_DEBUG("Start refreshing chunks during Sequoia chunk refresh (ChunkCount: %v)",
-                chunkIdsToRefresh.size());
+            YT_TLOG_DEBUG("Start refreshing chunks during Sequoia chunk refresh")
+                .With("ChunkCount", chunkIdsToRefresh.size());
 
             auto refreshChunks = BIND([
                 chunkIdsToRefresh = std::move(chunkIdsToRefresh),
@@ -597,10 +594,6 @@ private:
                 this,
                 this_ = MakeStrong(this)]
             {
-                if (!Bootstrap_->GetHydraFacade()->GetHydraManager()->IsActive()) {
-                    THROW_ERROR_EXCEPTION("Hydra is not active");
-                }
-
                 {
                     auto guard = Guard(Lock_);
                     if (shouldAbortRefreshIteration(guard, epoch, shards)) {
@@ -609,6 +602,11 @@ private:
                 }
 
                 NProto::TReqTopUpSequoiaChunkPurgatory topUpSequoiaChunkPurgatoryRequest;
+                // TODO(grphil): move seal scheduling to chunk replicator
+                NProto::TReqScheduleMultipleChunkSeals scheduleMultipleChunkSealsRequest;
+
+                const auto& sequoiaReplicasConfig = GetDynamicConfig()->SequoiaChunkReplicas;
+                auto scheduleSeal = sequoiaReplicasConfig->ScheduleChunkSealInSequoiaChunkRefresh;
 
                 const auto& chunkManager = Bootstrap_->GetChunkManager();
 
@@ -616,6 +614,9 @@ private:
                     auto* chunk = chunkManager->FindChunk(chunkId);
                     if (IsObjectAlive(chunk)) {
                         chunkManager->ScheduleChunkRefresh(chunk);
+                        if (scheduleSeal && IsSealNeeded(chunk)) {
+                            ToProto(scheduleMultipleChunkSealsRequest.add_chunk_ids(), chunkId);
+                        }
                     } else {
                         ToProto(topUpSequoiaChunkPurgatoryRequest.add_chunk_ids(), chunkId);
                     }
@@ -623,6 +624,13 @@ private:
 
                 if (topUpSequoiaChunkPurgatoryRequest.chunk_ids_size() > 0) {
                     auto mutation = chunkManager->CreateTopUpSequoiaChunkPurgatoryMutation(topUpSequoiaChunkPurgatoryRequest);
+                    mutation->SetAllowLeaderForwarding(true);
+                    WaitFor(mutation->CommitAndLog(Logger()))
+                        .ThrowOnError();
+                }
+
+                if (scheduleMultipleChunkSealsRequest.chunk_ids_size() > 0) {
+                    auto mutation = chunkManager->CreateScheduleMultipleChunkSealsMutation(scheduleMultipleChunkSealsRequest);
                     mutation->SetAllowLeaderForwarding(true);
                     WaitFor(mutation->CommitAndLog(Logger()))
                         .ThrowOnError();
@@ -636,7 +644,7 @@ private:
             // Now all chunks are added to refresh queue.
             // Chunk shards were active at the time chunks were added to refresh queue.
             // Chunks were fetched before refresh, so it is safe to trim refresh tabled, even if incumbents are changed.
-            YT_LOG_DEBUG("Trimming refresh queues during Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Trimming refresh queues during Sequoia chunk refresh");
 
             TSequoiaTablePathDescriptor descriptor{
                 .Table = ESequoiaTable::ChunkRefreshQueue,
@@ -645,9 +653,9 @@ private:
             std::vector<TFuture<void>> trimFutures;
             trimFutures.reserve(indexToTrimmedRowCount.size());
             for (auto [index, trimmedRowCount] : indexToTrimmedRowCount) {
-                YT_LOG_DEBUG("Trimming table during Sequoia chunk refresh (ShardIndex: %v, TrimmedRowCount: %v)",
-                    index,
-                    trimmedRowCount);
+                YT_TLOG_DEBUG("Trimming table during Sequoia chunk refresh")
+                    .With("ShardIndex", index)
+                    .With("TrimmedRowCount", trimmedRowCount);
                 // Index is both replicator shard index and tablet index.
                 trimFutures.push_back(Bootstrap_
                     ->GetSequoiaConnection()
@@ -656,11 +664,11 @@ private:
             }
             auto trimResult = WaitFor(AllSucceeded(trimFutures));
             if (!trimResult.IsOK()) {
-                THROW_ERROR_EXCEPTION("Error trimming Sequoia refresh queue") << std::move(trimResult);
+                THROW_ERROR_EXCEPTION("Error trimming Sequoia refresh queue").With(std::move(trimResult));
             }
 
             UnsuccessfulSequoiaChunkRefreshIterations_ = 0;
-            YT_LOG_DEBUG("Finished Sequoia chunk refresh iteration");
+            YT_TLOG_DEBUG("Finished Sequoia chunk refresh iteration");
         } catch (const std::exception& ex) {
             auto guard = Guard(Lock_);
             if (shouldAbortRefreshIteration(guard, epoch, shards)) {
@@ -671,12 +679,9 @@ private:
             auto logLevel = UnsuccessfulSequoiaChunkRefreshIterations_ > MaxUnsuccessfulSequoiaChunkRefreshIterations_ ?
                 NLogging::ELogLevel::Alert :
                 NLogging::ELogLevel::Debug;
-            YT_LOG_EVENT(
-                Logger,
-                logLevel,
-                ex,
-                "Sequoia chunk refresh iteration failed (PreviousUnsuccessfulIterations: %v)",
-                UnsuccessfulSequoiaChunkRefreshIterations_);
+            YT_TLOG_EVENT(Logger, logLevel, "Sequoia chunk refresh iteration failed")
+                .With("PreviousUnsuccessfulIterations", UnsuccessfulSequoiaChunkRefreshIterations_)
+                .With(ex);
         }
     }
 
@@ -704,7 +709,7 @@ private:
             batchSize = GlobalRefreshChunksBatchSize_;
         }
 
-        YT_LOG_DEBUG("Starting global Sequoia chunk refresh iteration");
+        YT_TLOG_DEBUG("Starting global Sequoia chunk refresh iteration");
 
         std::vector<int> shardIndexes;
         std::vector<TFuture<std::vector<NRecords::TChunkReplicas>>> chunksFutures;
@@ -716,12 +721,12 @@ private:
         }
 
         if (shardIndexes.empty()) {
-            YT_LOG_DEBUG("All shards are refreshed, skipping global Sequoia chunk refresh iteration");
+            YT_TLOG_DEBUG("All shards are refreshed, skipping global Sequoia chunk refresh iteration");
             return;
         }
 
         if (batchSize == 0) {
-            YT_LOG_DEBUG("Global sequoia chunk refresh has zero chunk batch size, skipping global Sequoia chunk refresh iteration");
+            YT_TLOG_DEBUG("Global Sequoia chunk refresh has zero chunk batch size, skipping global Sequoia chunk refresh iteration");
             return;
         }
 
@@ -736,16 +741,14 @@ private:
 
         auto shouldAbortRefreshIteration = [&] (const TGuard<NThreading::TSpinLock>& guard) {
             if (!Status_.GlobalRefreshEnabled) {
-                YT_LOG_DEBUG("Aborting global Sequoia chunk refresh iteration, global Sequoia chunk refresh is disabled");
+                YT_TLOG_DEBUG("Aborting global Sequoia chunk refresh iteration, global Sequoia chunk refresh is disabled");
                 return true;
             }
 
             if (epoch != Status_.GlobalRefreshEpoch) {
-                YT_LOG_DEBUG(
-                    "Aborting global Sequoia chunk refresh iteration, epoch mismatch "
-                    "(RefreshIterationEpoch: %v, ActualEpoch: %v)",
-                    epoch,
-                    Status_.GlobalRefreshEpoch);
+                YT_TLOG_DEBUG("Aborting global Sequoia chunk refresh iteration, epoch mismatch")
+                    .With("RefreshIterationEpoch", epoch)
+                    .With("ActualEpoch", Status_.GlobalRefreshEpoch);
                 return true;
             }
 
@@ -757,7 +760,7 @@ private:
         try {
             if (!allSetResult.IsOK()) {
                 THROW_ERROR_EXCEPTION("Error getting chunks")
-                    << std::move(allSetResult);
+                    .With(std::move(allSetResult));
             }
 
             THashMap<int, std::vector<NRecords::TChunkReplicas>> chunks;
@@ -768,7 +771,7 @@ private:
                 if (!chunksOrError.IsOK()) {
                     // TODO(grphil): Maybe continue refresh for shards that are fetched.
                     THROW_ERROR_EXCEPTION("Error getting chunks for shard %v", shardIndex)
-                        << std::move(chunksOrError);
+                        .With(std::move(chunksOrError));
                 }
                 chunks[shardIndex] = std::move(chunksOrError).Value();
                 fetchedChunkCount[shardIndex] = chunks[shardIndex].size();
@@ -776,12 +779,12 @@ private:
                     lastProcessedChunkId[shardIndex] = chunks[shardIndex].back().Key.ChunkId;
                 }
 
-                YT_LOG_DEBUG("Fetched chunks for global Sequoia chunk refresh (ShardIndex: %v, FetchedChunkCount: %v)",
-                    shardIndex,
-                    fetchedChunkCount[shardIndex]);
+                YT_TLOG_DEBUG("Fetched chunks for global Sequoia chunk refresh")
+                    .With("ShardIndex", shardIndex)
+                    .With("FetchedChunkCount", fetchedChunkCount[shardIndex]);
             }
 
-            YT_LOG_DEBUG("Adding chunks to refresh queue during global Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Adding chunks to refresh queue during global Sequoia chunk refresh");
 
             auto addToRefreshQueueResult = WaitFor(Bootstrap_
                 ->GetSequoiaConnection()
@@ -811,10 +814,10 @@ private:
 
             if (!addToRefreshQueueResult.IsOK()) {
                 THROW_ERROR_EXCEPTION("Failed to add chunks to refresh queue")
-                    << std::move(addToRefreshQueueResult);
+                    .With(std::move(addToRefreshQueueResult));
             }
 
-            YT_LOG_DEBUG("Added chunks to refresh queue during global Sequoia chunk refresh");
+            YT_TLOG_DEBUG("Added chunks to refresh queue during global Sequoia chunk refresh");
 
             auto guard = Guard(Lock_);
             if (shouldAbortRefreshIteration(guard)) {
@@ -827,33 +830,30 @@ private:
                 totalRefreshedChunkCount += fetchedChunkCount[shardIndex];
                 if (fetchedChunkCount[shardIndex] > 0) {
                     Status_.Shards[shardIndex].GlobalRefreshLastProcessedChunkId = lastProcessedChunkId[shardIndex];
-                    YT_LOG_DEBUG(
-                        "Finished global Sequoia chunk refresh iteration for shard "
-                        "(ShardIndex: %v, ProcessedChunkCount: %v, LastProcessedChunkId: %v)",
-                        shardIndex,
-                        fetchedChunkCount[shardIndex],
-                        lastProcessedChunkId[shardIndex]);
+                    YT_TLOG_DEBUG("Finished global Sequoia chunk refresh iteration for shard")
+                        .With("ShardIndex", shardIndex)
+                        .With("ProcessedChunkCount", fetchedChunkCount[shardIndex])
+                        .With("LastProcessedChunkId", lastProcessedChunkId[shardIndex]);
                 } else {
                     Status_.Shards[shardIndex].GlobalRefreshLastProcessedSmallChunkIdHash++;
                     Status_.Shards[shardIndex].GlobalRefreshLastProcessedChunkId = NullChunkId;
 
                     if (Status_.Shards[shardIndex].GlobalRefreshLastProcessedSmallChunkIdHash >= SmallChunkIdHashModule) {
                         if (Status_.Shards[shardIndex].GlobalRefreshLastProcessedSmallChunkIdHash > SmallChunkIdHashModule) {
-                            YT_LOG_ALERT(
-                                "Global Sequoia chunk refresh for shard exceeds maximum small_chunk_id_hash (ShardIndex: %v, CurrentSmallChunkIdHash: %v)",
-                                shardIndex,
-                                Status_.Shards[shardIndex].GlobalRefreshLastProcessedSmallChunkIdHash);
+                            YT_TLOG_ALERT("Global Sequoia chunk refresh for shard exceeds maximum small_chunk_id_hash")
+                                .With("ShardIndex", shardIndex)
+                                .With("CurrentSmallChunkIdHash", Status_.Shards[shardIndex].GlobalRefreshLastProcessedSmallChunkIdHash);
                         }
                         Status_.Shards[shardIndex].GlobalRefreshStatus = EGlobalSequoiaChunkRefreshShardStatus::Completed;
-                        YT_LOG_DEBUG("Global Sequoia chunk refresh for shard is completed (ShardIndex: %v)",
-                            shardIndex);
+                        YT_TLOG_DEBUG("Global Sequoia chunk refresh for shard is completed")
+                            .With("ShardIndex", shardIndex);
                     }
                 }
             }
 
             UnsuccessfulGlobalRefreshIterations_ = 0;
-            YT_LOG_DEBUG("Finished global Sequoia chunk refresh iteration (TotalRefreshedChunkCount: %v)",
-                totalRefreshedChunkCount);
+            YT_TLOG_DEBUG("Finished global Sequoia chunk refresh iteration")
+                .With("TotalRefreshedChunkCount", totalRefreshedChunkCount);
         } catch (const std::exception& ex) {
             auto guard = Guard(Lock_);
 
@@ -865,12 +865,9 @@ private:
             auto logLevel = UnsuccessfulGlobalRefreshIterations_ > MaxUnsuccessfulGlobalRefreshIterations_ ?
                 NLogging::ELogLevel::Alert :
                 NLogging::ELogLevel::Debug;
-            YT_LOG_EVENT(
-                Logger,
-                logLevel,
-                ex,
-                "Global Sequoia chunk refresh iteration failed (PreviousUnsuccessfulIterations: %v)",
-                UnsuccessfulGlobalRefreshIterations_);
+            YT_TLOG_EVENT(Logger, logLevel, "Global Sequoia chunk refresh iteration failed")
+                .With("PreviousUnsuccessfulIterations", UnsuccessfulGlobalRefreshIterations_)
+                .With(ex);
         }
     }
 
@@ -935,10 +932,9 @@ private:
                 return;
             }
 
-            YT_LOG_DEBUG(
-                "Starting Sequoia location refresh iteration (LocationsToRefreshCount: %v, LocationsAwaitingRefreshCount: %v)",
-                locations.size(),
-                LocationsAwaitingRefresh_.size());
+            YT_TLOG_DEBUG("Starting Sequoia location refresh iteration")
+                .With("LocationsToRefreshCount", locations.size())
+                .With("LocationsAwaitingRefreshCount", LocationsAwaitingRefresh_.size());
         }
 
         std::vector<TFuture<std::vector<NRecords::TLocationReplicas>>> locationReplicasFutures;
@@ -959,27 +955,25 @@ private:
                     if (location.FailedAttempts > MaxUnsuccessfulLocationRefreshAttempts_) {
                         if (Status_.GlobalRefreshEnabled) {
                             StartNewGlobalRefreshEpoch(guard);
-                            YT_LOG_WARNING("Sequoia location refresh failed for location, will trigger new global Sequoia chunk refresh "
-                                "(NodeId: %v, LocationIndex: %v, FailedAttempts: %v, MaxFailedAttemptsAllowed: %v)",
-                                location.NodeId,
-                                location.LocationIndex,
-                                location.FailedAttempts,
-                                MaxUnsuccessfulLocationRefreshAttempts_);
+                            YT_TLOG_WARNING("Sequoia location refresh failed for location, will trigger new global Sequoia chunk refresh")
+                                .With("NodeId", location.NodeId)
+                                .With("LocationIndex", location.LocationIndex)
+                                .With("FailedAttempts", location.FailedAttempts)
+                                .With("MaxFailedAttemptsAllowed", MaxUnsuccessfulLocationRefreshAttempts_);
                             return;
                         }
-                        YT_LOG_ALERT("Sequoia location refresh failed for location, can not trigger new global Sequoia chunk refresh "
-                            "(NodeId: %v, LocationIndex: %v, FailedAttempts: %v, MaxFailedAttemptsAllowed: %v)",
-                            location.NodeId,
-                            location.LocationIndex,
-                            location.FailedAttempts,
-                            MaxUnsuccessfulLocationRefreshAttempts_);
+                        YT_TLOG_ALERT("Sequoia location refresh failed for location, cannot trigger new global Sequoia chunk refresh")
+                            .With("NodeId", location.NodeId)
+                            .With("LocationIndex", location.LocationIndex)
+                            .With("FailedAttempts", location.FailedAttempts)
+                            .With("MaxFailedAttemptsAllowed", MaxUnsuccessfulLocationRefreshAttempts_);
                     }
                 }
 
-                YT_LOG_DEBUG("Rescheduling Sequoia location refresh for location (NodeId: %v, LocationIndex: %v, FailedAttempts: %v)",
-                    location.NodeId,
-                    location.LocationIndex,
-                    location.FailedAttempts);
+                YT_TLOG_DEBUG("Rescheduling Sequoia location refresh for location")
+                    .With("NodeId", location.NodeId)
+                    .With("LocationIndex", location.LocationIndex)
+                    .With("FailedAttempts", location.FailedAttempts);
 
                 LocationsAwaitingRefresh_.push_front(std::move(location));
             }
@@ -998,18 +992,16 @@ private:
             }
 
             if (!replicasOrError.IsOK()) {
-                YT_LOG_DEBUG(
-                    replicasOrError,
-                    "Failed to fetch replicas for Sequoia location refresh, will reschedule locations refresh");
+                YT_TLOG_DEBUG("Failed to fetch replicas for Sequoia location refresh, will reschedule locations refresh")
+                    .With(replicasOrError);
                 rescheduleLocationsRefresh(guard, /*increaseFailedAttempts*/ true);
                 return;
             }
 
             for (auto&& locationReplicasOrError : std::move(replicasOrError).Value()) {
                 if (!locationReplicasOrError.IsOK()) {
-                    YT_LOG_DEBUG(
-                        locationReplicasOrError,
-                        "Failed to fetch location replicas for Sequoia location refresh, will reschedule locations refresh");
+                    YT_TLOG_DEBUG("Failed to fetch location replicas for Sequoia location refresh, will reschedule locations refresh")
+                        .With(locationReplicasOrError);
 
                     // TODO(grphil): Maybe we should reschedule refresh only for filed locations and execute refresh for the rest?
                     rescheduleLocationsRefresh(guard, /*increaseFailedAttempts*/ true);
@@ -1023,7 +1015,7 @@ private:
             }
         }
 
-        YT_LOG_DEBUG("Fetched replicas for Sequoia location refresh");
+        YT_TLOG_DEBUG("Fetched replicas for Sequoia location refresh");
 
         auto addToRefreshQueueResult = WaitFor(Bootstrap_
             ->GetSequoiaConnection()
@@ -1054,9 +1046,8 @@ private:
                     }
                 };
 
-                YT_LOG_DEBUG(
-                    "Adding chunks to refresh queue during Sequoia location refresh iteration (ChunksAddedToRefreshQueue: %v)",
-                    chunksAddedToRefreshQueue);
+                YT_TLOG_DEBUG("Adding chunks to refresh queue during Sequoia location refresh iteration")
+                    .With("ChunksAddedToRefreshQueue", chunksAddedToRefreshQueue);
 
                 WaitFor(transaction->Commit())
                     .ThrowOnError();
@@ -1071,21 +1062,19 @@ private:
             }
 
             if (!addToRefreshQueueResult.IsOK()) {
-                YT_LOG_DEBUG(
-                    addToRefreshQueueResult,
-                    "Failed to add chunks to refresh queue during Sequoia location refresh iteration, will reschedule locations refresh");
+                YT_TLOG_DEBUG("Failed to add chunks to refresh queue during Sequoia location refresh iteration, will reschedule locations refresh")
+                    .With(addToRefreshQueueResult);
                 rescheduleLocationsRefresh(guard, /*increaseFailedAttempts*/ true);
             }
 
             for (const auto& location : LocationsAwaitingRefresh_) {
-                YT_LOG_DEBUG(
-                    "Finished location refresh during Sequoia location refresh iteration (NodeId: %v, LocationIndex: %v)",
-                    location.NodeId,
-                    location.LocationIndex);
+                YT_TLOG_DEBUG("Finished location refresh during Sequoia location refresh iteration")
+                    .With("NodeId", location.NodeId)
+                    .With("LocationIndex", location.LocationIndex);
             }
 
-            YT_LOG_DEBUG("Finished Sequoia location refresh iteration iteration (RefreshedLocationCount: %v)",
-                locations.size());
+            YT_TLOG_DEBUG("Finished Sequoia location refresh iteration iteration")
+                .With("RefreshedLocationCount", locations.size());
         }
     }
 };

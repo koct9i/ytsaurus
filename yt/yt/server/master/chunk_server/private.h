@@ -19,11 +19,11 @@ class TSequoiaReplicaInfo;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ChunkServerLogger, "ChunkServer");
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ChunkServerProfiler, "/chunk_server");
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ChunkServerHistogramProfiler, "/chunk_server/histograms");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ChunkServerLogger, "ChunkServer");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ChunkServerProfiler, "/chunk_server");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ChunkServerHistogramProfiler, "/chunk_server/histograms");
 
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ChunkServiceProfiler, "/chunk_service");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ChunkServiceProfiler, "/chunk_service");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -31,10 +31,13 @@ DECLARE_REFCOUNTED_STRUCT(IChunkVisitor)
 DECLARE_REFCOUNTED_STRUCT(IChunkTraverserContext)
 DECLARE_REFCOUNTED_STRUCT(IChunkTreeBalancerCallbacks)
 DECLARE_REFCOUNTED_STRUCT(IChunkReplacerCallbacks)
+DECLARE_REFCOUNTED_STRUCT(IChunkStatisticsCalculatorCallbacks)
 DECLARE_REFCOUNTED_STRUCT(IDataNodeTrackerInternal)
 DECLARE_REFCOUNTED_STRUCT(IChunkReplicaFetcher)
 
 DECLARE_REFCOUNTED_CLASS(TJobRegistry)
+
+class TChunkStatisticsCalculator;
 
 DECLARE_REFCOUNTED_STRUCT(ISequoiaReplicasModifier)
 DECLARE_REFCOUNTED_STRUCT(ISequoiaChunkRefresher)
@@ -81,6 +84,7 @@ DEFINE_ENUM(ESequoiaReplicaModificationPhase,
     (CommitTransaction)
     (LookupExistingReplicasInReplacedLocation)
     (GatherReplacedLocationReplicasDifference)
+    (SemaphoreWait)
 );
 
 // Only used for producing text representation of table chunk formats in

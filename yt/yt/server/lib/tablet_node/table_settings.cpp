@@ -130,7 +130,11 @@ void TTableConfigExperiment::Register(TRegistrar registrar)
 
     registrar.Parameter("path_re", &TThis::PathRe)
         .Default();
+    registrar.Parameter("exclude_path_re", &TThis::ExcludePathRe)
+        .Default();
     registrar.Parameter("tablet_cell_bundle", &TThis::TabletCellBundle)
+        .Default();
+    registrar.Parameter("exclude_tablet_cell_bundle", &TThis::ExcludeTabletCellBundle)
         .Default();
     registrar.Parameter("in_memory_mode", &TThis::InMemoryMode)
         .Default();
@@ -163,15 +167,25 @@ bool TTableConfigExperiment::Matches(const TTableDescriptor& descriptor) const
         return false;
     }
 
-    if (PathRe && !NRe2::TRe2::FullMatch(NRe2::StringPiece(descriptor.TablePath), *PathRe)) {
+    if (PathRe && !NRe2::TRe2::FullMatch(re2::StringPiece(descriptor.TablePath), *PathRe)) {
         return false;
     }
 
-    if (TabletCellBundle && !NRe2::TRe2::FullMatch(NRe2::StringPiece(descriptor.TabletCellBundle), *TabletCellBundle)) {
+    if (ExcludePathRe && NRe2::TRe2::FullMatch(re2::StringPiece(descriptor.TablePath), *ExcludePathRe)) {
         return false;
     }
 
-    if (InMemoryMode && !NRe2::TRe2::FullMatch(NRe2::StringPiece(FormatEnum(descriptor.InMemoryMode)), *InMemoryMode)) {
+    if (TabletCellBundle && !NRe2::TRe2::FullMatch(re2::StringPiece(descriptor.TabletCellBundle), *TabletCellBundle)) {
+        return false;
+    }
+
+    if (ExcludeTabletCellBundle &&
+        NRe2::TRe2::FullMatch(re2::StringPiece(descriptor.TabletCellBundle), *ExcludeTabletCellBundle))
+    {
+        return false;
+    }
+
+    if (InMemoryMode && !NRe2::TRe2::FullMatch(re2::StringPiece(FormatEnum(descriptor.InMemoryMode)), *InMemoryMode)) {
         return false;
     }
 
@@ -239,7 +253,7 @@ NTabletBalancer::TTableTabletBalancerConfigPtr DeserializeTabletBalancerConfig(
     } catch (const std::exception& ex) {
         if (errors) {
             errors->push_back(TError("Error deserializing table tablet balancer config")
-                << ex);
+                .With(ex));
         }
         return New<NTabletBalancer::TTableTabletBalancerConfig>();
     }
@@ -268,7 +282,7 @@ std::pair<TTableMountConfigPtr, IMapNodePtr> DeserializeTableMountConfig(
                 errors->push_back(TError(
                     "Error deserializing tablet mount config "
                     "with extra attributes patch")
-                        << ex);
+                        .With(ex));
             }
             return {
                 ConvertTo<TTableMountConfigPtr>(mountConfigMap),
@@ -279,7 +293,7 @@ std::pair<TTableMountConfigPtr, IMapNodePtr> DeserializeTableMountConfig(
         if (errors) {
             errors->push_back(TError(
                 "Error deserializing tablet mount config")
-                    << ex);
+                    .With(ex));
         }
         return {
             New<TTableMountConfig>(),
@@ -325,7 +339,7 @@ std::pair<TTableSettings, TTableConfigPatchPtr> TryApplySinglePatch(
             settings.MountConfig = ConvertTo<TTableMountConfigPtr>(node);
         } catch (const std::exception& ex) {
             THROW_ERROR_EXCEPTION("Failed to apply table mount config patch")
-                << ex;
+                .With(ex);
         }
     }
 
@@ -341,7 +355,7 @@ std::pair<TTableSettings, TTableConfigPatchPtr> TryApplySinglePatch(
             getter(settings) = ConvertTo<std::decay_t<decltype(getter(settings))>>(node);
         } catch (const std::exception& ex) {
             THROW_ERROR_EXCEPTION("Failed to apply %v patch", configType)
-                << ex;
+                .With(ex);
         }
     };
 
@@ -393,7 +407,7 @@ TTableSettings TRawTableSettings::BuildEffectiveSettings(
     } catch (const std::exception& ex) {
         if (errors) {
             errors->push_back(TError("Failed to apply global table config patch")
-                << ex);
+                .With(ex));
         }
     }
 
@@ -409,7 +423,7 @@ TTableSettings TRawTableSettings::BuildEffectiveSettings(
             if (errors) {
                 errors->push_back(TError("Failed to apply table config patch experiment %Qlv",
                     name)
-                    << ex);
+                    .With(ex));
             }
             if (unappliedExperimentNames) {
                 unappliedExperimentNames->push_back(name);

@@ -2,29 +2,48 @@
 
 #include "block_device.h"
 
-#include <library/cpp/yt/threading/rw_spin_lock.h>
+#include <yt/yt/core/actions/callback_list.h>
+
+#include <yt/yt/core/ytree/fluent.h>
+
+#include <library/cpp/yt/threading/atomic_object.h>
 
 namespace NYT::NNbd {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-//! A convenience base for block devices providing the error subscription machinery.
+//! A convenience base for block devices providing the error-signal machinery.
 class TBlockDeviceBase
-    : public IBlockDevice
+    : public virtual IBlockDevice
 {
 public:
-    const TError& GetError() const final;
+    TError GetError() const final;
     void SetError(TError error) final;
 
-    bool SubscribeForErrors(TGuid id, const TCallback<void()>& callback) final;
-    bool UnsubscribeFromErrors(TGuid id) final;
+    //! The device error is a one-shot terminal event, so a subscriber added after
+    //! the error was set is invoked in situ (see TSingleShotCallbackList).
+    void SubscribeError(const TCallback<void(const TError&)>& callback) override;
+    void UnsubscribeError(const TCallback<void(const TError&)>& callback) override;
+
+    //! Trimming is opt-in; ignoring a trim outright is legal, so the default is a no-op rather than
+    //! an error.
+    bool IsTrimSupported() const override;
+    TFuture<void> Trim(i64 offset, i64 length, const TTrimOptions& options) override;
+
+    //! Exposes the common device status (size, block size, read-only, description, error).
+    //! Subclasses add device-specific fields by overriding #DoBuildOrchid.
+    NYTree::IYPathServicePtr GetOrchidService() override;
+
+protected:
+    //! Called with the status map open; writes additional map items to #consumer. The default adds
+    //! nothing. Must be thread-safe.
+    virtual void DoBuildOrchid(NYson::IYsonConsumer* consumer) const;
 
 private:
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, Lock_);
-    THashMap<TGuid, TCallback<void()>> SubscriberCallbacks_;
-    TError Error_;
+    NThreading::TAtomicObject<TError> Error_;
+    TSingleShotCallbackList<void(const TError&)> ErrorList_;
 
-    void CallSubscribers() const;
+    void BuildOrchid(NYson::IYsonConsumer* consumer) const;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

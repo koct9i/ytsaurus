@@ -114,8 +114,8 @@ using namespace NYson;
 using namespace NYTree;
 using namespace NServer;
 
-using NYT::ToProto;
 using NYT::FromProto;
+using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -226,6 +226,9 @@ void TTableNodeProxy::ListSystemAttributes(std::vector<TAttributeDescriptor>* de
     // TODO(savrus) remove "unmerged_row_count" in 20.0
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::UnmergedRowCount)
         .SetPresent(isDynamic && isSorted));
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::CumulativeDataWeight)
+        .SetExternal(isExternal)
+        .SetPresent(isDynamic && !isSorted));
     descriptors->push_back(EInternedAttributeKey::Sorted);
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::KeyColumns)
         .SetReplicated(true));
@@ -525,6 +528,21 @@ bool TTableNodeProxy::GetBuiltinAttribute(TInternedAttributeKey key, IYsonConsum
             BuildYsonFluently(consumer)
                 .Value(statistics.RowCount);
             return true;
+
+        case EInternedAttributeKey::CumulativeDataWeight: {
+            if (!isDynamic || isSorted || isExternal) {
+                break;
+            }
+
+            const auto* table = GetThisImpl();
+            const auto* chunkList = table->GetChunkList();
+            const auto& chunkListStatistics = chunkList->Statistics();
+
+            BuildYsonFluently(consumer)
+                .Value(chunkListStatistics.LogicalDataWeight + chunkListStatistics.LogicalHunkDataWeight);
+
+            return true;
+        }
 
         case EInternedAttributeKey::Sorted:
             BuildYsonFluently(consumer)
@@ -2118,12 +2136,17 @@ void TTableNodeProxy::ValidatePermission(
 {
     const auto& securityManager = Bootstrap_->GetSecurityManager();
     auto successfulValidationResult = securityManager->ValidatePermission(object, permission);
-    YT_LOG_ALERT_IF(
-        CachedHasRowLevelAce_ && *CachedHasRowLevelAce_ != successfulValidationResult.HasRowLevelAce,
-        "Cached row-level ACE presence info differs from the recently computed one (CachedHasRowLevelAce: %v, NewHasRowLevelAce: %v)",
-        *CachedHasRowLevelAce_,
-        successfulValidationResult.HasRowLevelAce);
-    CachedHasRowLevelAce_ = successfulValidationResult.HasRowLevelAce;
+    // NB: When checking for anything other than read-like permissions, permission checker
+    // will not fill #HasRowLevelAce. If we then reuse the proxy for different permission
+    // checks (e.g. in overwriting copy) such non-read checks would spoil the cache.
+    if (object == Object_ && Any(permission & (EPermission::Read | EPermission::FullRead))) {
+        YT_TLOG_ALERT_IF(
+            CachedHasRowLevelAce_ && *CachedHasRowLevelAce_ != successfulValidationResult.HasRowLevelAce,
+            "Cached row-level ACE presence info differs from the recently computed one")
+            .With("CachedHasRowLevelAce", *CachedHasRowLevelAce_)
+            .With("NewHasRowLevelAce", successfulValidationResult.HasRowLevelAce);
+        CachedHasRowLevelAce_ = successfulValidationResult.HasRowLevelAce;
+    }
 }
 
 void TTableNodeProxy::RemoveSelf(TReqRemove* request, TRspRemove* response, const TCtxRemovePtr& context)
@@ -2364,11 +2387,9 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
     if (dynamic && schemaReceived  && schema->IsSorted() && !schema->IsUniqueKeys()) {
         // COMPAT(h0pless): Change this to YT_VERIFY after schema migration is complete.
         auto heavySchema = tableManager->GetHeavyTableSchemaSync(schema);
-        YT_LOG_ALERT_IF(
-            !schema->IsUniqueKeys() && table->IsForeign(),
-            "Schema doesn't have UniqueKeys set to true on the external cell (TableId: %v, Schema: %v)",
-            table->GetId(),
-            heavySchema);
+        YT_TLOG_ALERT_IF(!schema->IsUniqueKeys() && table->IsForeign(), "Schema doesn't have UniqueKeys set to true on the external cell")
+            .With("TableId", table->GetId())
+            .With("Schema", heavySchema);
 
         schema = New<TCompactTableSchema>(heavySchema->ToUniqueKeys());
     }
@@ -2390,11 +2411,10 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
                 try {
                     ValidateAdHocPermission(EPermission::FullRead);
                 } catch (const std::exception& ex) {
-                    YT_LOG_ALERT(
-                        ex,
-                        "User requested to alter table but lacks \"full_read\" permission (TableId: %v, User: %v)",
-                        table->GetId(),
-                        securityManager->GetAuthenticatedUser());
+                    YT_TLOG_ALERT("User requested to alter table but lacks \"full_read\" permission")
+                        .With("TableId", table->GetId())
+                        .With("User", securityManager->GetAuthenticatedUser())
+                        .With(ex);
                 }
                 break;
             }
@@ -2572,6 +2592,10 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
             ValidateNoRenamedColumns(*newTableSchema);
         }
 
+        if (!config->EnableAggregateStateType) {
+            ValidateNoAggregateStateType(*newTableSchema);
+        }
+
         if (options.Dynamic) {
             if (*options.Dynamic) {
                 tabletManager->ValidateMakeTableDynamic(table);
@@ -2607,8 +2631,8 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
 
     TMasterTableSchema* resultingSchema = nullptr;
     if (options.SchemaModification) {
-        YT_LOG_ALERT_IF(table->IsForeign(), "Alter request with schema modification present was received by an external cell (TableId: %v)",
-            table->GetId());
+        YT_TLOG_ALERT_IF(table->IsForeign(), "Alter request with schema modification present was received by an external cell")
+            .With("TableId", table->GetId());
         auto heavySchema = tableManager->GetHeavyTableSchemaSync(schema);
         schema = New<TCompactTableSchema>(heavySchema->ToModifiedSchema(*options.SchemaModification));
     }
@@ -2703,7 +2727,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, LockDynamicTable)
     DeclareMutating();
     ValidateTransaction();
 
-    auto timestamp = request->timestamp();
+    auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
 
     context->SetRequestInfo("Timestamp: %v",
         timestamp);
@@ -2737,7 +2761,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, StartBackup)
     DeclareMutating();
     ValidateTransaction();
 
-    auto timestamp = request->timestamp();
+    auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
     auto backupMode = FromProto<EBackupMode>(request->backup_mode());
 
     auto upstreamReplicaId = request->has_upstream_replica_id()

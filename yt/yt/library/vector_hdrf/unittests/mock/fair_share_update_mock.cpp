@@ -15,7 +15,7 @@ TJobResources CreateCpuResourceLimits(double cpu)
 
 TElementMock::TElementMock(std::string id)
     : Id_(std::move(id))
-    , Logger(FairShareLogger.WithTag("Id: %v", Id_))
+    , Logger(FairShareLogger.WithTag("Id", Id_))
 { }
 
 const TJobResources& TElementMock::GetResourceDemand() const
@@ -154,6 +154,11 @@ bool TCompositeElementMock::IsStepFunctionForGangOperationsEnabled() const
     return true;
 }
 
+bool TCompositeElementMock::IsFifoChildrenReorderingForGuaranteeUtilizationEnabled() const
+{
+    return FifoChildrenReorderingForGuaranteeUtilizationEnabled_;
+}
+
 bool TCompositeElementMock::CanAcceptFreeVolume() const
 {
     return IntegralGuaranteesConfig_->CanAcceptFreeVolume;
@@ -207,6 +212,11 @@ void TCompositeElementMock::SetMode(ESchedulingMode mode)
 void TCompositeElementMock::SetPromisedGuaranteeFairShareComputationEnabled(bool enabled)
 {
     PromisedGuaranteeFairShareComputationEnabled_ = enabled;
+}
+
+void TCompositeElementMock::SetFifoChildrenReorderingForGuaranteeUtilizationEnabled(bool enabled)
+{
+    FifoChildrenReorderingForGuaranteeUtilizationEnabled_ = enabled;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
