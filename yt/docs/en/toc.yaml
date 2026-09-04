@@ -724,3 +724,5 @@ items:
           href: draft/components-compatibility-draft-22.md
         - name: CRI job execution environment setup (draft-23)
           href: draft/exec-node-cri-job-environment-draft-23.md
+        - name: Cluster node and proxy memory management (draft-24)
+          href: draft/cluster-resource-management-memory-draft-24.md
