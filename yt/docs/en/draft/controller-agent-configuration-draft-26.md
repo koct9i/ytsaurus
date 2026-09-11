@@ -1,3 +1,11 @@
+---
+type: Draft Article
+title: "Draft-26: Controller agent configuration"
+last_modified: 2026-09-11T00:00:00+00:00
+tags: [controller-agent, configuration, operations, jobs]
+status: draft
+---
+
 # Controller agent configuration
 
 This article is a draft reference for administrators of a {{product-name}} cluster. It describes the controller-agent-specific part of the static configuration, the dynamic configuration document, and the cluster-wide defaults and limits that controller agents apply to operations and jobs.
