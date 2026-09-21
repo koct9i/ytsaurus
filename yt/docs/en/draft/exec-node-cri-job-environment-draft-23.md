@@ -1,7 +1,7 @@
 ---
 type: Draft Article
 title: "Draft-23: CRI job execution environment setup"
-last_modified: 2026-08-21T00:00:00Z
+last_modified: 2026-09-21T00:00:00Z
 tags: [cri, job-environment, configuration]
 status: draft
 ---
@@ -163,6 +163,81 @@ Enable optional features one at a time and test them on a canary exec node:
 * **Custom runtime handlers.** A CRI runtime handler can select an alternative OCI runtime or runtime class. All nodes in the scheduling group must provide the same named handler.
 * **Image-cache policy.** Managed/unmanaged registry prefixes, pinned images, periodic pulls, and `always_pull_latest` trade disk use and startup latency against freshness.
 * **Group access to CRI.** If job sidecars must call the runtime, `container_user_group_name` can add the socket-owning group. This grants powerful container-management access and should not be enabled for untrusted user code.
+
+## Job proxy logging
+
+Job proxy logging is configured in two related sections of the exec-node configuration:
+
+* `exec_node.job_proxy.job_proxy_logging` is the logging configuration copied into every job proxy;
+* `exec_node.job_proxy_log_manager` controls per-job log placement, retention, health checks, and log export on the exec node.
+
+`job_proxy_logging.mode` supports the following values:
+
+| Value | Behavior |
+| --- | --- |
+| `simple` | Uses the paths in `log_manager_template` without creating a directory for each job. This is the default and is primarily the legacy layout. Make every file name unique, for example with a slot-index placeholder, so concurrent job proxies do not write to the same file. |
+| `per_job_directory` | Creates a directory named after the job ID and rewrites every file writer, `job_proxy_stderr_path`, and `executor_stderr_path` into that directory. This layout supports retention management and `dump_job_proxy_log`, and is recommended for new deployments. |
+
+The following example stores each job's logs on one of two disks and keeps them for seven days:
+
+```yson
+exec_node = {
+    job_proxy = {
+        job_proxy_logging = {
+            mode = per_job_directory;
+            log_manager_template = {
+                rules = [
+                    {min_level = info; writers = [job_proxy];};
+                ];
+                writers = {
+                    job_proxy = {
+                        type = file;
+                        file_name = "/var/log/ytsaurus/job-proxy.log";
+                    };
+                };
+            };
+            job_proxy_stderr_path = "/var/log/ytsaurus/job-proxy.stderr";
+            executor_stderr_path = "/var/log/ytsaurus/executor.stderr";
+        };
+    };
+    job_proxy_log_manager = {
+        locations = [
+            {path = "/yt/logs-a/job-proxy";};
+            {path = "/yt/logs-b/job-proxy";};
+        ];
+        job_proxy_log_symlinks_path = "/var/log/ytsaurus/job-proxy-by-job";
+        sharding_key_length = 2;
+        logs_storage_period = 7d;
+        location_check_period = 1m;
+        directory_traversal_concurrency = 4;
+        log_dump = {
+            log_writer_name = job_proxy;
+            buffer_size = 1MB;
+        };
+    };
+};
+```
+
+In `per_job_directory` mode, only the base name of each configured log or stderr path is retained; the log manager chooses a healthy `locations` entry and constructs `<location>/<shard>/<job-id>/<base-name>`. It also creates `<job_proxy_log_symlinks_path>/<shard>/<job-id>` as a convenient symlink. Consequently, file names in `log_manager_template` must be distinct even if their original parent directories differ. The shard is derived from the job ID; increasing `sharding_key_length` creates `16^N` shard directories at startup, so use a small value (usually `1` or `2`).
+
+The log-manager options are:
+
+| Option | Meaning |
+| --- | --- |
+| `locations` | Candidate root directories for per-job logs. Jobs are distributed deterministically among healthy locations. If every location is unhealthy, the node raises an alert and cannot prepare a per-job log directory. |
+| `job_proxy_log_symlinks_path` | Root of the sharded job-ID symlink tree. Put it on storage visible to operators, but do not use it as a log location. |
+| `sharding_key_length` | Positive number of hexadecimal job-ID characters used for the directory shard. This is static. |
+| `logs_storage_period` | Time to retain logs after the job is completely removed. At startup, existing job directories are also removed when their modification time plus this period has elapsed. |
+| `directory_traversal_concurrency` | Maximum number of shard directories scanned concurrently during startup cleanup. `0` means unlimited concurrency. |
+| `location_check_period` | Interval between disk-health checks for log locations; the default is one minute. |
+| `log_dump.log_writer_name` | Name of the writer exported by `dump_job_proxy_log`. It must exist in `log_manager_template.writers` and must have `type = file`. Compressed logs are not supported by log export. |
+| `log_dump.buffer_size` | Copy buffer used by `dump_job_proxy_log`; the default is 1 MB and the value must be positive. |
+
+`job_proxy_stderr_path` and `executor_stderr_path` are optional. The former captures the job proxy's own standard error, while the latter captures standard error from the helper executor process. Normal structured logs are controlled by the standard log-manager `rules` and `writers` in `log_manager_template`; ensure that at least the writer selected by `log_dump.log_writer_name` receives the categories and levels needed for diagnosis.
+
+The exec-node dynamic configuration can override `logs_storage_period`, `directory_traversal_concurrency`, `location_check_period`, `log_dump.buffer_size`, and `log_dump.log_writer_name` under `exec_node.job_proxy_log_manager`. Changes affect subsequent cleanup, checks, and exports; the mode, storage locations, symlink root, sharding length, writer definitions, and stderr paths remain static and require an exec-node configuration rollout. Before changing `log_dump.log_writer_name` dynamically, make sure that writer already exists in the static template on every affected node.
+
+Do not point two exec nodes at the same writable log-manager location. Monitor exec-node alerts and free space: retention begins only after a job is completely removed, and a long-running or retained job keeps its directory. To retrieve the configured file writer into Cypress, use `dump_job_proxy_log` with the job ID, operation ID, and destination path; call it before the retention period expires.
 
 ## Rollout and verification
 
