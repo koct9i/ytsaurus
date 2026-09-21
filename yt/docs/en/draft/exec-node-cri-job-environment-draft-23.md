@@ -207,6 +207,8 @@ exec_node = {
 
 This mode does not use `exec_node.job_proxy_log_manager`: rotation, retention, and collection of the slot log files must be handled externally. A slot is reused by successive jobs, so its files do not provide the per-job isolation or job-ID lookup available in `per_job_directory` mode.
 
+Relative paths in `simple` mode are resolved against the job proxy's working directory, which is the job's slot working directory. They are therefore cleaned up with the slot and are usually unsuitable for node-level log collection. Use absolute paths on a persistent node volume for operational logs. The `%slot_index%` substitution works in both absolute and relative paths.
+
 ### Per-job-directory mode example
 
 The following example stores each job's logs on one of two disks and keeps them for seven days:
@@ -251,6 +253,8 @@ exec_node = {
 
 In `per_job_directory` mode, only the base name of each configured log or stderr path is retained; the log manager chooses a healthy `locations` entry and constructs `<location>/<shard>/<job-id>/<base-name>`. It also creates `<job_proxy_log_symlinks_path>/<shard>/<job-id>` as a convenient symlink. Consequently, file names in `log_manager_template` must be distinct even if their original parent directories differ. The shard is derived from the job ID; increasing `sharding_key_length` creates `16^N` shard directories at startup, so use a small value (usually `1` or `2`).
 
+Because the per-job log manager discards the parent directory from every configured file name, relative and absolute writer and stderr paths behave identically in this mode: only the base name is placed below the selected log location. For example, both `stderr/job-proxy.stderr` and `/var/log/ytsaurus/job-proxy.stderr` become `<location>/<shard>/<job-id>/job-proxy.stderr`. Do not use two configured paths with the same base name.
+
 The log-manager options are:
 
 | Option | Meaning |
@@ -265,6 +269,40 @@ The log-manager options are:
 | `log_dump.buffer_size` | Copy buffer used by `dump_job_proxy_log`; the default is 1 MB and the value must be positive. |
 
 `job_proxy_stderr_path` and `executor_stderr_path` are optional. The former captures the job proxy's own standard error, while the latter captures standard error from the helper executor process. Normal structured logs are controlled by the standard log-manager `rules` and `writers` in `log_manager_template`; ensure that at least the writer selected by `log_dump.log_writer_name` receives the categories and levels needed for diagnosis.
+
+### Log rotation
+
+Structured file writers support built-in rotation through `rotation_policy`. Configure it on each writer in `log_manager_template`, for example:
+
+```yson
+job_proxy = {
+    type = file;
+    file_name = "/var/log/ytsaurus/job-proxy-slot-%slot_index%.log";
+    rotation_policy = {
+        max_segment_size = 100MB;
+        max_segment_count_to_keep = 10;
+        max_total_size_to_keep = 1GB;
+        rotation_period = 1d;
+    };
+};
+```
+
+The rotation policy does **not** apply to `job_proxy_stderr_path` or `executor_stderr_path`. These are raw stderr redirections opened in append mode, not log-manager writers. In `per_job_directory` mode, the log manager removes stderr together with the job directory after `logs_storage_period`, but it does not rotate stderr while a long-running job is active.
+
+To bound stderr files while their processes are running, configure an external rotator on each exec-node host. It must use copy-and-truncate semantics: renaming the active file is insufficient because the process keeps writing through its already-open file descriptor. For the `simple` example above, a `logrotate` rule can be written as follows:
+
+```text
+/var/log/ytsaurus/job-proxy-stderr-slot-* /var/log/ytsaurus/executor-stderr-slot-* {
+    size 100M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+Run the rotator with permissions that allow it to read and truncate the files. For `per_job_directory`, use equivalent patterns for each configured location, such as `<location>/*/*/job-proxy.stderr`, and keep rotated segments inside the job directory so that retention cleanup removes them with the job. Exclude structured log files managed by `rotation_policy` from the external rule to avoid two rotation mechanisms operating on the same file.
 
 The exec-node dynamic configuration can override `logs_storage_period`, `directory_traversal_concurrency`, `location_check_period`, `log_dump.buffer_size`, and `log_dump.log_writer_name` under `exec_node.job_proxy_log_manager`. Changes affect subsequent cleanup, checks, and exports; the mode, storage locations, symlink root, sharding length, writer definitions, and stderr paths remain static and require an exec-node configuration rollout. Before changing `log_dump.log_writer_name` dynamically, make sure that writer already exists in the static template on every affected node.
 
