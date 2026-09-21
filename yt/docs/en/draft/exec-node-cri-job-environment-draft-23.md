@@ -178,6 +178,37 @@ Job proxy logging is configured in two related sections of the exec-node configu
 | `simple` | Uses the paths in `log_manager_template` without creating a directory for each job. This is the default and is primarily the legacy layout. Make every file name unique, for example with a slot-index placeholder, so concurrent job proxies do not write to the same file. |
 | `per_job_directory` | Creates a directory named after the job ID and rewrites every file writer, `job_proxy_stderr_path`, and `executor_stderr_path` into that directory. This layout supports retention management and `dump_job_proxy_log`, and is recommended for new deployments. |
 
+### Simple mode example
+
+In `simple` mode, include `%slot_index%` in every log and stderr file name. The exec node replaces it with the index of the slot running the job, preventing job proxies in different slots from sharing a file:
+
+```yson
+exec_node = {
+    job_proxy = {
+        job_proxy_logging = {
+            mode = simple;
+            log_manager_template = {
+                rules = [
+                    {min_level = info; writers = [job_proxy];};
+                ];
+                writers = {
+                    job_proxy = {
+                        type = file;
+                        file_name = "/var/log/ytsaurus/job-proxy-slot-%slot_index%.log";
+                    };
+                };
+            };
+            job_proxy_stderr_path = "/var/log/ytsaurus/job-proxy-stderr-slot-%slot_index%";
+            executor_stderr_path = "/var/log/ytsaurus/executor-stderr-slot-%slot_index%";
+        };
+    };
+};
+```
+
+This mode does not use `exec_node.job_proxy_log_manager`: rotation, retention, and collection of the slot log files must be handled externally. A slot is reused by successive jobs, so its files do not provide the per-job isolation or job-ID lookup available in `per_job_directory` mode.
+
+### Per-job-directory mode example
+
 The following example stores each job's logs on one of two disks and keeps them for seven days:
 
 ```yson
