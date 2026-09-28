@@ -331,6 +331,17 @@ private:
         } else if (Config_->UseLogrotateCompatibleTimestampSuffix) {
             // Rotated files are suffixed with the date (excluding first), decreasing with the age of file.
             std::reverse(files.begin() + 1, files.end());
+
+            // Fragments from the old timestamp-suffix scheme contain both '-' and ':', whereas the
+            // logrotate-compatible scheme contains '-' but no ':'. Keep current-scheme fragments first
+            // so fragments from the old scheme are discarded earlier by the retention policy.
+            std::stable_partition(files.begin(), files.end(), [&] (TStringBuf fileName) {
+                if (fileName == FileNamePrefix_) {
+                    return true;
+                }
+                auto suffix = fileName.SubStr(FileNamePrefix_.size());
+                return suffix.Contains('-') && !suffix.Contains(':');
+            });
         }
         return files;
     }

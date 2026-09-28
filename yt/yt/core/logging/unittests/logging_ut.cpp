@@ -41,6 +41,7 @@
 
 #include <library/cpp/yt/string/string_builder.h>
 
+#include <util/stream/file.h>
 #include <util/stream/zlib.h>
 
 #include <util/system/fs.h>
@@ -1132,6 +1133,13 @@ TEST_P(TBuiltinRotationTest, All)
     // To ensure that renumeration of rotated files works.
     const int RotationDepth = useTimestampSuffix || useLogrotateCompatibleTimestampSuffix ? 2 : 12;
 
+    if (useLogrotateCompatibleTimestampSuffix) {
+        // Simulate fragments left behind after switching timestamp-suffix schemes.
+        TFileOutput(logFileNamePrefix + ".20000101-000000") << "current scheme fragment";
+        TFileOutput(logFileNamePrefix + ".2099-01-02T00:00:00") << "newer old scheme fragment";
+        TFileOutput(logFileNamePrefix + ".2099-01-01T00:00:00") << "older old scheme fragment";
+    }
+
     Configure(Format(R"({
         rotation_check_period = 1000;
         flush_period = 100;
@@ -1210,6 +1218,11 @@ TEST_P(TBuiltinRotationTest, All)
             auto files = ListLogFiles(logFileNamePrefix, useTimestampSuffix, useLogrotateCompatibleTimestampSuffix);
             Cerr << "[RotationTest] Rotation observed (Iter: " << index
                  << ", FileCount: " << files.size() << ")" << Endl;
+            if (useLogrotateCompatibleTimestampSuffix && index == 0) {
+                EXPECT_TRUE(NFS::Exists(logFileNamePrefix + ".20000101-000000"));
+                EXPECT_FALSE(NFS::Exists(logFileNamePrefix + ".2099-01-02T00:00:00"));
+                EXPECT_FALSE(NFS::Exists(logFileNamePrefix + ".2099-01-01T00:00:00"));
+            }
         }
     }
 
