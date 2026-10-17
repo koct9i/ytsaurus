@@ -5,6 +5,7 @@
 
 #include <yt/yt/core/net/address.h>
 
+#include <library/cpp/html/pcdata/pcdata.h>
 #include <library/cpp/string_utils/base64/base64.h>
 
 #include <contrib/libs/poco/XML/include/Poco/XML/XML.h>
@@ -286,7 +287,7 @@ void TDeleteObjectsRequest::Serialize(THttpRequest* request) const
     bodyStream << R"(<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/">)";
     for (const auto& key : Objects) {
         bodyStream << "<Object>";
-        bodyStream << "<Key>" << key << "</Key>";
+        bodyStream << "<Key>" << EncodeHtmlPcdata(key) << "</Key>";
         bodyStream << "</Object>";
     }
     bodyStream << "</Delete>";
@@ -464,7 +465,7 @@ private:
         auto headers = response->GetHeaders();
         for (TStringBuf header : {"x-amz-request-id", "x-amz-id-2"}) {
             if (auto* value = headers->Find(header)) {
-                error <<= TErrorAttribute(std::string(header), *value);
+                error.Add(std::string(header), *value);
             }
         }
     }
@@ -476,7 +477,7 @@ private:
             "Got status code %v %v",
             ToUnderlying(statusCode),
             ToHttpString(statusCode));
-        error <<= TErrorAttribute("http_code", statusCode);
+        error.Add("http_code", statusCode);
         if (method == NHttp::EMethod::Head) {
             FillErrorWithHeaders(error, response);
             return error;
@@ -486,10 +487,10 @@ private:
         try {
             auto parsedDocument = ParseXmlDocument(responseBody);
             for (auto* child = parsedDocument->firstChild(); child; child = child->nextSibling()) {
-                error <<= TErrorAttribute(child->nodeName(), child->innerText());
+                error.Add(child->nodeName(), child->innerText());
             }
         } catch (const std::exception&) {
-            error <<= TErrorAttribute("response_body", responseBody.ToStringBuf());
+            error.Add("response_body", responseBody.ToStringBuf());
             FillErrorWithHeaders(error, response);
         }
         return error;
@@ -510,7 +511,7 @@ private:
             return Client_->MakeRequest(std::move(req))
                 .AsUnique().Apply(BIND([method = requestMethod] (TErrorOr<NHttp::IResponsePtr>&& responseOrError) -> TErrorOr<TCommandResponse> {
                     if (!responseOrError.IsOK()) {
-                        return TError("HTTP request failed") << std::move(responseOrError);
+                        return TError("HTTP request failed").With(std::move(responseOrError));
                     }
                     auto& response = responseOrError.Value();
                     // 3xx are not really errors but we don't handle redirects anyways

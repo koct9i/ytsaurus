@@ -35,16 +35,17 @@ TLayer::TLayer(
 TLayer::~TLayer()
 {
     auto removalNeeded = IsLayerRemovalNeeded_;
-    YT_LOG_INFO(
-        "Layer is destroyed (LayerId: %v, LayerPath: %v, RemovalNeeded: %v)",
-        LayerMeta_.Id,
-        LayerMeta_.Path,
-        removalNeeded);
+    YT_TLOG_INFO("Layer is destroyed")
+        .With("LayerId", LayerMeta_.Id)
+        .With("LayerPath", LayerMeta_.Path)
+        .With("RemovalNeeded", removalNeeded);
 
     if (removalNeeded) {
         Location_->RemoveLayer(LayerMeta_.Id)
             .Subscribe(BIND([layerId = LayerMeta_.Id] (const TError& result) {
-                YT_LOG_ERROR_IF(!result.IsOK(), result, "Failed to remove layer (LayerId: %v)", layerId);
+                YT_TLOG_ERROR_IF(!result.IsOK(), "Failed to remove layer")
+                    .With("LayerId", layerId)
+                    .With(result);
             }));
     }
 }
@@ -192,10 +193,9 @@ TFuture<void> TSimpleTmpfsVolume::Remove()
     const auto& volumePath = Path_;
 
     auto Logger = ExecNodeLogger()
-        .WithTag("VolumeType: %v, VolumeId: %v, VolumePath: %v",
-            volumeType,
-            volumeId,
-            volumePath);
+        .WithTag("VolumeType", volumeType)
+        .WithTag("VolumeId", volumeId)
+        .WithTag("VolumePath", volumePath);
 
     RemoveFuture_ = BIND(
         [
@@ -218,12 +218,11 @@ TFuture<void> TSimpleTmpfsVolume::Remove()
             } catch (const std::exception& ex) {
                 TVolumeProfilerCounters::Get()->GetCounter(tagSet, "/remove_errors").Increment(1);
 
-                YT_LOG_ERROR(
-                    ex,
-                    "Failed to remove volume");
+                YT_TLOG_ERROR("Failed to remove volume")
+                    .With(ex);
 
                 THROW_ERROR_EXCEPTION("Failed to remove volume")
-                    << ex;
+                    .With(ex);
             }
         })
         .AsyncVia(Invoker_)

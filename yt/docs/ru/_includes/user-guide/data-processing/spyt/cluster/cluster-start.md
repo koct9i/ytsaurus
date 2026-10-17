@@ -73,6 +73,7 @@ $ spark-launch-yt
 | `--tcp-proxy-range-size` | нет | 100 | Размер диапазона портов для TCP proxy | 1.72.0 |
 | `--enable-rpc-job-proxy`, `--disable-rpc-job-proxy` | нет | `--enable-rpc-job-proxy` | Использовать rpc прокси, встроенный в job прокси. При отключении этой опции будет использована общая rpc прокси, что может привести к деградации производительности кластера | 1.77.0 |
 | `--enable-ytsaurus-shuffle`, `--disable-ytsaurus-shuffle` | нет | `--disable-ytsaurus-shuffle` | Использовать [{{product-name}} Shuffle сервис](../../../../../user-guide/data-processing/spyt/shuffle.md) | 2.7.2 |
+| `--enable-spark-shuffle`, `--disable-spark-shuffle` | нет | `--enable-spark-shuffle` | Запускать нативный внешний Spark shuffle service на кластере (см. [Shuffle сервис](../../../../../user-guide/data-processing/spyt/shuffle.md#enabling-standalone)) | 2.9.3 |
 | `--rpc-job-proxy-thread-pool-size` | нет | 4 | Размер пула потоков для rpc job proxy | 1.77.0 |
 | `--group-id` | нет | - | Идентификатор discovery группы. Используется при запуске кластера с использованием нескольких операций | - |
 | `--enable-squashfs`, `--disable-squashfs` | нет | `--disable-squashfs` | Использовать предварительно подготовленные слои Squash FS в {{product-name}} джобах | 2.6.0 |
@@ -112,10 +113,10 @@ $ spark-launch-yt
 | `--driver-cores-overhead` | нет | `--worker-cores-overhead` | Дополнительное количество ядер, выделяемое воркерам для драйверов, см. `--worker-cores-overhead` | - |
 | `--driver-timeout` | нет | `--worker-timeout` | Максимальное время, которое воркер будет ожидать регистрацию на Spark мастере. По истечении этого времени процесс воркера будет завершён с ошибкой | - |
 | `--autoscaler-period`, `--autoscaler-metrics-port`, `--autoscaler-sliding-window`, `--autoscaler-max-free-workers`, `--autoscaler-slot-increment-step` | нет | - | Параметры, используемые для работы с [автоскейлером](../../../../../user-guide/data-processing/spyt/cluster/cluster-start.md#auto-scale) | - |
-| `--enable-livy` | нет | false | Запустить Livy сервер в составе кластера. Подробнее про Livy сервер описано [на соответвтвующей странице](../../../../../user-guide/data-processing/spyt/cluster/livy.md) | 1.74.0 |
-| `--livy-driver-cores` | нет | 1 | Количество ядер CPU, выделяемых драйверу, запускаемому через Livy | 1.74.0 |
-| `--livy-driver-memory` | нет | 1G | Объём памяти CPU, выделяемых драйверу, запускаемому через Livy | 1.74.0 |
-| `--livy-max-sessions` | нет | 3 | Максимальное количество сессий, которые одновременно можно запустить на Livy сервере | 1.74.0 |
+| `--enable-livy` | нет | false | **Устарело и недоступно начиная с SPYT 2.10.0.** Запустить Livy-сервер в составе кластера. Подробнее — в [инструкции для старых версий](../../../../../user-guide/data-processing/spyt/cluster/livy.md) | 1.74.0 |
+| `--livy-driver-cores` | нет | 1 | **Устарело и недоступно начиная с SPYT 2.10.0.** Количество ядер CPU, выделяемых драйверу, запускаемому через Livy | 1.74.0 |
+| `--livy-driver-memory` | нет | 1G | **Устарело и недоступно начиная с SPYT 2.10.0.** Объём памяти CPU, выделяемых драйверу, запускаемому через Livy | 1.74.0 |
+| `--livy-max-sessions` | нет | 3 | **Устарело и недоступно начиная с SPYT 2.10.0.** Максимальное количество сессий, которые одновременно можно запустить на Livy сервере | 1.74.0 |
 | `--id` | нет | - | Deprecated. Оставлено для обратной совместимости | - |
 | `--discovery-dir` | нет | - | Deprecated. Оставлено для обратной совместимости | - |
 | `-h`, `--help`   | нет | - | Справка по параметрам команды | - |

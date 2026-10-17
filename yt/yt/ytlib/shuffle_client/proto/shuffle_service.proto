@@ -5,6 +5,7 @@ import "yt_proto/yt/client/table_chunk_format/proto/chunk_meta.proto";
 import "yt_proto/yt/core/misc/proto/guid.proto";
 import "yt/ytlib/chunk_client/proto/session_id.proto";
 import "yt_proto/yt/client/node_tracker_client/proto/node.proto";
+import "yt_proto/yt/client/node_tracker_client/proto/node_directory.proto";
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -21,8 +22,11 @@ message TReqStartShuffle
     // schemaful: the schema is the single source of the column name-to-id
     // mapping shared by writers and readers.
     optional NYT.NTableClient.NProto.TTableSchemaExt schema = 7;
-    // YSON-serialized TPushShuffleConfig; push-based only.
-    optional bytes push_config = 8;
+    reserved 8;
+    // YSON-serialized TShuffleConfig.
+    optional bytes config = 9;
+    // NCompression::ECodec.
+    optional int32 codec = 10 [default = 0];
 }
 
 message TRspStartShuffle
@@ -33,10 +37,11 @@ message TRspStartShuffle
 ////////////////////////////////////////////////////////////////////////////////
 
 // Push-based only.
-message TReqRegisterMapper
+message TReqRegisterWriter
 {
     required bytes shuffle_handle = 1;
-    optional int32 writer_index = 2;
+    // Stable caller-assigned identity shared by retries of one logical writer.
+    optional int32 logical_writer_index = 2;
     optional bool overwrite_existing_writer_data = 3 [default = false];
 }
 
@@ -46,9 +51,10 @@ message TPartitionWriteSession
     required NYT.NNodeTrackerClient.NProto.TNodeDescriptor sequencer_node = 2;
 }
 
-message TRspRegisterMapper
+message TRspRegisterWriter
 {
-    required int32 mapper_id = 1;
+    // Identity of this concrete registered writer.
+    required int32 writer_id = 1;
 
     message TReadySession
     {
@@ -56,7 +62,7 @@ message TRspRegisterMapper
         required TPartitionWriteSession session = 2;
     }
 
-    // Sessions already started at registration time. The mapper uses these directly and
+    // Sessions already started at registration time. The writer uses these directly and
     // falls back to GetPartitionWriteSession for any partition absent here.
     repeated TReadySession ready_sessions = 2;
 }
@@ -83,7 +89,8 @@ message TReqRegisterChunks
 {
     required bytes shuffle_handle = 1; // YSON-serialized TShuffleHandle
     repeated NYT.NChunkClient.NProto.TChunkSpec chunk_specs = 2;
-    optional int32 writer_index = 3;
+    // Stable caller-assigned identity shared by retries of one logical writer.
+    optional int32 logical_writer_index = 3;
     optional bool overwrite_existing_writer_data = 4 [default = false];
 }
 
@@ -104,12 +111,14 @@ message TReqFetchChunks
 
     required bytes shuffle_handle = 1; // YSON-serialized TShuffleHandle
     required int32 partition_index = 2;
-    optional TIndexRange writer_index_range = 3;
+    // Half-open range of caller-assigned logical writer indices.
+    optional TIndexRange logical_writer_index_range = 3;
 }
 
 message TRspFetchChunks
 {
     repeated NYT.NChunkClient.NProto.TChunkSpec chunk_specs = 1;
     // Push-based only.
-    repeated int32 valid_mapper_ids = 2;
+    repeated int32 valid_writer_ids = 2;
+    optional NYT.NNodeTrackerClient.NProto.TNodeDirectory node_directory = 3;
 }

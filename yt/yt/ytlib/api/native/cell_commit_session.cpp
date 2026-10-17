@@ -36,8 +36,7 @@ public:
             useUniformPrepareSignatures
                 ? std::make_unique<TUniformSignatureGenerator>()
                 : std::make_unique<TTransactionSignatureGenerator>(FinalTransactionSignature))
-        , CommitSignatureGenerator_(/*targetSignature*/ FinalTransactionSignature)
-        , Logger(logger.WithTag("CellId: %v", cellId))
+        , Logger(logger.WithTag("CellId", cellId))
     { }
 
     TTransactionSignatureGenerator* GetPrepareSignatureGenerator() override
@@ -45,16 +44,10 @@ public:
         return PrepareSignatureGenerator_.get();
     }
 
-    TTransactionSignatureGenerator* GetCommitSignatureGenerator() override
-    {
-        return &CommitSignatureGenerator_;
-    }
-
     void RegisterAction(NTransactionClient::TTransactionActionData data) override
     {
         if (Actions_.empty()) {
             PrepareSignatureGenerator_->RegisterRequest();
-            CommitSignatureGenerator_.RegisterRequest();
         }
         Actions_.push_back(data);
     }
@@ -66,16 +59,22 @@ public:
 
     void RegisterTabletCommitSession(TTabletId tabletId) override
     {
+        auto guard = Guard(TabletsLock_);
+
         EmplaceOrCrash(Tablets_, tabletId);
     }
 
     void UnregisterTabletCommitSession(TTabletId tabletId) override
     {
+        auto guard = Guard(TabletsLock_);
+
         EraseOrCrash(Tablets_, tabletId);
     }
 
     bool HasRegisteredTabletCommitSessions() const override
     {
+        auto guard = Guard(TabletsLock_);
+
         return !Tablets_.empty();
     }
 
@@ -90,8 +89,8 @@ public:
             return MakeFuture(TError(NYT::EErrorCode::Canceled, "Transaction destroyed"));
         }
 
-        YT_LOG_DEBUG("Sending transaction actions (ActionCount: %v)",
-            Actions_.size());
+        YT_TLOG_DEBUG("Sending transaction actions")
+            .With("ActionCount", Actions_.size());
 
         TFuture<void> future;
         switch (TypeFromId(CellId_)) {
@@ -117,21 +116,22 @@ private:
     const TCellId CellId_;
 
     std::unique_ptr<TTransactionSignatureGenerator> PrepareSignatureGenerator_;
-    TTransactionSignatureGenerator CommitSignatureGenerator_;
 
     const TLogger Logger;
 
+    // NB: All accesses are non-concurrent by construction; add a lock if that ever changes.
     std::vector<TTransactionActionData> Actions_;
+
+    YT_DECLARE_SPIN_LOCK(TSpinLock, TabletsLock_);
     THashSet<TTabletId> Tablets_;
 
     TFuture<void> SendTabletActions(const TTransactionPtr& owner)
     {
         auto req = RequestFactory_->CreateRegisterTransactionActionsTabletCellRequest(CellId_);
         ToProto(req->mutable_transaction_id(), owner->GetId());
-        req->set_transaction_start_timestamp(owner->GetStartTimestamp());
+        req->set_transaction_start_timestamp(ToProto(owner->GetStartTimestamp()));
         req->set_transaction_timeout(ToProto(owner->GetTimeout()));
         req->set_prepare_signature(PrepareSignatureGenerator_->GenerateSignature());
-        req->set_commit_signature(CommitSignatureGenerator_.GenerateSignature());
         ToProto(req->mutable_actions(), Actions_);
         return req->Invoke().As<void>();
     }
@@ -148,7 +148,7 @@ private:
     {
         auto req = RequestFactory_->CreateRegisterTransactionActionsChaosCellRequest(CellId_);
         ToProto(req->mutable_transaction_id(), owner->GetId());
-        req->set_transaction_start_timestamp(owner->GetStartTimestamp());
+        req->set_transaction_start_timestamp(ToProto(owner->GetStartTimestamp()));
         req->set_transaction_timeout(ToProto(owner->GetTimeout()));
         req->set_signature(PrepareSignatureGenerator_->GenerateSignature());
         ToProto(req->mutable_actions(), Actions_);
@@ -158,14 +158,16 @@ private:
     void OnResponse(const TError& result)
     {
         if (!result.IsOK()) {
-            auto error = TError("Error sending transaction actions")
-                << TErrorAttribute("cell_id", CellId_)
-                << result;
-            YT_LOG_DEBUG(error);
-            THROW_ERROR(error);
+            static constexpr auto Message = "Error sending transaction actions"_sb;
+            YT_TLOG_DEBUG(Message)
+                .With("CellId", CellId_)
+                .With(result);
+            THROW_ERROR_EXCEPTION(Message)
+                .With("cell_id", CellId_)
+                .With(result);
         }
 
-        YT_LOG_DEBUG("Transaction actions sent successfully");
+        YT_TLOG_DEBUG("Transaction actions sent successfully");
     }
 };
 
@@ -282,7 +284,7 @@ private:
     const TLogger Logger;
     const bool UseUniformPrepareSignatures_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, Lock_);
     THashMap<TCellId, ICellCommitSessionPtr> CellIdToCommitSession_;
 };
 

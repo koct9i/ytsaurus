@@ -1,15 +1,19 @@
 #include "dq_worker.h"
+#include "child_environment.h"
+
+#include <yt/yql/tools/dq/job_config/job_config.h>
 
 #include <yql/essentials/utils/signals/signals.h>
 #include <yql/essentials/utils/network/bind_in_range.h>
 
-#include <contrib/ydb/library/yql/providers/dq/stats_collector/pool_stats_collector.h>
+#include <yt/yql/providers/dq/stats_collector/pool_stats_collector.h>
 #include <yt/yql/providers/dq/actors/yt/nodeid_assigner.h>
 #include <yt/yql/providers/dq/actors/dynamic_nameserver.h>
-#include <contrib/ydb/library/yql/providers/dq/service/interconnect_helpers.h>
+#include <yt/yql/providers/dq/service/interconnect_helpers.h>
 #include <yt/yql/providers/dq/global_worker_manager/coordination_helper.h>
 
 #include <yt/yql/providers/dq/runtime/file_cache.h>
+#include <yt/yql/providers/dq/runtime/task_runner_invoker_factory.h>
 #include <contrib/ydb/library/yql/providers/dq/runtime/runtime_data.h>
 #include <contrib/ydb/library/yql/providers/dq/worker_manager/local_worker_manager.h>
 
@@ -20,9 +24,6 @@
 #include <yql/essentials/utils/yql_panic.h>
 #include <yql/essentials/utils/range_walker.h>
 
-#include <yt/yt/core/actions/invoker.h>
-#include <yt/yt/core/concurrency/action_queue.h>
-#include <yt/yt/core/concurrency/thread_pool.h>
 #include <yt/yt/core/net/address.h>
 #include <yt/yt/core/net/config.h>
 
@@ -36,12 +37,13 @@
 #include <util/system/execpath.h>
 
 using namespace NYql::NDqs;
+using namespace NYql::NDq::NJobConfig;
 
 namespace {
     template <typename TMessage>
     THolder<TMessage> ParseProtoConfig(const TString& cfgFile) {
         auto config = MakeHolder<TMessage>();
-        TString configData = TFileInput(cfgFile).ReadAll();;
+        TString configData = TFileInput(cfgFile).ReadAll();
 
         using ::google::protobuf::TextFormat;
         if (!TextFormat::ParseFromString(configData, config.Get())) {
@@ -57,33 +59,6 @@ namespace {
     static void OnTerminate(int) {
         ShouldContinue.SetValue();
     }
-
-    class TSerializedTaskRunnerInvoker: public ITaskRunnerInvoker {
-    public:
-        TSerializedTaskRunnerInvoker(const NYT::IInvokerPtr& invoker)
-            : Invoker(NYT::NConcurrency::CreateSerializedInvoker(invoker))
-        { }
-
-        void Invoke(const std::function<void(void)>& f) override {
-            Invoker->Invoke(BIND(f));
-        }
-
-    private:
-        const NYT::IInvokerPtr Invoker;
-    };
-
-    class TConcurrentInvokerFactory: public ITaskRunnerInvokerFactory {
-    public:
-        TConcurrentInvokerFactory(int capacity)
-            : ThreadPool(NYT::NConcurrency::CreateThreadPool(capacity, "WorkerActor"))
-        { }
-
-        ITaskRunnerInvoker::TPtr Create() override {
-            return new TSerializedTaskRunnerInvoker(ThreadPool->GetInvoker());
-        }
-
-        NYT::NConcurrency::IThreadPoolPtr ThreadPool;
-    };
 
     void ConfigurePorto(const NYql::NProto::TDqConfig::TYtBackend& config, const TString portoCtl) {
         TString settings[][2] = {
@@ -171,8 +146,8 @@ namespace NYql::NDq::NWorker {
         InitSignals();
 
         TString fileCacheDir = GetEnv(NCommonJobVars::UDFS_PATH);
-        TString ytCoordinatorStr = GetEnv(TString("YT_SECURE_VAULT_") + NCommonJobVars::YT_COORDINATOR);
-        TString ytBackendStr = GetEnv(TString("YT_SECURE_VAULT_") + NCommonJobVars::YT_BACKEND);
+        TString ytCoordinatorStr = ReadProtoConfigText(NCommonJobVars::YT_COORDINATOR, CoordinatorConfigFile);
+        TString ytBackendStr = ReadProtoConfigText(NCommonJobVars::YT_BACKEND, BackendConfigFile);
 
         TString operationId = GetEnv("YT_OPERATION_ID");
         TString jobId = GetEnv("YT_JOB_ID");
@@ -187,10 +162,12 @@ namespace NYql::NDq::NWorker {
         TStringInput inputStream2(ytBackendStr);
         ParseFromTextFormat(inputStream2, backendConfig, EParseFromTextFormatOption::AllowUnknownField);
 
-        TRangeWalker<int> portWalker(startPort, startPort+100);
+        ApplyTokenFromVault(coordinatorConfig, backendConfig);
+
+        TRangeWalker<int> portWalker(startPort, startPort + 100);
         auto ports = BindInRange(portWalker);
 
-        auto forceIPv4 = IsTrue(GetEnv(TString("YT_SECURE_VAULT_") + NCommonJobVars::YT_FORCE_IPV4, ""));
+        auto forceIPv4 = IsTrue(GetEnv(TString("YT_SECURE_VAULT_") + NCommonJobVars::YT_FORCE_IPV4, GetEnv(NCommonJobVars::YT_FORCE_IPV4, "")));
 
         auto addressResolverStr = GetEnv(NCommonJobVars::ADDRESS_RESOLVER_CONFIG, "");
         if (!addressResolverStr.empty()) {
@@ -209,7 +186,8 @@ namespace NYql::NDq::NWorker {
             forceIPv4 ? AF_INET : AF_INET6
         );
 
-        auto coordinator = CreateCoordiantionHelper(coordinatorConfig, NProto::TDqConfig::TScheduler(), "worker_node", ports[forceIPv4 ? 0 : 1].Addr.GetPort(), host, ip);
+        auto& listeningPort = ports[forceIPv4 ? 0 : 1];
+        auto coordinator = CreateCoordiantionHelper(coordinatorConfig, NProto::TDqConfig::TScheduler(), "worker_node", listeningPort.Addr.GetPort(), host, ip);
         i64 cacheSize = backendConfig.HasCacheSize()
             ? backendConfig.GetCacheSize()
             : 16000000000L;
@@ -242,8 +220,22 @@ namespace NYql::NDq::NWorker {
         pfOptions.ExecPath = GetExecPath();
         pfOptions.FileCache = fileCache;
 
-        if (backendConfig.GetUseLocalLDLibraryPath()) {
-            pfOptions.Env["LD_LIBRARY_PATH"] = ".";
+        const auto jobSandboxPath = NFs::CurrentWorkingDirectory();
+        const bool enablePorto = backendConfig.GetEnablePorto() == "isolate";
+        const bool useLocalLdLibraryPath = backendConfig.GetUseLocalLDLibraryPath();
+        NDetail::ConfigureChildLdLibraryPath(
+            &pfOptions.Env,
+            useLocalLdLibraryPath,
+            enablePorto,
+            jobSandboxPath);
+        if (useLocalLdLibraryPath) {
+            if (enablePorto) {
+                YQL_LOG(WARN) << "Dynamic runtime libraries from the YT job sandbox may be unavailable "
+                              << "to a relocated DQ executor in Porto mode";
+            } else {
+                YQL_LOG(INFO) << "Using absolute YT job sandbox path as LD_LIBRARY_PATH for DQ child: "
+                              << jobSandboxPath;
+            }
         }
 
         if (deterministicMode) {
@@ -265,7 +257,8 @@ namespace NYql::NDq::NWorker {
             pfOptions.Env["YT_ALLOW_HTTP_REQUESTS_TO_YT_FROM_JOB"] = "0";
             pfOptions.Env["YT_FORBID_REQUESTS_FROM_JOB"] = "1";
         }
-        pfOptions.EnablePorto = backendConfig.GetEnablePorto() == "isolate";
+        pfOptions.EnablePorto = enablePorto;
+        pfOptions.EnablePortoAnonLimitRaiseBeforeDestroy = backendConfig.GetEnablePortoAnonLimitRaiseBeforeDestroy();
         pfOptions.PortoLayer = backendConfig.GetPortoLayer().size() == 0 ? "" : layerDir;
         pfOptions.MaxProcesses = capacity*1.5;
         pfOptions.ContainerName = "Outer";
@@ -308,20 +301,21 @@ namespace NYql::NDq::NWorker {
 
         Cerr << "My nodeId: " << nodeId << Endl;
 
-        Cerr << "Configure porto" << Endl;
-        if (backendConfig.GetEnablePorto() == "isolate") {
+        if (enablePorto) {
+            Cerr << "Configure porto" << Endl;
             ConfigurePorto(backendConfig, pfOptions.PortoCtlPath);
+            Cerr << "Configure porto done" << Endl;
         }
-        Cerr << "Configure porto done" << Endl;
 
         auto dqSensors = GetSensorsGroupFor(NSensorComponent::kDq);
+        pfOptions.Counters = dqSensors->GetSubgroup("component", "task_runner_pipe");
         THolder<NActors::TActorSystemSetup> setup;
         TIntrusivePtr<NActors::NLog::TSettings> logSettings;
         std::tie(setup, logSettings) = BuildActorSetup(
             nodeId,
             ip,
-            ports[forceIPv4 ? 0 : 1].Addr.GetPort(),
-            ports[forceIPv4 ? 0 : 1].Socket->Release(),
+            listeningPort.Addr.GetPort(),
+            listeningPort.Socket->Release(),
             {},
             dqSensors,
             [](const TIntrusivePtr<NActors::TTableNameserverSetup>& setup) {
@@ -330,7 +324,7 @@ namespace NYql::NDq::NWorker {
             Nothing(),
             backendConfig.GetICSettings());
 
-        auto statsCollector = CreateStatsCollector(5, *setup.Get(), dqSensors);
+        auto statsCollector = CreateStatsCollector(5, *setup, dqSensors);
 
         auto actorSystem = MakeHolder<NActors::TActorSystem>(setup, nullptr, logSettings);
 
@@ -360,7 +354,7 @@ namespace NYql::NDq::NWorker {
         clusterMapping["plato"] = backendConfig.GetClusterName();
 
         auto proxyFactory = NTaskRunnerProxy::CreatePipeFactory(pfOptions);
-        ITaskRunnerInvokerFactory::TPtr invokerFactory = new TConcurrentInvokerFactory(2*capacity);
+        auto invokerFactory = CreateConcurrentInvokerFactory(2 * capacity);
         auto taskRunnerActorFactory = NTaskRunnerActor::CreateTaskRunnerActorFactory(proxyFactory, invokerFactory, coordinator->GetRuntimeData());
 
         TLocalWorkerManagerOptions lwmOptions;

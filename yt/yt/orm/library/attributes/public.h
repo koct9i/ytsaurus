@@ -1,6 +1,6 @@
 #pragma once
 
-#include <yt/yt/core/misc/error_code.h>
+#include <library/cpp/yt/error/error_code.h>
 
 #include <library/cpp/yt/misc/enum.h>
 
@@ -116,6 +116,7 @@ struct TIndexParseResult;
 ////////////////////////////////////////////////////////////////////////////////
 
 class TWireString;
+class TMutableWireString;
 class TWireStringPart;
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -84,9 +84,9 @@ private:
             Owner_->OnRequestCompleted();
         }
 
-        void HandleError(TError error) override
+        void HandleError(TError error, const std::string& address) override
         {
-            UnderlyingHandler_->HandleError(std::move(error));
+            UnderlyingHandler_->HandleError(std::move(error), address);
             Owner_->OnRequestCompleted();
         }
 
@@ -126,7 +126,7 @@ private:
 
     using TEntryPtr = TIntrusivePtr<TEntry>;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, SpinLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, SpinLock_);
     std::queue<TEntryPtr> Queue_;
     bool RequestInProgress_ = false;
 

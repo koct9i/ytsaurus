@@ -2,11 +2,13 @@
 
 #include <yt/yt/ytlib/exec_node/public.h>
 
+#include <yt/yt/library/nbd/chunk/public.h>
+
 #include <yt/yt/library/tracing/jaeger/sampler.h>
 
 #include <yt/yt/library/profiling/solomon/config.h>
 
-#include <yt/yt/server/lib/signature/components/config.h>
+#include <yt/yt/library/signature/components/config.h>
 
 #include <yt/yt/core/misc/config.h>
 
@@ -110,7 +112,7 @@ void TSlotManagerConfig::Register(TRegistrar registrar)
         for (const auto& numaNode : config->NumaNodes) {
             if (numaNodeIds.contains(numaNode->NumaNodeId)) {
                 THROW_ERROR_EXCEPTION("Numa nodes ids must be unique in \"numa_nodes\" list, but duplicate found")
-                    << TErrorAttribute("numa_node_id", numaNode->NumaNodeId);
+                    .With("numa_node_id", numaNode->NumaNodeId);
             }
             numaNodeIds.insert(numaNode->NumaNodeId);
         }
@@ -188,9 +190,6 @@ void TSlotManagerDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("enable_async_artifact_copy", &TThis::EnableAsyncArtifactCopy)
         .Default(false);
 
-    registrar.Parameter("artifact_pipe_size", &TThis::ArtifactPipeSize)
-        .Default(1_MB);
-
     registrar.Parameter("copy_rate_aggregator_half_life", &TThis::CopyRateAggregatorHalfLife)
         .Default(TDuration::Minutes(1));
 
@@ -253,6 +252,9 @@ void TLayerCacheDynamicConfig::Register(TRegistrar registrar)
 void TVolumeManagerDynamicConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("throw_on_prepare_volume", &TThis::ThrowOnPrepareVolume)
+        .Default(false);
+
+    registrar.Parameter("throw_on_prepare_layers", &TThis::ThrowOnPrepareLayers)
         .Default(false);
 
     registrar.Parameter("layer_cache", &TThis::LayerCache)
@@ -487,6 +489,8 @@ void TControllerAgentConnectorDynamicConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("resend_full_job_info", &TThis::ResendFullJobInfo)
         .Default(true);
+    registrar.Parameter("omit_data_statistics_from_yson", &TThis::OmitDataStatisticsFromYson)
+        .Default(false);
 }
 
 void FormatValue(TStringBuilderBase* builder, const TControllerAgentConnectorDynamicConfig& config, TStringBuf spec)
@@ -743,7 +747,8 @@ void TJobCommonConfig::Register(TRegistrar registrar)
         .Default("root");
 
     registrar.Parameter("statistics_output_table_count_limit", &TThis::StatisticsOutputTableCountLimit)
-        .Default();
+        .Default()
+        .GreaterThanOrEqual(0);
 
     registrar.Parameter("job_throttler", &TThis::JobThrottler)
         .DefaultNew();
@@ -840,7 +845,7 @@ void TNbdClientConfig::Register(TRegistrar registrar)
     registrar.Parameter("reconnect_timeout", &TThis::ReconnectTimeout)
         .Default(TDuration::Seconds(10));
     registrar.Parameter("connection_count", &TThis::ConnectionCount)
-        .Default(DefaultNbdMultiplexingParallelism);
+        .Default(NNbd::NChunk::DefaultNbdMultiplexingParallelism);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -908,9 +913,6 @@ void TJobProxyConfig::Register(TRegistrar registrar)
         .Default(TDuration::Seconds(5));
 
     registrar.Parameter("job_proxy_send_heartbeat_before_abort", &TThis::JobProxySendHeartbeatBeforeAbort)
-        .Default(false);
-
-    registrar.Parameter("test_root_fs", &TThis::TestRootFS)
         .Default(false);
 
     registrar.Parameter("test_poll_job_shell", &TThis::TestPollJobShell)
@@ -1037,7 +1039,7 @@ void TExecNodeConfig::Register(TRegistrar registrar)
             for (int idx = 0; idx < std::ssize(config->JobProxyLogManager->Locations); ++idx) {
                 THROW_ERROR_EXCEPTION_IF(
                     config->JobProxyLogManager->Locations[idx]->Path.empty(),
-                    "Location has empty path (LocationIndex: %v)",
+                    "Location with index %v has empty path",
                     idx);
             }
         }

@@ -139,7 +139,14 @@ struct TBundleControllerDynamicConfig
     std::optional<TDuration> RemoveInstanceCypressNodeAfter;
     std::optional<TDuration> OfflineInstanceGracePeriod;
 
+    // When set, an instance that has been offline longer than threshold
+    // is scheduled for deallocation. Ignored in the without-allocations mode.
+    std::optional<TDuration> DeallocateOfflineInstanceAfter;
+
     int MaxConcurrentCypressWriteRequests;
+
+    // Restricts maintenance removal to requests created by the current user.
+    bool RemoveMaintenanceRequestsOnlyByCurrentUser;
 
     // Limits the number of nodes which are released via decommission.
     // Used to throttle tablet cell restart rate.

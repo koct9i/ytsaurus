@@ -103,13 +103,13 @@ private:
 
     bool Started_ = false;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, SpinLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, SpinLock_);
     THashMap<TYPath, NYson::TYsonProducer> PathToProducer_;
     IMapNodePtr Root_;
 
     void Update()
     {
-        YT_LOG_DEBUG("Started updating monitoring state");
+        YT_TLOG_DEBUG("Started updating monitoring state");
 
         YT_PROFILE_TIMING("/monitoring/update_time") {
             auto newRoot = GetEphemeralNodeFactory()->CreateMap();
@@ -132,7 +132,7 @@ private:
                 }
             }
         }
-        YT_LOG_DEBUG("Finished updating monitoring state");
+        YT_TLOG_DEBUG("Finished updating monitoring state");
     }
 
     IMapNodePtr GetRoot()

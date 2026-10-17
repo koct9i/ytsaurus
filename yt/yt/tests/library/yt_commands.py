@@ -1465,6 +1465,19 @@ class Operation(object):
     def get_job_count(self, state, from_orchid=True, verbose=False):
         if from_orchid:
             base_path = self.get_path() + "/controller_orchid/progress/jobs/"
+        elif exists("//sys/operations_archive"):
+            id_hi, id_lo = uuid_to_parts(self.id)
+            rows = lookup_rows(
+                "//sys/operations_archive/ordered_by_id",
+                [{"id_hi": id_hi, "id_lo": id_lo}],
+            )
+            if not rows:
+                return 0
+            jobs = (rows[0].get("progress") or {}).get("jobs", {})
+            value = jobs.get(state, 0)
+            if state == "aborted" or state == "completed":
+                value = value.get("total", 0) if isinstance(value, dict) else 0
+            return value
         else:
             base_path = self.get_path() + "/@progress/jobs/"
 
@@ -2156,6 +2169,25 @@ def create_account_resource_usage_lease(account, transaction_id, **kwargs):
     return execute_command("create", kwargs, parse_yson=True)
 
 
+def _is_pool_tree_orchid_ready(name):
+    if not exists(yt_scheduler_helpers.scheduler_orchid_pool_tree_path(name)):
+        return False
+
+    new_orchid_path = yt_scheduler_helpers.scheduler_new_orchid_pool_tree_path(name)
+    if not exists(new_orchid_path):
+        return False
+
+    # The tree orchid nodes exist as soon as the tree is registered, but every snapshot-backed
+    # child throws "Pool tree orchid is not ready yet" until the first fair share update
+    # publishes a tree snapshot.
+    try:
+        get(new_orchid_path + "/node_count")
+    except YtResponseError:
+        return False
+
+    return True
+
+
 def create_pool_tree(name, config=None, wait_for_orchid=True, allow_patching=True, **kwargs):
     kwargs["type"] = "scheduler_pool_tree"
     if "attributes" not in kwargs:
@@ -2180,11 +2212,7 @@ def create_pool_tree(name, config=None, wait_for_orchid=True, allow_patching=Tru
 
     execute_command("create", kwargs, parse_yson=True)
     if wait_for_orchid:
-        wait(
-            lambda:
-                exists(yt_scheduler_helpers.scheduler_orchid_pool_tree_path(name))
-                and exists(yt_scheduler_helpers.scheduler_new_orchid_pool_tree_path(name))
-        )
+        wait(lambda: _is_pool_tree_orchid_ready(name))
 
 
 def remove_pool_tree(name, wait_for_orchid=True, **kwargs):
@@ -2232,7 +2260,7 @@ def remove_user(name, **kwargs):
 
 
 def make_random_string(length=10):
-    return "".join(random.choice(ascii_letters) for _ in range(length))
+    return "".join(random.choices(ascii_letters, k=length))
 
 
 def create_test_tables(row_count=1, **kwargs):
@@ -2300,6 +2328,15 @@ def create_network_project(name, **kwargs):
 
 def remove_network_project(name, **kwargs):
     remove("//sys/network_projects/" + name, **kwargs)
+
+
+def create_master_cell_group(name, cell_tags, **kwargs):
+    kwargs["type"] = "master_cell_group"
+    if "attributes" not in kwargs:
+        kwargs["attributes"] = dict()
+    kwargs["attributes"]["name"] = name
+    kwargs["attributes"]["cell_tags"] = cell_tags
+    return execute_command("create", kwargs, parse_yson=True)
 
 
 def create_proxy_role(name, proxy_kind, **kwargs):
@@ -2675,6 +2712,15 @@ def make_ace(
     if subject_tag_filter is not None:
         ace["subject_tag_filter"] = subject_tag_filter
 
+    return ace
+
+
+def make_rl_ace(users, row_access_predicate=None, mode=None, permission="read"):
+    ace = make_ace("allow", users, permission)
+    if row_access_predicate is not None:
+        ace["row_access_predicate"] = row_access_predicate
+    if mode is not None:
+        ace["inapplicable_row_access_predicate_mode"] = mode
     return ace
 
 ##################################################################
@@ -3593,6 +3639,13 @@ def update_controller_agent_config(path, value, wait_for_orchid=True):
             wait(lambda: get("{}/{}".format(orchid_config_path, path), default=None) == value)
 
 
+def remove_default_layer_path():
+    remove("//sys/controller_agents/config/default_layer_path", force=True)
+    for agent in ls("//sys/controller_agents/instances"):
+        orchid_config_path = "//sys/controller_agents/instances/{}/orchid/controller_agent/config".format(agent)
+        wait(lambda: get(orchid_config_path + "/default_layer_path", default=None) is None)
+
+
 @contextlib.contextmanager
 def remember_controller_agent_config():
     old_config = get("//sys/controller_agents/config")
@@ -3738,11 +3791,12 @@ def make_externalized_tx_id(tx_id, externalizing_cell_tag):
     # externalized_nested_tx: 6
     externalized_type = 5 if original_type == 1 else 6
 
+    # Must match MakeExternalizedTransactionId.
     return "-".join([
         f"{parts[0]:x}",
         f"{parts[1]:x}",
-        f"{shifted_native_cell_tag | externalized_type:x}",
-        f"{parts[3] | (int(externalizing_cell_tag) << 16):x}"])
+        f"{(int(externalizing_cell_tag) << 16) | externalized_type:x}",
+        f"{(parts[3] & 0xffff) | shifted_native_cell_tag:x}"])
 
 
 def start_distributed_write_session(path: str, cookie_count: int, **kwargs):

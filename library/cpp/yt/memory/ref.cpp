@@ -144,7 +144,7 @@ protected:
         if (options.InitializeStorage) {
             ::memset(static_cast<TDerived*>(this)->GetBegin(), 0, Size_);
         } else {
-            PoisonUnitializedOrFreedMemory(GetRef());
+            PoisonUninitializedOrFreedMemory(GetRef());
         }
 #ifdef YT_ENABLE_REF_COUNTED_TRACKING
         TRefCountedTrackerFacade::AllocateTagInstance(Cookie_);
@@ -154,7 +154,7 @@ protected:
 
     void Finalize()
     {
-        PoisonUnitializedOrFreedMemory(GetRef());
+        PoisonUninitializedOrFreedMemory(GetRef());
     }
 };
 
@@ -378,11 +378,6 @@ TSharedRef TSharedRef::FromStringImpl(TString str, TRefCountedTypeCookie tagCook
     auto holder = New<TStringHolder<TString>>(std::move(str), tagCookie);
     auto ref = TRef::FromString(holder->String());
     return TSharedRef(ref, std::move(holder));
-}
-
-TSharedRef TSharedRef::FromString(const char* str)
-{
-    return FromString(std::string(str));
 }
 
 TSharedRef TSharedRef::FromBlob(TBlob&& blob)

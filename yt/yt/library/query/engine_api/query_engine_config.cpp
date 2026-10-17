@@ -32,6 +32,10 @@ void TQueryEngineDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("expression_builder_version", &TThis::ExpressionBuilderVersion)
         .Optional();
 
+    registrar.Parameter("max_projection_count", &TThis::MaxProjectionCount)
+        .GreaterThan(0)
+        .Default(DefaultMaxProjectionCount);
+
     registrar.Parameter("codegen_optimization_level", &TThis::OptimizationLevel)
         .Optional();
 
@@ -51,13 +55,24 @@ void TQueryEngineDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("allow_reverse_scan_for_order_by", &TThis::AllowReverseScanForOrderBy)
         .Optional();
 
+    // COMPAT(dtorilov): Remove after 26.2.
+    registrar.Parameter("enable_scalar_subquery_order_by_and_limit", &TThis::EnableScalarSubqueryOrderByAndLimit)
+        .Optional();
+
     registrar.Parameter("allow_heavy_range_inference_in_joins", &TThis::AllowHeavyRangeInferenceInJoins)
         .Optional();
 
     registrar.Parameter("prefetch_join_tables", &TThis::PrefetchJoinTables)
         .Optional();
 
+    registrar.Parameter("allow_multiple_join_subqueries_for_non_lookup_joins", &TThis::AllowMultipleJoinSubqueriesForNonLookupJoins)
+        .Optional();
+
     registrar.Parameter("join_cache_size", &TThis::JoinCacheSize)
+        .GreaterThan(0)
+        .Optional();
+
+    registrar.Parameter("max_subsplits_per_tablet", &TThis::MaxSubsplitsPerTablet)
         .GreaterThan(0)
         .Optional();
 }
@@ -77,7 +92,8 @@ void SetupSingletonConfigParameter(TYsonStructParameter<TQueryEngineDynamicConfi
 void ConfigureSingleton(const TQueryEngineConfigPtr& config)
 {
 #ifdef YT_VERBOSE_CHANGING_QUERY_ENGINE_CONFIG
-    YT_LOG_INFO("Configure QueryEngine (Config: %v)", ConvertToYsonString(config, EYsonFormat::Text));
+    YT_TLOG_INFO("Configure QueryEngine")
+        .With("Config", ConvertToYsonString(config, EYsonFormat::Text));
 #else
     Y_UNUSED(config);
 #endif

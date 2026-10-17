@@ -27,8 +27,8 @@ using namespace NChaosClient;
 using namespace NTabletClient;
 using namespace NTransactionClient;
 
-using NYT::ToProto;
 using NYT::FromProto;
+using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -39,13 +39,13 @@ constinit const auto Logger = ChaosNodeLogger;
 void ToProto(NProto::TExpiredReplicaHistory* protoExpiredHistory, const TExpiredReplicaHistory& expiredHistory)
 {
     ToProto(protoExpiredHistory->mutable_replica_id(), expiredHistory.ReplicaId);
-    protoExpiredHistory->set_retain_timestamp(expiredHistory.RetainTimestamp);
+    protoExpiredHistory->set_retain_timestamp(ToProto(expiredHistory.RetainTimestamp));
 }
 
 void FromProto(TExpiredReplicaHistory* expiredHistory, const NProto::TExpiredReplicaHistory& protoExpiredHistory)
 {
     FromProto(&expiredHistory->ReplicaId, protoExpiredHistory.replica_id());
-    expiredHistory->RetainTimestamp = protoExpiredHistory.retain_timestamp();
+    expiredHistory->RetainTimestamp = FromProto<NTransactionClient::TTimestamp>(protoExpiredHistory.retain_timestamp());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -86,7 +86,8 @@ private:
         try {
             GuardedObserve();
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(ex, "Error while replication card observation");
+            YT_TLOG_DEBUG("Error while replication card observation")
+                .With(ex);
         }
     }
 
@@ -97,9 +98,9 @@ private:
         i64 cardsPerRound = Config_->ReplicationCardCountPerRound;
         i64 roundCount = (std::ssize(replicationCardIds) + cardsPerRound - 1) / cardsPerRound;
 
-        YT_LOG_DEBUG("Starting replication card observer iteration (ReplicationCardCount: %v, Rounds: %v)",
-            std::ssize(replicationCardIds),
-            roundCount);
+        YT_TLOG_DEBUG("Starting replication card observer iteration")
+            .With("ReplicationCardCount", std::ssize(replicationCardIds))
+            .With("Rounds", roundCount);
 
         std::vector<TExpiredReplicaHistory> expiredHistories;
         for (i64 roundIndex = 0; roundIndex < roundCount; ++roundIndex) {
@@ -123,16 +124,16 @@ private:
                 expiredHistories.clear();
             }
 
-            YT_LOG_DEBUG("Replication card observer finished round (RoundIndex: %v, WillYield: %v)",
-                roundIndex,
-                roundIndex < roundCount - 1);
+            YT_TLOG_DEBUG("Replication card observer finished round")
+                .With("RoundIndex", roundIndex)
+                .With("WillYield", roundIndex < roundCount - 1);
 
             if (roundIndex < roundCount - 1) {
                 Yield();
             }
         }
 
-        YT_LOG_DEBUG("Finished replication card observer iteration");
+        YT_TLOG_DEBUG("Finished replication card observer iteration");
     }
 
     void ObserveReplicationCard(TReplicationCardId replicationCardId, std::vector<TExpiredReplicaHistory> *expiredHistories)

@@ -10,8 +10,6 @@
 #include "scheduling_policy.h"
 #include "attributes_list.h"
 
-#include <yt/yt/server/scheduler/strategy/policy/gpu/public.h>
-
 #include <yt/yt/server/scheduler/strategy/field_filter.h>
 #include <yt/yt/server/scheduler/strategy/pool_tree_element.h>
 #include <yt/yt/server/scheduler/strategy/pool_tree_snapshot.h>
@@ -556,9 +554,10 @@ public:
     //! Node management.
     void RegisterNode(NNodeTrackerClient::TNodeId nodeId, const std::string& nodeAddress) override;
     void UnregisterNode(NNodeTrackerClient::TNodeId nodeId) override;
+    std::vector<TExecNodeDescriptorPtr> GetNodeDescriptors() const override;
 
     //! Scheduling.
-    void ProcessSchedulingHeartbeat(
+    TFuture<void> ProcessSchedulingHeartbeat(
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
         const TPoolTreeSnapshotPtr& treeSnapshot,
         bool skipScheduleAllocations) override;
@@ -581,23 +580,24 @@ public:
         const std::vector<TAllocationUpdate>& allocationUpdates) override;
 
     //! Diagnostics.
-    void BuildSchedulingAttributesStringForNode(
+    NLogging::TLoggingTagList BuildSchedulingAttributeTagsForNode(
+        const TPoolTreeSnapshotPtr& treeSnapshot,
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
+        NNodeTrackerClient::TNodeId nodeId) const override;
+    void BuildSchedulingAttributesForNode(
+        const TPoolTreeSnapshotPtr& treeSnapshot,
         NNodeTrackerClient::TNodeId nodeId,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const override;
-    void BuildSchedulingAttributesForNode(NNodeTrackerClient::TNodeId nodeId, NYTree::TFluentMap fluent) const override;
-    void BuildSchedulingAttributesStringForOngoingAllocations(
+        NYTree::TFluentMap fluent) const override;
+    NLogging::TLoggingTagList BuildSchedulingAttributeTagsForOngoingAllocations(
         const TPoolTreeSnapshotPtr& treeSnapshot,
         const std::vector<TAllocationPtr>& allocations,
-        TInstant now,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const override;
+        TInstant now) const override;
 
-    void BuildElementLoggingStringAttributes(
+    NLogging::TLoggingTagList BuildElementLoggingTags(
         const TPoolTreeSnapshotPtr& treeSnapshot,
-        const TPoolTreeElement* element,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const override;
+        const TPoolTreeElement* element) const override;
 
-    void PopulateOrchidService(const NYTree::TCompositeMapServicePtr& orchidService) const override;
+    void PopulateOrchidService(const NYTree::ICompositeMapServicePtr& orchidService) const override;
 
     void ProfileOperation(
         const TPoolTreeOperationElement* element,
@@ -648,7 +648,6 @@ private:
     NProfiling::TProfiler Profiler_;
 
     NConcurrency::TPeriodicExecutorPtr SchedulingSegmentsManagementExecutor_;
-    NConcurrency::TPeriodicExecutorPtr MinNodeResourceLimitsCheckExecutor_;
 
     TEnumIndexedArray<EAllocationSchedulingStage, std::unique_ptr<TSchedulingStageProfilingCounters>> SchedulingStageProfilingCounters_;
 
@@ -685,7 +684,8 @@ private:
     // and we start building up-to-date persistent state.
     TInstant SchedulingSegmentsInitializationDeadline_;
     TPersistentStatePtr InitialPersistentState_ = New<TPersistentState>();
-    TPersistentStatePtr PersistentState_;
+    //! Updated once per scheduling segments management cycle and treated as immutable after publication.
+    NYTree::INodePtr CachedPersistentStateNode_;
 
     TPersistentNodeSchedulingSegmentStateMap InitialPersistentSchedulingSegmentNodeStates_;
     TPersistentOperationSchedulingSegmentStateMap InitialPersistentSchedulingSegmentOperationStates_;
@@ -707,6 +707,11 @@ private:
     void InitSchedulingProfilingCounters();
 
     //! Process node heartbeat, including allocation scheduling.
+    void DoProcessSchedulingHeartbeat(
+        const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
+        const TPoolTreeSnapshotPtr& treeSnapshot,
+        bool skipScheduleAllocations);
+
     TRunningAllocationStatistics ComputeRunningAllocationStatistics(
         const TNodeStatePtr& nodeState,
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
@@ -800,8 +805,6 @@ private:
     void ApplyNodeSchedulingSegmentsChanges(const TSetNodeSchedulingSegmentOptionsList& movedNodes);
 
     void ManageSchedulingSegments();
-
-    void CheckMinNodeResourceLimits();
 
     bool IsGpuTree() const;
 };

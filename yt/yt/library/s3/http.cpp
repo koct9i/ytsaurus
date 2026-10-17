@@ -278,14 +278,14 @@ private:
 
         auto Logger = S3Logger();
 
-        YT_LOG_DEBUG("Performing request (Method: %v, Protocol: %v, Host: %v, Port: %v, Path: %v, Region: %v, Service: %v)",
-            request.Method,
-            request.Protocol,
-            request.Host,
-            request.Port,
-            request.Path,
-            request.Region,
-            request.Service);
+        YT_TLOG_DEBUG("Performing request")
+            .With("Method", request.Method)
+            .With("Protocol", request.Protocol)
+            .With("Host", request.Host)
+            .With("Port", request.Port)
+            .With("Path", request.Path)
+            .With("Region", request.Region)
+            .With("Service", request.Service);
 
         auto dialerContext = New<TDialerContext>();
         dialerContext->Host = request.Host;
@@ -318,7 +318,12 @@ private:
     TSharedRef FormHeaders(const THttpRequest& request)
     {
         TStringStream stream;
-        stream << ToHttpString(request.Method) << " " << request.Path;
+        stream << ToHttpString(request.Method) << " ";
+        auto encodedPath = NCrypto::UriEncode(request.Path, /*isObjectPath*/ true);
+        if (encodedPath.empty() || encodedPath[0] != '/') {
+            stream << '/';
+        }
+        stream << encodedPath;
         {
             auto first = true;
             for (const auto& [key, value] : request.Query) {
@@ -328,9 +333,9 @@ private:
                 } else {
                     stream << "&";
                 }
-                stream << key;
+                stream << NCrypto::UriEncode(key, /*isObjectPath*/ false);
                 stream << "=";
-                stream << value;
+                stream << NCrypto::UriEncode(value, /*isObjectPath*/ false);
             }
             stream << " HTTP/1.1\r\n";
         }

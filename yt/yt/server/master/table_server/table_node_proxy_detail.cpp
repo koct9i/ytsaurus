@@ -114,8 +114,8 @@ using namespace NYson;
 using namespace NYTree;
 using namespace NServer;
 
-using NYT::ToProto;
 using NYT::FromProto;
+using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -226,6 +226,9 @@ void TTableNodeProxy::ListSystemAttributes(std::vector<TAttributeDescriptor>* de
     // TODO(savrus) remove "unmerged_row_count" in 20.0
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::UnmergedRowCount)
         .SetPresent(isDynamic && isSorted));
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::CumulativeDataWeight)
+        .SetExternal(isExternal)
+        .SetPresent(isDynamic && !isSorted));
     descriptors->push_back(EInternedAttributeKey::Sorted);
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::KeyColumns)
         .SetReplicated(true));
@@ -462,7 +465,7 @@ void TTableNodeProxy::ListSystemAttributes(std::vector<TAttributeDescriptor>* de
         .SetWritable(true)
         .SetReplicated(true)
         .SetRemovable(true)
-        .SetPresent(table->GetHunkStorage()));
+        .SetPresent(isDynamic));
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::AssignedMountConfigExperiments)
         .SetPresent(isDynamic)
         .SetOpaque(true));
@@ -525,6 +528,21 @@ bool TTableNodeProxy::GetBuiltinAttribute(TInternedAttributeKey key, IYsonConsum
             BuildYsonFluently(consumer)
                 .Value(statistics.RowCount);
             return true;
+
+        case EInternedAttributeKey::CumulativeDataWeight: {
+            if (!isDynamic || isSorted || isExternal) {
+                break;
+            }
+
+            const auto* table = GetThisImpl();
+            const auto* chunkList = table->GetChunkList();
+            const auto& chunkListStatistics = chunkList->Statistics();
+
+            BuildYsonFluently(consumer)
+                .Value(chunkListStatistics.LogicalDataWeight + chunkListStatistics.LogicalHunkDataWeight);
+
+            return true;
+        }
 
         case EInternedAttributeKey::Sorted:
             BuildYsonFluently(consumer)
@@ -1078,13 +1096,15 @@ bool TTableNodeProxy::GetBuiltinAttribute(TInternedAttributeKey key, IYsonConsum
         }
 
         case EInternedAttributeKey::HunkStorageId: {
-            const auto* hunkStorage = table->GetHunkStorage();
-            if (!hunkStorage) {
+            if (!isDynamic) {
                 break;
             }
 
+            const auto* hunkStorage = table->GetHunkStorage();
+            auto hunkStorageId = hunkStorage ? hunkStorage->GetId() : NullObjectId;
             BuildYsonFluently(consumer)
-                .Value(hunkStorage->GetId());
+                .Value(hunkStorageId);
+
             return true;
         }
 
@@ -1098,7 +1118,7 @@ bool TTableNodeProxy::GetBuiltinAttribute(TInternedAttributeKey key, IYsonConsum
             NTabletNode::TTableConfigExperiment::TTableDescriptor descriptor{
                 .TableId = table->GetId(),
                 .TablePath = GetPath(),
-                .TabletCellBundle = table->TabletCellBundle()->GetName(),
+                .TabletCellBundle = table->GetTabletCellBundle()->GetName(),
                 .InMemoryMode = table->GetInMemoryMode(),
                 .Sorted = table->IsSorted(),
                 .Replicated = table->IsReplicated(),
@@ -1503,6 +1523,7 @@ bool TTableNodeProxy::RemoveBuiltinAttribute(TInternedAttributeKey key)
 
         case EInternedAttributeKey::HunkStorageId: {
             auto* lockedTable = LockThisImpl();
+            lockedTable->ValidateAllTabletsUnmounted("Cannot remove hunk storage");
             lockedTable->ResetHunkStorage();
             return true;
         }
@@ -1609,8 +1630,8 @@ bool TTableNodeProxy::SetBuiltinAttribute(TInternedAttributeKey key, const TYson
 
             auto codecId = ConvertTo<NErasure::ECodec>(value);
             if (codecId != NErasure::ECodec::None) {
-                auto* codec = NErasure::GetCodec(codecId);
-                if (!codec->IsBytewise()) {
+                auto* codec = NErasure::GetCodecOrThrow(codecId);
+                if (!codec->GetParams().Bytewise) {
                     THROW_ERROR_EXCEPTION("%Qlv codec is not suitable for erasure hunks",
                         codecId);
                 }
@@ -1932,6 +1953,7 @@ bool TTableNodeProxy::SetBuiltinAttribute(TInternedAttributeKey key, const TYson
             auto objectId = ConvertTo<TObjectId>(value);
             auto* object = objectManager->GetObjectOrThrow(objectId);
 
+            lockedTable->ValidateAllTabletsUnmounted("Cannot reset hunk storage");
             lockedTable->ValidateAndSetHunkStorage(object);
 
             return true;
@@ -2118,12 +2140,17 @@ void TTableNodeProxy::ValidatePermission(
 {
     const auto& securityManager = Bootstrap_->GetSecurityManager();
     auto successfulValidationResult = securityManager->ValidatePermission(object, permission);
-    YT_LOG_ALERT_IF(
-        CachedHasRowLevelAce_ && *CachedHasRowLevelAce_ != successfulValidationResult.HasRowLevelAce,
-        "Cached row-level ACE presence info differs from the recently computed one (CachedHasRowLevelAce: %v, NewHasRowLevelAce: %v)",
-        *CachedHasRowLevelAce_,
-        successfulValidationResult.HasRowLevelAce);
-    CachedHasRowLevelAce_ = successfulValidationResult.HasRowLevelAce;
+    // NB: When checking for anything other than read-like permissions, permission checker
+    // will not fill #HasRowLevelAce. If we then reuse the proxy for different permission
+    // checks (e.g. in overwriting copy) such non-read checks would spoil the cache.
+    if (object == Object_ && Any(permission & (EPermission::Read | EPermission::FullRead))) {
+        YT_TLOG_ALERT_IF(
+            CachedHasRowLevelAce_ && *CachedHasRowLevelAce_ != successfulValidationResult.HasRowLevelAce,
+            "Cached row-level ACE presence info differs from the recently computed one")
+            .With("CachedHasRowLevelAce", *CachedHasRowLevelAce_)
+            .With("NewHasRowLevelAce", successfulValidationResult.HasRowLevelAce);
+        CachedHasRowLevelAce_ = successfulValidationResult.HasRowLevelAce;
+    }
 }
 
 void TTableNodeProxy::RemoveSelf(TReqRemove* request, TRspRemove* response, const TCtxRemovePtr& context)
@@ -2153,7 +2180,8 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, ReshardAutomatic)
 
     bool keepActions = request->keep_actions();
 
-    context->SetRequestInfo("KeepActions: %v", keepActions);
+    context->AnnotateRequest()
+        .With("KeepActions", keepActions);
 
     ValidateNoTransaction();
 
@@ -2171,7 +2199,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, GetMountInfo)
     DeclareNonMutating();
     SuppressAccessTracking();
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     const auto& dynamicConfig = Bootstrap_->GetConfigManager()->GetConfig()->TableManager;
     if (const auto& delay = dynamicConfig->Testing.GetMountInfoDelay) {
@@ -2189,6 +2217,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, GetMountInfo)
     ToProto(response->mutable_schema(), trunkTable->GetSchema()->AsCompactTableSchema());
     response->set_enable_detailed_profiling(trunkTable->GetEnableDetailedProfiling());
     response->set_serialization_type(ToProto(trunkTable->GetSerializationType()));
+    response->set_commit_ordering(ToProto(trunkTable->GetCommitOrdering()));
 
     THashSet<TTabletCell*> cells;
     for (auto tabletBase : trunkTable->Tablets()) {
@@ -2248,11 +2277,11 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, GetMountInfo)
         ToProto(response->mutable_hunk_storage_id(), hunkStorage->GetId());
     }
 
-    context->SetResponseInfo("TabletCount: %v, TabletCellCount: %v, ReplicaCount: %v, IndexCount: %v",
-        response->tablets_size(),
-        response->tablet_cells_size(),
-        response->replicas_size(),
-        response->indices_size());
+    context->AnnotateResponse()
+        .With("TabletCount", response->tablets_size())
+        .With("TabletCellCount", response->tablet_cells_size())
+        .With("ReplicaCount", response->replicas_size())
+        .With("IndexCount", response->indices_size());
 
     context->Reply();
 }
@@ -2313,31 +2342,39 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
         options.ClipTimestamp = FromProto<TTimestamp>(request->clip_timestamp());
     }
 
-    auto dynamicConfig = Bootstrap_->GetConfigManager()->GetConfig()->TableManager;
-    auto maxSchemaMemoryUsageToLog = dynamicConfig->MaxSchemaMemoryUsageToLog;
+    const auto& config = Bootstrap_->GetConfigManager()->GetConfig();
+    const auto& tableManagerConfig = config->TableManager;
+    auto maxSchemaMemoryUsageToLog = tableManagerConfig->MaxSchemaMemoryUsageToLog;
 
-    if (options.ColumnToConstraint && !dynamicConfig->EnableColumnConstraintsForTables) {
+    if (options.ColumnToConstraint && !tableManagerConfig->EnableColumnConstraintsForTables) {
         THROW_ERROR_EXCEPTION("Table schema alter of tables with column constraints is prohibited by system administrator");
     }
 
     const auto& tableManager = Bootstrap_->GetTableManager();
-    context->SetRequestInfo("Dynamic: %v, UpstreamReplicaId: %v, SchemaModification: %v, ReplicationProgress: %v, "
-        "ClipTimestamp: %v, SchemaId: %v, SchemaMemoryUsage: %v, Schema: %v, ColumnToConstraint: %v",
-        options.Dynamic,
-        options.UpstreamReplicaId,
-        options.SchemaModification,
-        options.ReplicationProgress,
-        options.ClipTimestamp,
-        options.SchemaId,
-        options.Schema ? options.Schema->GetMemoryUsage() : 0,
-        MakeTableSchemaTruncatedFormatter(tableManager->GetHeavyTableSchemaSync(options.Schema), maxSchemaMemoryUsageToLog),
-        MakeShrunkFormattableView(
-            options.ColumnToConstraint ? *options.ColumnToConstraint : TColumnNameToConstraintMap(),
-            TDefaultFormatter(),
-            dynamicConfig->ColumnToConstraintLogLimit));
+    context->AnnotateRequest()
+        .With("Dynamic", options.Dynamic)
+        .With("UpstreamReplicaId", options.UpstreamReplicaId)
+        .With("SchemaModification", options.SchemaModification)
+        .With("ReplicationProgress", options.ReplicationProgress)
+        .With("ClipTimestamp", options.ClipTimestamp)
+        .With("SchemaId", options.SchemaId)
+        .With("SchemaMemoryUsage", options.Schema ? options.Schema->GetMemoryUsage() : 0)
+        .With("Schema", MakeTableSchemaTruncatedFormatter(tableManager->GetHeavyTableSchemaSync(options.Schema), maxSchemaMemoryUsageToLog))
+        .With("ColumnToConstraint", MakeShrunkFormattableView(options.ColumnToConstraint ? *options.ColumnToConstraint : TColumnNameToConstraintMap(), TDefaultFormatter(), tableManagerConfig->ColumnToConstraintLogLimit));
 
     const auto& tabletManager = Bootstrap_->GetTabletManager();
     auto* table = LockThisImpl();
+
+    if (options.Dynamic && !config->TabletManager->EnableLegacyDynamicityAlter) {
+        if (table->IsNative()) {
+            THROW_ERROR_EXCEPTION("Table dynamicity must be altered via the two-phase alter protocol");
+        } else {
+            YT_TLOG_ALERT("Legacy table alter request received on external cell")
+                .With("TableId", table->GetId())
+                .With("Dynamic", *options.Dynamic);
+        }
+    }
+
     auto dynamic = options.Dynamic.value_or(table->IsDynamic());
     auto schemaReceived = options.SchemaId || options.Schema;
 
@@ -2364,16 +2401,13 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
     if (dynamic && schemaReceived  && schema->IsSorted() && !schema->IsUniqueKeys()) {
         // COMPAT(h0pless): Change this to YT_VERIFY after schema migration is complete.
         auto heavySchema = tableManager->GetHeavyTableSchemaSync(schema);
-        YT_LOG_ALERT_IF(
-            !schema->IsUniqueKeys() && table->IsForeign(),
-            "Schema doesn't have UniqueKeys set to true on the external cell (TableId: %v, Schema: %v)",
-            table->GetId(),
-            heavySchema);
+        YT_TLOG_ALERT_IF(!schema->IsUniqueKeys() && table->IsForeign(), "Schema doesn't have UniqueKeys set to true on the external cell")
+            .With("TableId", table->GetId())
+            .With("Schema", heavySchema);
 
         schema = New<TCompactTableSchema>(heavySchema->ToUniqueKeys());
     }
 
-    const auto& config = Bootstrap_->GetConfigManager()->GetConfig();
     const auto& securityManager = Bootstrap_->GetSecurityManager();
 
     if (table->IsNative()) {
@@ -2390,11 +2424,10 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
                 try {
                     ValidateAdHocPermission(EPermission::FullRead);
                 } catch (const std::exception& ex) {
-                    YT_LOG_ALERT(
-                        ex,
-                        "User requested to alter table but lacks \"full_read\" permission (TableId: %v, User: %v)",
-                        table->GetId(),
-                        securityManager->GetAuthenticatedUser());
+                    YT_TLOG_ALERT("User requested to alter table but lacks \"full_read\" permission")
+                        .With("TableId", table->GetId())
+                        .With("User", securityManager->GetAuthenticatedUser())
+                        .With(ex);
                 }
                 break;
             }
@@ -2521,56 +2554,16 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
             table->ValidateAllTabletsUnmounted("Cannot set clip timestamp");
         }
 
-        const auto& config = Bootstrap_->GetConfigManager()->GetConfig();
-        const auto& tableManager = Bootstrap_->GetTableManager();
         auto newTableSchema = tableManager->GetHeavyTableSchemaSync(schema);
         auto oldTableSchema = tableManager->GetHeavyTableSchemaSync(table->GetSchema());
 
-        ValidateTableSchemaUpdateInternal(
+        ValidateTableSchemaAlter(
+            tableManager,
+            config,
+            table,
             *oldTableSchema,
             *newTableSchema,
-            GetSchemaUpdateEnabledFeatures(config),
-            dynamic,
-            table->IsEmpty() && !table->IsDynamic(),
-            config->AllowAlterKeyColumnToAny);
-
-        if (table->IsDynamic()) {
-            if (auto index = table->GetIndexTo()) {
-                auto* indexTableNode = tableManager->GetTableNodeOrThrow(index->GetTableId());
-                auto indexTableSchema = tableManager->GetHeavyTableSchemaSync(indexTableNode->GetSchema());
-                ValidateIndexSchema(
-                    index->GetKind(),
-                    *indexTableSchema,
-                    *newTableSchema,
-                    index->Predicate(),
-                    index->EvaluatedColumnsSchema(),
-                    index->UnfoldedColumns());
-            }
-
-            for (const auto index : GetValuesSortedByKey(table->SecondaryIndices())) {
-                auto* indexTableNode = tableManager->GetTableNodeOrThrow(index->GetIndexTableId());
-                auto indexTableSchema = tableManager->GetHeavyTableSchemaSync(indexTableNode->GetSchema());
-                ValidateIndexSchema(
-                    index->GetKind(),
-                    *newTableSchema,
-                    *indexTableSchema,
-                    index->Predicate(),
-                    index->EvaluatedColumnsSchema(),
-                    index->UnfoldedColumns());
-            }
-        }
-
-        if (!config->EnableDescendingSortOrder ||
-            dynamic && !config->EnableDescendingSortOrderDynamic)
-        {
-            ValidateNoDescendingSortOrder(schema->GetSortOrders(), schema->GetKeyColumns());
-        }
-
-        if (!config->EnableTableColumnRenaming ||
-            dynamic && !config->EnableDynamicTableColumnRenaming)
-        {
-            ValidateNoRenamedColumns(*newTableSchema);
-        }
+            dynamic);
 
         if (options.Dynamic) {
             if (*options.Dynamic) {
@@ -2607,8 +2600,8 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, Alter)
 
     TMasterTableSchema* resultingSchema = nullptr;
     if (options.SchemaModification) {
-        YT_LOG_ALERT_IF(table->IsForeign(), "Alter request with schema modification present was received by an external cell (TableId: %v)",
-            table->GetId());
+        YT_TLOG_ALERT_IF(table->IsForeign(), "Alter request with schema modification present was received by an external cell")
+            .With("TableId", table->GetId());
         auto heavySchema = tableManager->GetHeavyTableSchemaSync(schema);
         schema = New<TCompactTableSchema>(heavySchema->ToModifiedSchema(*options.SchemaModification));
     }
@@ -2703,10 +2696,10 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, LockDynamicTable)
     DeclareMutating();
     ValidateTransaction();
 
-    auto timestamp = request->timestamp();
+    auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
 
-    context->SetRequestInfo("Timestamp: %v",
-        timestamp);
+    context->AnnotateRequest()
+        .With("Timestamp", timestamp);
 
     const auto& tabletManager = Bootstrap_->GetTabletManager();
     tabletManager->LockDynamicTable(
@@ -2721,7 +2714,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, CheckDynamicTableLock)
 {
     ValidateTransaction();
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     const auto& tabletManager = Bootstrap_->GetTabletManager();
     tabletManager->CheckDynamicTableLock(
@@ -2737,7 +2730,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, StartBackup)
     DeclareMutating();
     ValidateTransaction();
 
-    auto timestamp = request->timestamp();
+    auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
     auto backupMode = FromProto<EBackupMode>(request->backup_mode());
 
     auto upstreamReplicaId = request->has_upstream_replica_id()
@@ -2750,10 +2743,10 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, StartBackup)
     auto replicaDescriptors = FromProto<std::vector<TTableReplicaBackupDescriptor>>(
         request->replicas());
 
-    context->SetRequestInfo("Timestamp: %v, BackupMode: %v, ClockClusterTag: %v",
-        timestamp,
-        backupMode,
-        clockClusterTag);
+    context->AnnotateRequest()
+        .With("Timestamp", timestamp)
+        .With("BackupMode", backupMode)
+        .With("ClockClusterTag", clockClusterTag);
 
     const auto& backupManager = Bootstrap_->GetBackupManager();
     backupManager->StartBackup(
@@ -2776,7 +2769,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, StartRestore)
     auto replicaDescriptors = FromProto<std::vector<TTableReplicaBackupDescriptor>>(
         request->replicas());
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     const auto& backupManager = Bootstrap_->GetBackupManager();
     backupManager->StartRestore(
@@ -2791,7 +2784,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, CheckBackup)
 {
     ValidateTransaction();
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     const auto& backupManager = Bootstrap_->GetBackupManager();
     backupManager->CheckBackup(
@@ -2805,7 +2798,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, FinishBackup)
 {
     ValidateTransaction();
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     const auto& backupManager = Bootstrap_->GetBackupManager();
     context->ReplyFrom(backupManager->FinishBackup(GetThisImpl()));
@@ -2815,7 +2808,7 @@ DEFINE_YPATH_SERVICE_METHOD(TTableNodeProxy, FinishRestore)
 {
     ValidateTransaction();
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     const auto& backupManager = Bootstrap_->GetBackupManager();
     context->ReplyFrom(backupManager->FinishRestore(GetThisImpl()));

@@ -126,6 +126,10 @@ bool IsStringBinaryOp(EBinaryOp opcode);
 //! Cast values.
 TOwningValue CastValueWithCheck(TValue value, EValueType targetType);
 
+//! Throws if non-null operands have different or non-integral types.
+//! Returns a value with default Id and Flags, independent of operand metadata.
+TValue EvaluateModulo(TValue lhs, TValue rhs);
+
 ////////////////////////////////////////////////////////////////////////////////
 
 // TODO(lukyan): Use opaque data descriptor instead of ObjectId, CellId and MountRevision.
@@ -230,6 +234,16 @@ void FromProto(TQueryOptions* original, const NProto::TQueryOptions& serialized)
 
 TQueryOptions GetJoinSubqueryOptions(const TQueryOptions& queryOptions);
 
+struct TJoinSubqueryOptionsPatch
+{
+    std::optional<NTransactionClient::TTimestamp> Timestamp;
+    std::optional<int> MaxSubqueries;
+};
+
+TQueryOptions ApplyJoinSubqueryOptionsPatch(
+    const TQueryOptions& base,
+    const TJoinSubqueryOptionsPatch& patch);
+
 ////////////////////////////////////////////////////////////////////////////////
 
 struct TFeatureFlags
@@ -278,6 +292,8 @@ struct TPreparePlanFragmentOptions
     int HyperLogLogPrecision = 14;
     bool AllowJoinWithAsyncLastCommittedTimestampIfRequireSyncReplicaIsFalse = false; // COMPAT(dtorilov): Remove after 26.1.
     bool AllowReverseScanForOrderBy = false;
+    std::optional<int> MaxProjectionCount;
+    bool EnableScalarSubqueryOrderByAndLimit = false; // COMPAT(dtorilov): Remove after 26.2.
 };
 
 struct TPreparePlanFragmentContext

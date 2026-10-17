@@ -38,6 +38,9 @@ void TCypressProxyBootstrapConfig::Register(TRegistrar registrar)
     registrar.Parameter("heartbeat_period", &TThis::HeartbeatPeriod)
         .Default(TDuration::Seconds(15));
 
+    registrar.Parameter("api_service", &TThis::ApiService)
+        .DefaultNew();
+
     registrar.Parameter("testing", &TThis::Testing)
         .DefaultNew();
 }
@@ -132,6 +135,8 @@ void TCypressProxyDynamicConfig::Register(TRegistrar registrar)
         .DefaultNew();
     registrar.Parameter("ban_service", &TThis::BanService)
         .DefaultNew();
+    registrar.Parameter("api_service", &TThis::ApiService)
+        .DefaultNew();
     registrar.Parameter("thread_pool_size", &TThis::ThreadPoolSize)
         .Default(DefaultThreadPoolSize);
     registrar.Parameter("default_get_response_size_limit", &TThis::DefaultGetResponseSizeLimit)
@@ -143,6 +148,8 @@ void TCypressProxyDynamicConfig::Register(TRegistrar registrar)
         .Default(100);
     registrar.Parameter("vectorized_subbatch_size_overrides", &TThis::VectorizedSubbatchSizeOverrides)
         .Default();
+    registrar.Parameter("enable_access_log", &TThis::EnableAccessLog)
+        .Default(false);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

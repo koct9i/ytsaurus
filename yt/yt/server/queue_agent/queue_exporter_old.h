@@ -1,8 +1,7 @@
 #pragma once
 
-#include "private.h"
-
 #include "config.h"
+#include "private.h"
 #include "queue_exporter.h"
 #include "queue_exporter_profile_manager.h"
 
@@ -15,9 +14,9 @@
 
 #include <yt/yt/ytlib/chunk_client/helpers.h>
 
-#include <yt/yt/client/ypath/rich.h>
-
 #include <yt/yt/client/queue_client/config.h>
+
+#include <yt/yt/client/ypath/rich.h>
 
 #include <yt/yt/library/auth/auth.h>
 
@@ -110,7 +109,7 @@ private:
     const std::string ExportName_;
     const NQueueClient::TTablePath Queue_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, Lock_);
     NQueueClient::TQueueStaticExportConfigPtr ExportConfig_;
     TQueueExporterDynamicConfig DynamicConfig_;
     TQueueExportProgressOldPtr ExportProgress_;

@@ -131,6 +131,86 @@ std::string MakeIntAndStringArrow(const std::vector<int8_t>& data, const std::ve
     return MakeOutputFromRecordBatch(recordBatch);
 }
 
+std::string MakeLargeStringArrow(const std::vector<std::optional<std::string>>& data)
+{
+    arrow20::LargeStringBuilder builder;
+
+    for (const auto& value : data) {
+        if (value) {
+            Verify(builder.Append(*value));
+        } else {
+            Verify(builder.AppendNull());
+        }
+    }
+
+    auto stringArray = builder.Finish();
+    auto arrowSchema = arrow20::schema({arrow20::field("large_string", arrow20::large_utf8())});
+    std::vector<std::shared_ptr<arrow20::Array>> columns = {*stringArray};
+    auto recordBatch = arrow20::RecordBatch::Make(arrowSchema, columns[0]->length(), columns);
+
+    return MakeOutputFromRecordBatch(recordBatch);
+}
+
+std::string MakeLargeBinaryArrow(const std::vector<std::optional<std::string>>& data)
+{
+    arrow20::LargeBinaryBuilder builder;
+
+    for (const auto& value : data) {
+        if (value) {
+            Verify(builder.Append(*value));
+        } else {
+            Verify(builder.AppendNull());
+        }
+    }
+
+    auto binaryArray = builder.Finish();
+    auto arrowSchema = arrow20::schema({arrow20::field("large_binary", arrow20::large_binary())});
+    std::vector<std::shared_ptr<arrow20::Array>> columns = {*binaryArray};
+    auto recordBatch = arrow20::RecordBatch::Make(arrowSchema, columns[0]->length(), columns);
+
+    return MakeOutputFromRecordBatch(recordBatch);
+}
+
+std::string MakeYsonArrow(const std::vector<std::string>& data)
+{
+    arrow20::BinaryBuilder builder;
+
+    for (const auto& value : data) {
+        Verify(builder.Append(value));
+    }
+
+    auto binaryArray = builder.Finish();
+    auto metadata = std::make_shared<arrow20::KeyValueMetadata>(
+        std::vector{YTTypeMetadataKey},
+        std::vector{YTTypeMetadataValueYson});
+    auto arrowSchema = arrow20::schema({arrow20::field("any", arrow20::binary(), /*nullable*/ true, metadata)});
+    std::vector<std::shared_ptr<arrow20::Array>> columns = {*binaryArray};
+    auto recordBatch = arrow20::RecordBatch::Make(arrowSchema, columns[0]->length(), columns);
+
+    return MakeOutputFromRecordBatch(recordBatch);
+}
+
+std::string MakeFixedSizeBinaryArrow(const std::vector<std::optional<std::string>>& data)
+{
+    auto type = arrow20::fixed_size_binary(3);
+    arrow20::FixedSizeBinaryBuilder builder(type);
+
+    for (const auto& value : data) {
+        if (value) {
+            Verify(builder.Append(*value));
+        } else {
+            Verify(builder.AppendNull());
+        }
+    }
+
+    auto binaryArray = builder.Finish();
+    auto arrowSchema = arrow20::schema({arrow20::field("fixed_size_binary", type)});
+    std::vector<std::shared_ptr<arrow20::Array>> columns = {*binaryArray};
+    auto recordBatch = arrow20::RecordBatch::Make(arrowSchema, columns[0]->length(), columns);
+
+    return MakeOutputFromRecordBatch(recordBatch);
+}
+
 std::string MakeIntListArrow(const std::vector<std::optional<std::vector<i32>>>& data)
 {
     auto* pool = arrow20::default_memory_pool();
@@ -191,11 +271,13 @@ std::string MakeIntListDictionaryArrow(
     return MakeOutputFromRecordBatch(recordBatch);
 }
 
-std::string MakeStringListArrow(const std::vector<std::vector<std::string>>& data)
+template <class TBuilder>
+std::string MakeStringLikeListArrow(
+    const std::vector<std::vector<std::string>>& data,
+    std::shared_ptr<TBuilder> valueBuilder)
 {
     auto* pool = arrow20::default_memory_pool();
 
-    auto valueBuilder = std::make_shared<arrow20::StringBuilder>(pool);
     auto listBuilder = std::make_unique<arrow20::ListBuilder>(pool, valueBuilder);
 
     for (const auto& list : data) {
@@ -214,6 +296,34 @@ std::string MakeStringListArrow(const std::vector<std::vector<std::string>>& dat
     auto recordBatch = arrow20::RecordBatch::Make(arrowSchema, columns[0]->length(), columns);
 
     return MakeOutputFromRecordBatch(recordBatch);
+}
+
+std::string MakeStringListArrow(const std::vector<std::vector<std::string>>& data)
+{
+    return MakeStringLikeListArrow(
+        data,
+        std::make_shared<arrow20::StringBuilder>());
+}
+
+std::string MakeLargeStringListArrow(const std::vector<std::vector<std::string>>& data)
+{
+    return MakeStringLikeListArrow(
+        data,
+        std::make_shared<arrow20::LargeStringBuilder>());
+}
+
+std::string MakeLargeBinaryListArrow(const std::vector<std::vector<std::string>>& data)
+{
+    return MakeStringLikeListArrow(
+        data,
+        std::make_shared<arrow20::LargeBinaryBuilder>());
+}
+
+std::string MakeFixedSizeBinaryListArrow(const std::vector<std::vector<std::string>>& data)
+{
+    return MakeStringLikeListArrow(
+        data,
+        std::make_shared<arrow20::FixedSizeBinaryBuilder>(arrow20::fixed_size_binary(3)));
 }
 
 std::string MakeMapArrow(const std::vector<std::vector<i32>>& key, const std::vector<std::vector<i32>>& value)
@@ -776,6 +886,59 @@ TEST(TArrowParserTest, String)
     ASSERT_EQ(GetString(collectedRows.GetRowValue(2, "string")), "yt");
 }
 
+TEST(TArrowParserTest, LargeString)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("large_string", EValueType::String),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    parser->Read(MakeLargeStringArrow({"foo", std::nullopt, "bar"}));
+    parser->Finish();
+
+    ASSERT_EQ(collectedRows.Size(), 3);
+    ASSERT_EQ(GetString(collectedRows.GetRowValue(0, "large_string")), "foo");
+    ASSERT_TRUE(IsNull(collectedRows.GetRowValue(1, "large_string")));
+    ASSERT_EQ(GetString(collectedRows.GetRowValue(2, "large_string")), "bar");
+}
+
+TEST(TArrowParserTest, LargeBinary)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("large_binary", EValueType::String),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    parser->Read(MakeLargeBinaryArrow({"foo", std::nullopt, "bar"}));
+    parser->Finish();
+
+    ASSERT_EQ(collectedRows.Size(), 3);
+    ASSERT_EQ(GetString(collectedRows.GetRowValue(0, "large_binary")), "foo");
+    ASSERT_TRUE(IsNull(collectedRows.GetRowValue(1, "large_binary")));
+    ASSERT_EQ(GetString(collectedRows.GetRowValue(2, "large_binary")), "bar");
+}
+
+TEST(TArrowParserTest, FixedSizeBinary)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("fixed_size_binary", EValueType::String),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    parser->Read(MakeFixedSizeBinaryArrow({"foo", std::nullopt, "bar"}));
+    parser->Finish();
+
+    ASSERT_EQ(collectedRows.Size(), 3);
+    ASSERT_EQ(GetString(collectedRows.GetRowValue(0, "fixed_size_binary")), "foo");
+    ASSERT_TRUE(IsNull(collectedRows.GetRowValue(1, "fixed_size_binary")));
+    ASSERT_EQ(GetString(collectedRows.GetRowValue(2, "fixed_size_binary")), "bar");
+}
 
 std::string ConvertToYsonTextStringStable(const INodePtr& node, bool binary = false)
 {
@@ -849,6 +1012,63 @@ TEST(TArrowParserTest, ListOfStrings)
 
     auto secondNode = GetComposite(collectedRows.GetRowValue(1, "list"));
     ASSERT_EQ(ConvertToYsonTextStringStable(secondNode), "[\"42\";\"universe\";]");
+}
+
+TEST(TArrowParserTest, ListOfLargeStrings)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("list", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    parser->Read(MakeLargeStringListArrow({{"foo", "bar"}, {"42", "universe"}}));
+    parser->Finish();
+
+    auto firstNode = GetComposite(collectedRows.GetRowValue(0, "list"));
+    ASSERT_EQ(ConvertToYsonTextStringStable(firstNode), "[\"foo\";\"bar\";]");
+
+    auto secondNode = GetComposite(collectedRows.GetRowValue(1, "list"));
+    ASSERT_EQ(ConvertToYsonTextStringStable(secondNode), "[\"42\";\"universe\";]");
+}
+
+TEST(TArrowParserTest, ListOfLargeBinaries)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("list", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    parser->Read(MakeLargeBinaryListArrow({{"foo", "bar"}, {"baz", "qux"}}));
+    parser->Finish();
+
+    auto firstNode = GetComposite(collectedRows.GetRowValue(0, "list"));
+    ASSERT_EQ(ConvertToYsonTextStringStable(firstNode), "[\"foo\";\"bar\";]");
+
+    auto secondNode = GetComposite(collectedRows.GetRowValue(1, "list"));
+    ASSERT_EQ(ConvertToYsonTextStringStable(secondNode), "[\"baz\";\"qux\";]");
+}
+
+TEST(TArrowParserTest, ListOfFixedSizeBinaries)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("list", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    parser->Read(MakeFixedSizeBinaryListArrow({{"foo", "bar"}, {"baz", "qux"}}));
+    parser->Finish();
+
+    auto firstNode = GetComposite(collectedRows.GetRowValue(0, "list"));
+    ASSERT_EQ(ConvertToYsonTextStringStable(firstNode), "[\"foo\";\"bar\";]");
+
+    auto secondNode = GetComposite(collectedRows.GetRowValue(1, "list"));
+    ASSERT_EQ(ConvertToYsonTextStringStable(secondNode), "[\"baz\";\"qux\";]");
 }
 
 TEST(TArrowParserTest, Map)
@@ -1226,6 +1446,43 @@ TEST(TArrowParserTest, AnyColumn)
 
     ASSERT_EQ(GetInt64(collectedRows.GetRowValue(2, "integer")), 3);
     ASSERT_EQ(GetString(collectedRows.GetRowValue(2, "string")), "yt");
+}
+
+TEST(TArrowParserTest, YsonMetadata)
+{
+    auto tableSchema = New<TTableSchema>(std::vector{
+        TColumnSchema("any", EValueType::Any),
+    });
+
+    TCollectingValueConsumer collectedRows(tableSchema);
+
+    auto parser = CreateParserForArrow(&collectedRows);
+
+    std::vector<std::string> values = {"{a=1}", "[1;2]", "#", "\"str\""};
+    parser->Read(MakeYsonArrow(values));
+    parser->Finish();
+
+    ASSERT_EQ(collectedRows.Size(), std::ssize(values));
+    for (int rowIndex = 0; rowIndex < std::ssize(values); ++rowIndex) {
+        auto value = collectedRows.GetRowValue(rowIndex, "any");
+        EXPECT_EQ(value.Type, EValueType::Any);
+        EXPECT_EQ(std::string(value.AsStringBuf()), values[rowIndex]);
+    }
+}
+
+TEST(TArrowParserTest, InvalidYsonMetadata)
+{
+    for (const auto& value : {""s, "{"s, "<a=1>1"s}) {
+        auto tableSchema = New<TTableSchema>(std::vector{
+            TColumnSchema("any", EValueType::Any),
+        });
+
+        TCollectingValueConsumer collectedRows(tableSchema);
+
+        auto parser = CreateParserForArrow(&collectedRows);
+
+        EXPECT_THROW_WITH_SUBSTRING(parser->Read(MakeYsonArrow({value})), "is not a valid YSON");
+    }
 }
 
 TEST(TArrowParserTest, WrongListInput)

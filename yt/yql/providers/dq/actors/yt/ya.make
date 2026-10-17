@@ -1,4 +1,4 @@
-LIBRARY()
+YQL_LIBRARY()
 
 PEERDIR(
     contrib/ydb/library/actors/core
@@ -6,23 +6,26 @@ PEERDIR(
     contrib/ydb/library/yql/providers/dq/api/grpc
     contrib/ydb/library/yql/providers/dq/api/protos
     contrib/ydb/library/yql/providers/dq/common
-    contrib/ydb/library/yql/providers/dq/config
     contrib/ydb/library/yql/providers/dq/task_runner
     contrib/ydb/public/sdk/cpp/src/library/grpc/client
     yql/essentials/core/issue
     yql/essentials/providers/common/metrics
     yt/cpp/mapreduce/interface
+    yt/yql/providers/dq/config
     yt/yql/providers/yt/lib/log
 )
 
 IF (NOT OS_WINDOWS)
     PEERDIR(
+        library/cpp/yt/string
         yt/yt/client
     )
 ENDIF()
 
 SET(
     SOURCE
+    node_id_allocator.cpp
+    node_id_allocator.h
     nodeid_assigner.cpp
     nodeid_assigner.h
     resource_manager.cpp
@@ -52,6 +55,8 @@ SRCS(
     ${SOURCE}
 )
 
-YQL_LAST_ABI_VERSION()
-
 END()
+
+RECURSE_FOR_TESTS(
+    ut
+)

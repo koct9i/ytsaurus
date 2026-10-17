@@ -1,20 +1,18 @@
 #include "cypress_integration.h"
 
-#include "private.h"
-#include "chunk_location.h"
 #include "chunk.h"
-#include "chunk_view.h"
-#include "chunk_list.h"
+#include "chunk_manager.h"
+#include "chunk_replica_fetcher.h"
 #include "chunk_replicator.h"
-#include "domestic_medium.h"
 #include "chunks_samples.h"
+#include "data_node_tracker.h"
+#include "private.h"
 
 #include <yt/yt/server/master/cell_master/bootstrap.h>
+#include <yt/yt/server/master/cell_master/config.h>
+#include <yt/yt/server/master/cell_master/config_manager.h>
 #include <yt/yt/server/master/cell_master/hydra_facade.h>
 #include <yt/yt/server/master/cell_master/multicell_statistics_collector.h>
-
-#include <yt/yt/server/master/chunk_server/chunk_manager.h>
-#include <yt/yt/server/master/chunk_server/data_node_tracker.h>
 
 #include <yt/yt/server/master/cypress_server/virtual.h>
 
@@ -23,6 +21,8 @@
 #include <yt/yt/server/lib/object_server/helpers.h>
 
 #include <yt/yt/ytlib/cypress_client/cypress_ypath_proxy.h>
+
+#include <yt/yt/ytlib/object_client/object_service_proxy.h>
 
 #include <yt/yt/core/misc/collection_helpers.h>
 
@@ -493,7 +493,12 @@ private:
         } else if (IsLocal()) {
             return MakeFuture(GetFilteredChunkIds(limit));
         } else {
-            Bootstrap_->GetObjectService()->RequireLeader();
+            if (auto error = Bootstrap_->GetObjectService()->RequireLeaderAsync(); !error.IsOK()) {
+                return MakeFuture<std::vector<TObjectId>>(std::move(error));
+            }
+
+            const auto& securityManager = Bootstrap_->GetSecurityManager();
+            auto userNameToForward = securityManager->GetAuthenticatedUserNameToForward();
 
             const auto& chunkManager = Bootstrap_->GetChunkManager();
             auto channels = chunkManager->GetChunkReplicatorChannels();
@@ -505,6 +510,7 @@ private:
                 // TODO(nadya02): Set the correct timeout here.
                 proxy.SetDefaultTimeout(NRpc::HugeDoNotUseRpcRequestTimeout);
                 auto batchReq = proxy.ExecuteBatch();
+                batchReq->SetUser(userNameToForward);
                 auto req = TCypressYPathProxy::Enumerate(GetWellKnownPath(GetLocalChunkMapType()));
                 req->set_limit(limit);
                 batchReq->AddRequest(req, "enumerate");
@@ -642,10 +648,15 @@ private:
         } else if (IsLocal()) {
             return MakeFuture(GetFilteredChunkCount());
         } else {
-            Bootstrap_->GetObjectService()->RequireLeader();
+            if (auto error = Bootstrap_->GetObjectService()->RequireLeaderAsync(); !error.IsOK()) {
+                return MakeFuture<i64>(std::move(error));
+            }
 
             const auto& chunkManager = Bootstrap_->GetChunkManager();
             auto channels = chunkManager->GetChunkReplicatorChannels();
+
+            const auto& securityManager = Bootstrap_->GetSecurityManager();
+            auto userNameToForward = securityManager->GetAuthenticatedUserNameToForward();
 
             std::vector<TFuture<TIntrusivePtr<TObjectYPathProxy::TRspGet>>> responseFutures;
             responseFutures.reserve(channels.size());
@@ -654,7 +665,7 @@ private:
                 // TODO(nadya02): Set the correct timeout here.
                 proxy.SetDefaultTimeout(NRpc::HugeDoNotUseRpcRequestTimeout);
                 auto req = TYPathProxy::Get(GetWellKnownPath(GetLocalChunkMapType()) + "/@count");
-                responseFutures.push_back(proxy.Execute(req));
+                responseFutures.push_back(proxy.ExecuteAs(userNameToForward, req));
             }
 
             return AllSucceeded(std::move(responseFutures))

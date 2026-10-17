@@ -145,7 +145,6 @@ TCodegenExpression MakeCodegenTransformExpr(
 
 TCodegenExpression MakeCodegenCaseExpr(
     std::optional<size_t> optionalOperandId,
-    std::optional<EValueType> optionalOperandType,
     std::vector<std::pair<size_t, size_t>> whenThenExpressionIds,
     std::optional<size_t> defaultId,
     EValueType resultType,
@@ -177,6 +176,19 @@ void MakeCodegenSubqueryWriteOp(
     TCodegenSource* codegenSource,
     size_t producerSlot,
     size_t rowSize);
+
+size_t MakeCodegenNestedOrderOp(
+    TCodegenSource* codegenSource,
+    size_t* slotCount,
+    size_t producerSlot,
+    TCodegenFragmentInfosPtr fragmentInfos,
+    std::vector<size_t> exprIds,
+    std::vector<EValueType> orderColumnTypes,
+    std::vector<EValueType> sourceSchema,
+    std::vector<bool> isDesc,
+    TComparerManagerPtr comparerManager,
+    int offsetId,
+    int limitId);
 
 TCodegenExpression MakeCodegenSubqueryExpr(
     TCodegenSource codegenSource,

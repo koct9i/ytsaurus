@@ -79,7 +79,8 @@ public:
         const std::vector<std::string>& strongOrderingTags,
         const std::vector<TCellId>& cellIdsToSyncWith,
         const NRpc::TAuthenticationIdentity& identity,
-        TTransactionSignature expectedPrepareSignature) override
+        TTransactionSignature expectedPrepareSignature,
+        int targetCommitApprovalCount) override
     {
         auto supportsStronglyOrderedTransactions = SupportsStronglyOrderedTransactions();
         return SendRequest<TTransactionParticipantServiceProxy::TReqPrepareTransaction>(
@@ -91,9 +92,10 @@ public:
                 PrepareRequest(req);
                 NRpc::SetAuthenticationIdentity(req, identity);
                 ToProto(req->mutable_transaction_id(), transactionId);
-                req->set_prepare_timestamp(prepareTimestamp);
+                req->set_prepare_timestamp(ToProto(prepareTimestamp));
                 req->set_prepare_timestamp_cluster_tag(ToProto(prepareTimestampClusterTag));
                 req->set_expected_prepare_signature(expectedPrepareSignature);
+                req->set_target_commit_approval_count(targetCommitApprovalCount);
                 ToProto(req->mutable_cell_ids_to_sync_with(), cellIdsToSyncWith);
                 if (supportsStronglyOrderedTransactions) {
                     ToProto(req->mutable_strong_ordering_tags(), strongOrderingTags);
@@ -103,7 +105,7 @@ public:
             });
     }
 
-    TFuture<void> MakeTransactionReadyToCommit(
+    TFuture<void> RecordCommitTimestamp(
         TTransactionId transactionId,
         TTimestamp commitTimestamp,
         TClusterTag commitTimestampClusterTag,
@@ -114,16 +116,16 @@ public:
             return OKFuture;
         }
 
-        return SendRequest<TTransactionParticipantServiceProxy::TReqMakeTransactionReadyToCommit>(
+        return SendRequest<TTransactionParticipantServiceProxy::TReqRecordCommitTimestamp>(
             [=, this] (TTransactionParticipantServiceProxy* proxy) {
                 YT_ASSERT_THREAD_AFFINITY_ANY();
 
-                auto req = proxy->MakeTransactionReadyToCommit();
+                auto req = proxy->RecordCommitTimestamp();
                 req->SetResponseHeavy(true);
                 PrepareRequest(req);
                 NRpc::SetAuthenticationIdentity(req, identity);
                 ToProto(req->mutable_transaction_id(), transactionId);
-                req->set_commit_timestamp(commitTimestamp);
+                req->set_commit_timestamp(ToProto(commitTimestamp));
                 req->set_commit_timestamp_cluster_tag(ToProto(commitTimestampClusterTag));
 
                 return req;
@@ -147,7 +149,7 @@ public:
                 PrepareRequest(req);
                 NRpc::SetAuthenticationIdentity(req, identity);
                 ToProto(req->mutable_transaction_id(), transactionId);
-                req->set_commit_timestamp(commitTimestamp);
+                req->set_commit_timestamp(ToProto(commitTimestamp));
                 req->set_commit_timestamp_cluster_tag(ToProto(commitTimestampClusterTag));
                 req->set_strongly_ordered(supportsStronglyOrderedTransactions && stronglyOrdered);
 

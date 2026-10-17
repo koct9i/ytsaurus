@@ -101,6 +101,22 @@ void TQueueAgentDynamicStateConfig::Register(TRegistrar registrar)
         .Default("//sys/queue_agents/consumer_registrations");
     registrar.Parameter("replicated_table_mapping_table_path", &TThis::ReplicatedTableMappingTablePath)
         .Default("//sys/queue_agents/replicated_table_mapping");
+    registrar.Parameter("retry_backoff", &TThis::RetryBackoff)
+        .Optional(/*init*/ false);
+
+    registrar.Preprocessor([] (TThis* config) {
+        config->RetryBackoff.InvocationCount = 10;
+        config->RetryBackoff.MinBackoff = TDuration::Seconds(5);
+        config->RetryBackoff.MaxBackoff = TDuration::Seconds(30);
+    });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TQueueAgentDynamicStateDynamicConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("retry_backoff", &TThis::RetryBackoff)
+        .Optional();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -226,8 +242,8 @@ void TQueueConsumerRegistrationManagerConfig::Register(TRegistrar registrar)
 
             if (successfulLookupsRequired <= 0) {
                 THROW_ERROR_EXCEPTION("Successful lookup count requirement must be positive")
-                    << TErrorAttribute("cache_kind", cacheKind)
-                    << TErrorAttribute("successful_lookups_required", successfulLookupsRequired);
+                    .With("cache_kind", cacheKind)
+                    .With("successful_lookups_required", successfulLookupsRequired);
             }
 
             auto cachePath = config->GetCachePath(cacheKind);
@@ -238,9 +254,9 @@ void TQueueConsumerRegistrationManagerConfig::Register(TRegistrar registrar)
 
             if (replicaCount < successfulLookupsRequired) {
                 THROW_ERROR_EXCEPTION("Successful lookup count requirement cannot exceed replica count")
-                    << TErrorAttribute("cache_kind", cacheKind)
-                    << TErrorAttribute("successful_lookups_required", successfulLookupsRequired)
-                    << TErrorAttribute("replica_count", replicaCount);
+                    .With("cache_kind", cacheKind)
+                    .With("successful_lookups_required", successfulLookupsRequired)
+                    .With("replica_count", replicaCount);
             }
         }
     });

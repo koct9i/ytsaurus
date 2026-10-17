@@ -8,11 +8,19 @@
 #include <yt/yt/client/table_client/schema.h>
 
 #include <yt/yt/core/misc/guid.h>
-#include <yt/yt/core/misc/property.h>
 
 #include <library/cpp/yt/memory/range.h>
 
+#include <library/cpp/yt/misc/property.h>
+
 namespace NYT::NQueryClient {
+
+////////////////////////////////////////////////////////////////////////////////
+
+constexpr i64 UnorderedReadHint = std::numeric_limits<i64>::max();
+// TODO(sabdenovch): Deprecate this.
+constexpr i64 OrderedReadWithPrefetchHint = UnorderedReadHint - 1;
+constexpr i64 MaxQueryLimit = OrderedReadWithPrefetchHint - 1;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -280,6 +288,10 @@ struct TSubqueryExpression
     TConstExpressionPtr WhereClause;
     TConstGroupClausePtr GroupClause;
     TConstProjectClausePtr ProjectClause;
+    TConstOrderClausePtr OrderClause;
+
+    i64 Offset = 0;
+    i64 Limit = UnorderedReadHint;
 
     using TExpression::TExpression;
 };
@@ -481,10 +493,6 @@ DEFINE_REFCOUNTED_TYPE(TProjectClause)
 // Front Query is not Coordinatable
 // IsMerge is always true for front Query and false for Bottom Query
 
-constexpr i64 UnorderedReadHint = std::numeric_limits<i64>::max();
-// TODO(sabdenovch): Deprecate this.
-constexpr i64 OrderedReadWithPrefetchHint = std::numeric_limits<i64>::max() - 1;
-
 struct TBaseQuery
     : public TRefCounted
 {
@@ -564,6 +572,8 @@ struct TFrontQuery
     TFrontQuery(const TFrontQuery& other) = default;
 
     TTableSchemaPtr Schema;
+
+    std::vector<TConstHierarchicalJoinClausePtr> HierarchicalJoinsAfterGroupBy;
 
     TTableSchemaPtr GetReadSchema() const override;
 

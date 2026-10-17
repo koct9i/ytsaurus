@@ -54,6 +54,14 @@ def cmp(a, b):
     return (a > b) - (a < b)
 
 
+def gdb_binary():
+    try:
+        from yt.environment.arcadia_interop import get_gdb_path
+        return get_gdb_path()
+    except ImportError:
+        return "gdb"
+
+
 def _dump_netstat(dump_file_path):
     logger.info("Dumping netstat to the file '{}'".format(dump_file_path))
     with open(dump_file_path, "wb") as dump_file:
@@ -385,6 +393,7 @@ NODES_SERVICE = "nodes"
 CHAOS_NODES_SERVICE = "chaos_nodes"
 MASTERS_SERVICE = "masters"
 MASTER_CACHES_SERVICE = "master_caches"
+CHAOS_CACHES_SERVICE = "chaos_caches"
 QUEUE_AGENTS_SERVICE = "queue_agents"
 RPC_PROXIES_SERVICE = "rpc_proxies"
 HTTP_PROXIES_SERVICE = "http_proxies"
@@ -412,6 +421,7 @@ class Restarter(object):
             MASTERS_SERVICE: lambda sync: self.yt_instance.start_all_masters(
                 start_secondary_master_cells=True, set_config=False, sync=sync),
             MASTER_CACHES_SERVICE: self.yt_instance.start_master_caches,
+            CHAOS_CACHES_SERVICE: self.yt_instance.start_chaos_caches,
             QUEUE_AGENTS_SERVICE: self.yt_instance.start_queue_agents,
             RPC_PROXIES_SERVICE: self.yt_instance.start_rpc_proxy,
             HTTP_PROXIES_SERVICE: self.yt_instance.start_http_proxy,
@@ -426,6 +436,7 @@ class Restarter(object):
             CHAOS_NODES_SERVICE: lambda: self.yt_instance.kill_chaos_nodes(*self.kill_args, **self.kill_kwargs),
             MASTERS_SERVICE: lambda: self.yt_instance.kill_masters_at_cells(*self.kill_args, **self.kill_kwargs),
             MASTER_CACHES_SERVICE: lambda: self.yt_instance.kill_master_caches(*self.kill_args, **self.kill_kwargs),
+            CHAOS_CACHES_SERVICE: lambda: self.yt_instance.kill_chaos_caches(*self.kill_args, **self.kill_kwargs),
             QUEUE_AGENTS_SERVICE: lambda: self.yt_instance.kill_queue_agents(*self.kill_args, **self.kill_kwargs),
             RPC_PROXIES_SERVICE: lambda: self.yt_instance.kill_rpc_proxies(*self.kill_args, **self.kill_kwargs),
             HTTP_PROXIES_SERVICE: lambda: self.yt_instance.kill_http_proxies(*self.kill_args, **self.kill_kwargs),

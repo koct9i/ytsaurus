@@ -16,8 +16,6 @@
 
 #include <yt/yt/server/lib/misc/bootstrap.h>
 
-#include <yt/yt/server/lib/signature/components/components.h>
-
 #include <yt/yt/library/disk_manager/hotswap_manager.h>
 
 #include <yt/yt/library/coredumper/public.h>
@@ -56,6 +54,8 @@
 #include <yt/yt/library/program/helpers.h>
 
 #include <yt/yt/library/fusion/service_locator.h>
+
+#include <yt/yt/library/signature/components/components.h>
 
 #include <yt/yt/client/driver/driver.h>
 #include <yt/yt/client/driver/config.h>
@@ -431,7 +431,7 @@ void TBootstrap::ReconfigureMemoryUsageTracker(
 }
 
 void TBootstrap::OnDynamicConfigChanged(
-    const TProxyDynamicConfigPtr& /*oldConfig*/,
+    const TProxyDynamicConfigPtr& oldConfig,
     const TProxyDynamicConfigPtr& newConfig)
 {
     TSingletonManager::Reconfigure(newConfig);
@@ -457,11 +457,19 @@ void TBootstrap::OnDynamicConfigChanged(
 
     Coordinator_->GetTraceSampler()->UpdateConfig(newConfig->Tracing);
 
-    if (newConfig->SignatureComponents) {
-        YT_UNUSED_FUTURE(SignatureComponents_->Reconfigure(newConfig->SignatureComponents));
+    if (newConfig->SignatureComponents || oldConfig->SignatureComponents) {
+        YT_UNUSED_FUTURE(SignatureComponents_->Reconfigure(
+            newConfig->SignatureComponents
+                ? newConfig->SignatureComponents
+                : Config_->SignatureComponents));
     }
 
     Connection_->GetMasterCellDirectorySynchronizer()->ApplyDynamicConfigOverride(newConfig->MasterCellDirectorySynchronizer);
+
+    AuthenticationManager_->Reconfigure(newConfig->Auth);
+    if (TvmOnlyAuthenticationManager_) {
+        TvmOnlyAuthenticationManager_->Reconfigure(newConfig->Auth);
+    }
 }
 
 void TBootstrap::HandleRequest(
@@ -478,7 +486,7 @@ void TBootstrap::HandleRequest(
                 .EndMap();
         });
     } else {
-        WaitFor(rsp->WriteBody(TSharedRef::FromString(GetVersion())))
+        WaitFor(rsp->WriteBody(TSharedRef::FromString(std::string(GetVersion()))))
             .ThrowOnError();
     }
 }
@@ -496,7 +504,8 @@ void TBootstrap::DoStart()
 
     MonitoringServer_->Start();
     if (MonitoringHttpsServer_) {
-        YT_LOG_INFO("Listening for HTTPS monitoring requests (Port: %v)", MonitoringHttpsServer_->GetAddress().GetPort());
+        YT_TLOG_INFO("Listening for HTTPS monitoring requests")
+            .With("Port", MonitoringHttpsServer_->GetAddress().GetPort());
         MonitoringHttpsServer_->Start();
     }
 

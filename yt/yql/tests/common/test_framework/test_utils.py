@@ -88,35 +88,17 @@ def infer_yt_schema(attrs):
     return yt.yson.dumps(attrs, yson_format="pretty").decode()
 
 
-def wait_pipeline_state_or_failed_jobs(
-    target_state, pipeline_path,
+def wait_pipeline_condition_or_failed_jobs(
+    condition, pipeline_path,
     timeout=600,
     client=None,
+    condition_description="condition",
+    ignore_exceptions=False,
 ):
     import yt.logger as logger
 
     from yt.common import YtError
-    from yt.wrapper.flow_commands import PipelineState, get_pipeline_state, flow_execute
-
-    if target_state == PipelineState.Completed:
-        target_states = {PipelineState.Completed, }
-    elif target_state == PipelineState.Working:
-        target_states = {PipelineState.Completed, PipelineState.Working}
-    elif target_state == PipelineState.Stopped:
-        target_states = {PipelineState.Completed, PipelineState.Stopped}
-    elif target_state == PipelineState.Draining:
-        target_states = {PipelineState.Completed, PipelineState.Stopped, PipelineState.Draining}
-    elif target_state == PipelineState.Paused:
-        target_states = {PipelineState.Completed, PipelineState.Stopped, PipelineState.Paused}
-    elif target_state == PipelineState.Pausing:
-        target_states = {PipelineState.Completed, PipelineState.Stopped, PipelineState.Paused, PipelineState.Pausing}
-    else:
-        logger.warning("Unknown pipeline state %s", target_state)
-        return
-
-    invalid_state_transitions = {
-        PipelineState.Stopped: {PipelineState.Paused, },
-    }
+    from yt.wrapper.flow_commands import get_pipeline_state, flow_execute
 
     deadline = datetime.now() + timedelta(seconds=timeout)
 
@@ -129,15 +111,18 @@ def wait_pipeline_state_or_failed_jobs(
             timeout=timeout,
             client=client)
 
-        if current_state in target_states:
-            logger.info("Waiting finished (current state: %s, target state: %s)",
-                        current_state, target_state)
-            return
+        try:
+            condition_met = condition(current_state)
+        except Exception:
+            if not ignore_exceptions:
+                raise
+            logger.exception("Failed to check wait condition: %s", condition_description)
+            condition_met = False
 
-        if current_state in invalid_state_transitions.get(target_state, []):
-            raise YtError("Invalid state transition", attributes={
-                "current_state": current_state,
-                "target_state": target_state})
+        if condition_met:
+            logger.info("Waiting finished (current state: %s, condition: %s)",
+                        current_state, condition_description)
+            return
 
         try:
             # TODO(ngc224): debug occasional computation-related method errors
@@ -171,10 +156,56 @@ def wait_pipeline_state_or_failed_jobs(
                 logger.exception("Found failed jobs in some computations")
                 raise
 
-        logger.info("Still waiting (current state: %s, target state: %s)",
-                    current_state, target_state)
+        logger.info("Still waiting (current state: %s, condition: %s)",
+                    current_state, condition_description)
 
         time.sleep(1)
+
+
+def wait_pipeline_state_or_failed_jobs(
+    target_state, pipeline_path,
+    timeout=600,
+    client=None,
+):
+    import yt.logger as logger
+
+    from yt.common import YtError
+    from yt.wrapper.flow_commands import PipelineState
+
+    if target_state == PipelineState.Completed:
+        target_states = {PipelineState.Completed, }
+    elif target_state == PipelineState.Working:
+        target_states = {PipelineState.Completed, PipelineState.Working}
+    elif target_state == PipelineState.Stopped:
+        target_states = {PipelineState.Completed, PipelineState.Stopped}
+    elif target_state == PipelineState.Draining:
+        target_states = {PipelineState.Completed, PipelineState.Stopped, PipelineState.Draining}
+    elif target_state == PipelineState.Paused:
+        target_states = {PipelineState.Completed, PipelineState.Stopped, PipelineState.Paused}
+    elif target_state == PipelineState.Pausing:
+        target_states = {PipelineState.Completed, PipelineState.Stopped, PipelineState.Paused, PipelineState.Pausing}
+    else:
+        logger.warning("Unknown pipeline state %s", target_state)
+        return
+
+    invalid_state_transitions = {
+        PipelineState.Stopped: {PipelineState.Paused, },
+    }
+
+    def target_state_reached(current_state):
+        if current_state in invalid_state_transitions.get(target_state, []):
+            raise YtError("Invalid state transition", attributes={
+                "current_state": current_state,
+                "target_state": target_state})
+        return current_state in target_states
+
+    wait_pipeline_condition_or_failed_jobs(
+        target_state_reached,
+        pipeline_path,
+        timeout=timeout,
+        client=client,
+        condition_description="target state: %s" % target_state,
+    )
 
 
 def upper_first(str):
@@ -287,7 +318,10 @@ class FlowLogsReplicator(threading.Thread):
         return True
 
 
-def dump_pipeline_jobs_stderr(pipeline_path, jobs_stderr_file_path, client):
+def dump_pipeline_jobs_stderr(
+    pipeline_path, jobs_stderr_file_path, client,
+    operation_driver_factory=None,
+):
     import yt.yson
 
     vanilla_info_attribute = "_yql_ytflow_vanilla_info"
@@ -306,10 +340,28 @@ def dump_pipeline_jobs_stderr(pipeline_path, jobs_stderr_file_path, client):
         write_info("No operation found in pipeline attributes\n")
         return
 
-    operation_id = pipeline_attributes.attributes[vanilla_info_attribute]["operation_id"]
+    vanilla_info = pipeline_attributes.attributes[vanilla_info_attribute]
+    operation_id = vanilla_info["operation_id"]
+
+    if operation_driver_factory is not None:
+        from yt_commands import get_job_stderr, list_jobs
+
+        operation_driver = operation_driver_factory(vanilla_info["runtime_cluster"])
+
+        def list_operation_jobs():
+            return list_jobs(operation_id, with_stderr=True, driver=operation_driver)
+
+        def read_job_stderr(job_id):
+            return get_job_stderr(operation_id, job_id, driver=operation_driver)
+    else:
+        def list_operation_jobs():
+            return client.list_jobs(operation_id, with_stderr=True)
+
+        def read_job_stderr(job_id):
+            return client.get_job_stderr(operation_id, job_id).read()
 
     try:
-        jobs = client.list_jobs(operation_id, with_stderr=True)
+        jobs = list_operation_jobs()
     except Exception:
         write_info(traceback.format_exc())
         return
@@ -332,9 +384,7 @@ def dump_pipeline_jobs_stderr(pipeline_path, jobs_stderr_file_path, client):
                 jobs_stderr_file.write("\n")
 
             try:
-                job_stderr = client.get_job_stderr(operation_id, job["id"]) \
-                    .read() \
-                    .decode("utf8")
+                job_stderr = read_job_stderr(job["id"]).decode("utf8")
 
                 jobs_stderr_file.write(job_stderr)
             except Exception:
@@ -469,3 +519,89 @@ class FlowDebugHelper:
                 f.write(worker_env_string + " ya gdb --args " + " ".join(flow_command))
 
             wait_for_debug()
+
+
+def to_cyson_nodes(y):
+    """Convert yt.yson (and plain) nodes to values that cyson.dumps handles correctly.
+
+    yt.yson.YsonBoolean subclasses int, so cyson would dump it as 0/1 unless converted
+    to cyson.YsonBoolean / bool. Same for uint64 -> YsonUInt64.
+    """
+    from cyson import (
+        YsonBoolean,
+        YsonEntity,
+        YsonFloat64,
+        YsonInt64,
+        YsonList,
+        YsonMap,
+        YsonString,
+        YsonUInt64,
+    )
+    from yt.yson import (
+        YsonBoolean as YtBoolean,
+        YsonDouble as YtDouble,
+        YsonEntity as YtEntity,
+        YsonInt64 as YtInt64,
+        YsonString as YtString,
+        YsonStringProxy as YtStringProxy,
+        YsonType as YtType,
+        YsonUint64 as YtUint64,
+        YsonUnicode as YtUnicode,
+    )
+
+    def attrs_of(obj):
+        if isinstance(obj, YtType) and obj.has_attributes():
+            return to_cyson_nodes(obj.attributes)
+        return None
+
+    def with_attrs(node, obj):
+        attrs = attrs_of(obj)
+        if attrs is not None:
+            node.attributes = attrs
+        return node
+
+    # Already cyson-typed nodes dump correctly.
+    if isinstance(y, (YsonBoolean, YsonEntity, YsonFloat64, YsonInt64, YsonList, YsonMap, YsonString, YsonUInt64)):
+        return y
+
+    # YtBoolean / YtUint64 / YtInt64 all subclass int — check before plain int fallthrough.
+    if isinstance(y, (bool, YtBoolean)):
+        return with_attrs(YsonBoolean(bool(y)), y)
+    if isinstance(y, YtUint64):
+        return with_attrs(YsonUInt64(int(y)), y)
+    if isinstance(y, YtInt64):
+        return with_attrs(YsonInt64(int(y)), y)
+    if isinstance(y, YtDouble):
+        return with_attrs(YsonFloat64(float(y)), y)
+    if isinstance(y, (YtString, YtUnicode, YtStringProxy)):
+        if isinstance(y, YtStringProxy):
+            value = y._bytes
+        elif isinstance(y, six.text_type):
+            value = y.encode('utf-8')
+        else:
+            value = bytes(y)
+        return with_attrs(YsonString(value), y)
+    if isinstance(y, YtEntity):
+        return YsonEntity(attributes=attrs_of(y))
+
+    if isinstance(y, list):
+        items = [to_cyson_nodes(i) for i in y]
+        attrs = attrs_of(y)
+        if attrs is None:
+            return items
+        node = YsonList([])
+        node.extend(items)
+        node.attributes = attrs
+        return node
+
+    if isinstance(y, dict):
+        items = {to_cyson_nodes(k): to_cyson_nodes(v) for k, v in six.iteritems(y)}
+        attrs = attrs_of(y)
+        if attrs is None:
+            return items
+        node = YsonMap({})
+        node.update(items)
+        node.attributes = attrs
+        return node
+
+    return y

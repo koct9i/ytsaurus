@@ -12,6 +12,10 @@
 
 #include <library/cpp/yt/memory/ref.h>
 
+#include <util/generic/size_literals.h>
+
+#include <limits>
+
 namespace NYT::NDataNode {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -24,7 +28,9 @@ struct TChunkReadOptions
     bool PopulateCache = false;
     bool FetchFromCache = true;
     bool FetchFromDisk = true;
-    bool EnableSequentialIORequests = true;
+    EReadIORequestsMode ReadIORequestsMode = EReadIORequestsMode::Sequential;
+    int MaxInFlightReadRequestCount = std::numeric_limits<int>::max();
+    i64 MaxInFlightReadDataSize = 16_MB;
 
     bool ReturnBlocksIfSessionFails = false;
     bool FailSessionAtReadBlocksDeadline = false;
@@ -34,7 +40,7 @@ struct TChunkReadOptions
     TInstant ReadBlocksDeadline = TInstant::Max();
     TInstant ReadMetaDeadLine = TInstant::Max();
 
-    std::vector<std::pair<std::string, double>> FairShareTags;
+    std::optional<NIO::TIOFairShareState> FairShareState;
 
     //! This option set to |true| overrides the default behavior of journal chunk reader, namely
     //! all requested blocks will be read (and not only the first continuous run) and also block cache will be used.
@@ -221,4 +227,3 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NDataNode
-

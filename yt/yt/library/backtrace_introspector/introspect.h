@@ -8,6 +8,8 @@
 
 #include <yt/yt/core/tracing/public.h>
 
+#include <library/cpp/yt/logging/public.h>
+
 namespace NYT::NBacktraceIntrospector {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -15,12 +17,12 @@ namespace NYT::NBacktraceIntrospector {
 
 struct TThreadIntrospectionInfo
 {
-    NThreading::TThreadId ThreadId;
+    TThreadId ThreadId;
     NConcurrency::TFiberId FiberId;
     std::string ThreadName;
     NTracing::TTraceId TraceId;
     //! Empty if no trace context is known.
-    std::string TraceLoggingTag;
+    NLogging::TLoggingTagListPayload TraceLoggingTags;
     std::vector<const void*> Backtrace;
 };
 
@@ -36,12 +38,12 @@ struct TFiberIntrospectionInfo
     //! Zero if fiber is not waiting.
     TInstant WaitingSince;
     //! |InvalidThreadId| is fiber is not running.
-    NThreading::TThreadId ThreadId;
+    TThreadId ThreadId;
     //! Empty if fiber is not running.
     std::string ThreadName;
     NTracing::TTraceId TraceId;
     //! Empty if no trace context is known.
-    std::string TraceLoggingTag;
+    NLogging::TLoggingTagListPayload TraceLoggingTags;
     std::vector<const void*> Backtrace;
 };
 

@@ -4,7 +4,7 @@
 
 #include <yt/yt/client/api/client.h>
 
-#include <yt/yt/library/tracing/jaeger/tracer.h>
+#include <yt/yt/library/tracing/jaeger/config.h>
 
 #include <yt/yt/library/re2/re2.h>
 
@@ -26,6 +26,9 @@ void TCompositeSettings::Register(TRegistrar registrar)
         .Default(EExtendedYsonFormat::Binary);
 
     registrar.Parameter("convert_unsupported_types_to_string", &TThis::ConvertUnsupportedTypesToString)
+        .Default(false);
+
+    registrar.Parameter("annotate_result_schema_with_native_types", &TThis::AnnotateResultSchemaWithNativeTypes)
         .Default(false);
 
     registrar.Parameter("enable_complex_null_conversion", &TThis::EnableComplexNullConverison)
@@ -102,6 +105,12 @@ void TTestingSettings::Register(TRegistrar registrar)
         .Default(false);
     registrar.Parameter("throw_exception_in_writer_finish", &TThis::ThrowExceptionInWriterFinish)
         .Default(false);
+    registrar.Parameter("throw_exception_after_refresh_query", &TThis::ThrowExceptionAfterRefreshQuery)
+        .Default(false);
+    registrar.Parameter("throw_exception_after_refresh_commit", &TThis::ThrowExceptionAfterRefreshCommit)
+        .Default(false);
+    registrar.Parameter("fail_materialized_view_refresh_query_response_for_partition", &TThis::FailMaterializedViewRefreshQueryResponseForPartition)
+        .Default();
     registrar.Parameter("subquery_allocation_size", &TThis::SubqueryAllocationSize)
         .Default(0);
 
@@ -122,6 +131,8 @@ void TTestingSettings::Register(TRegistrar registrar)
     registrar.Parameter("source_generate_call_breakpoint", &TThis::SourceGenerateCallBreakpoint)
         .Default();
     registrar.Parameter("drop_table_breakpoint", &TThis::DropTableBreakpoint)
+        .Default();
+    registrar.Parameter("materialized_view_consumer_commit_breakpoint", &TThis::MaterializedViewConsumerCommitBreakpoint)
         .Default();
 }
 
@@ -331,6 +342,9 @@ void TQuerySettings::Register(TRegistrar registrar)
     registrar.Parameter("omit_inaccessible_rows", &TThis::OmitInaccessibleRows)
         .Default(false);
 
+    registrar.Parameter("materialized_view_populate", &TThis::MaterializedViewPopulate)
+        .Default(false);
+
     registrar.Preprocessor([] (TThis* config) {
         config->TableReader->GroupSize = 20_MB;
         config->TableReader->WindowSize = 70_MB;
@@ -402,6 +416,15 @@ void TSubqueryConfig::Register(TRegistrar registrar)
         .Default(true);
     registrar.Parameter("min_slice_data_weight", &TThis::MinSliceDataWeight)
         .Default(1_MB);
+
+    registrar.Parameter("chunk_spec_cache", &TThis::ChunkSpecCache)
+        .Default();
+
+    registrar.Postprocessor([] (TThis* config) {
+        if (config->ChunkSpecCache && !config->ChunkSpecCache->Capacity) {
+            config->ChunkSpecCache->Capacity = 1_GB;
+        }
+    });
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -524,12 +547,32 @@ void TUserDefinedSqlObjectsStorageConfig::Register(TRegistrar registrar)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void TDictionaryRepositoryConfig::Register(TRegistrar registrar)
+void TCypressObjectRepositoryConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("root_path", &TThis::RootPath)
         .NonEmpty();
     registrar.Parameter("update_period", &TThis::UpdatePeriod)
         .Default(TDuration::Seconds(30));
+}
+
+void TMaterializedViewsConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("root_path", &TThis::RootPath)
+        .NonEmpty();
+    registrar.Parameter("scan_period", &TThis::ScanPeriod)
+        .Default(TDuration::Minutes(5));
+    registrar.Parameter("max_rows_per_refresh", &TThis::MaxRowsPerRefresh)
+        .GreaterThanOrEqual(0)
+        .Default(0);
+    registrar.Parameter("max_partitions_per_refresh", &TThis::MaxPartitionsPerRefresh)
+        .GreaterThanOrEqual(0)
+        .Default(10);
+    registrar.Parameter("query_timeout", &TThis::QueryTimeout)
+        .Default(TDuration::Minutes(20));
+    registrar.Parameter("table_mount_timeout", &TThis::TableMountTimeout)
+        .Default(TDuration::Seconds(30));
+    registrar.Parameter("transaction_timeout", &TThis::TransactionTimeout)
+        .Default(TDuration::Minutes(30));
 }
 
 void TDictionaryAccessControlConfig::Register(TRegistrar registrar)
@@ -619,6 +662,8 @@ void TYtConfig::Register(TRegistrar registrar)
         .Default();
     registrar.Parameter("clique_incarnation", &TThis::CliqueIncarnation)
         .Default(-1);
+    registrar.Parameter("orchid_root", &TThis::OrchidRoot)
+        .Default();
     registrar.Parameter("address", &TThis::Address)
         .Default();
     registrar.Parameter("clique_instance_count", &TThis::CliqueInstanceCount)
@@ -695,6 +740,9 @@ void TYtConfig::Register(TRegistrar registrar)
     registrar.Parameter("health_checker", &TThis::HealthChecker)
         .DefaultNew();
 
+    registrar.Parameter("election_manager", &TThis::ElectionManager)
+        .Default();
+
     registrar.Parameter("database_directories", &TThis::DatabaseDirectories)
         .Default();
 
@@ -723,7 +771,12 @@ void TYtConfig::Register(TRegistrar registrar)
     registrar.Parameter("user_defined_sql_objects_storage", &TThis::UserDefinedSqlObjectsStorage)
         .DefaultNew();
 
-    registrar.Parameter("dictionary_repository", &TThis::DictionaryRepository)
+    registrar.Parameter("object_repository", &TThis::CypressObjectRepository)
+        // COMPAT(buyval01)
+        .Alias("dictionary_repository")
+        .Default();
+
+    registrar.Parameter("materialized_views", &TThis::MaterializedViews)
         .Default();
 
     registrar.Parameter("dictionary_access_control", &TThis::DictionaryAccessControl)

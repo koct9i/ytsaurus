@@ -4,9 +4,9 @@
 
 #include <yt/yt/server/lib/tablet_balancer/public.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <yt/yt/library/profiling/sensor.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NTabletBalancer {
 
@@ -44,7 +44,7 @@ private:
     // Never remove profiling counters, even for removed tables.
     // It allowes us to use one instance of table registry in different bundle snapshots.
     THashMap<TTableId, TTableProfilingCounters> ProfilingCounters_;
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, ProfilingCountersLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, ProfilingCountersLock_);
 
     TTableProfilingCounters InitializeProfilingCounters(const TTable* table, const std::string& groupName) const;
 };

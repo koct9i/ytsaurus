@@ -413,7 +413,8 @@ TEST_F(TYTToCHConversionTest, SimpleTypes)
         auto chTypeDummy,
         bool isLowCardinality)
     {
-        YT_LOG_TRACE("Running tests (Type: %v)", simpleLogicalValueType);
+        YT_TLOG_TRACE("Running tests")
+            .With("Type", simpleLogicalValueType);
 
         using TYtType = decltype(ytTypeDummy);
         using TChType = decltype(chTypeDummy);
@@ -588,9 +589,8 @@ TEST_F(TYTToCHConversionTest, OptionalSimpleType)
     for (int nestingLevel = 1; nestingLevel <= 3; ++nestingLevel) {
         logicalType = OptionalLogicalType(std::move(logicalType));
 
-        YT_LOG_TRACE(
-            "Running tests (NestingLevel: %v)",
-            nestingLevel);
+        YT_TLOG_TRACE("Running tests")
+            .With("NestingLevel", nestingLevel);
         TComplexTypeFieldDescriptor descriptor(logicalType);
         ExpectTypeConversion(descriptor, expectedDataType);
 
@@ -623,6 +623,36 @@ TEST_F(TYTToCHConversionTest, OptionalSimpleType)
     }
 }
 
+TEST_F(TYTToCHConversionTest, TaggedString)
+{
+    auto stringType = SimpleLogicalType(ESimpleLogicalValueType::String);
+    const std::string value("foo\0bar", 7);
+    std::vector<TUnversionedValue> values = {MakeUnversionedStringValue(value)};
+
+    for (const auto& type : {
+        TaggedLogicalType("tag", stringType),
+        OptionalLogicalType(TaggedLogicalType("tag", stringType)),
+        TaggedLogicalType("tag", OptionalLogicalType(stringType)),
+        OptionalLogicalType(TaggedLogicalType("outer", TaggedLogicalType("inner", stringType))),
+    }) {
+        TComplexTypeFieldDescriptor descriptor(type);
+        auto expectedType = std::make_shared<DB::DataTypeString>();
+        ExpectTypeConversion(descriptor, type->IsNullable() ? DB::makeNullable(expectedType) : expectedType);
+        ExpectDataConversion(descriptor, values, {DB::Field(value)});
+        auto [ytColumn, ytColumnOwner] = UnversionedValuesToYtColumn(values, TColumnSchema(/*name*/ "", type));
+        ExpectDataConversion(descriptor, ytColumn, {DB::Field(value)});
+
+        if (type->IsNullable()) {
+            ExpectDataConversion(descriptor, TUnversionedValues{MakeUnversionedNullValue()}, {DB::Field()});
+        }
+    }
+
+    TComplexTypeFieldDescriptor descriptor(OptionalLogicalType(
+        TaggedLogicalType("tag", OptionalLogicalType(stringType))));
+    std::vector<TString> ysons = {"#", "[#]", "[foo]"};
+    ExpectDataConversion(descriptor, ToYsonStringBufs(ysons), {DB::Field(), DB::Field(), DB::Field("foo")});
+}
+
 TEST_F(TYTToCHConversionTest, NullAndVoid)
 {
     // Nesting level is the number of optional<> wrappers around null or void.
@@ -643,10 +673,9 @@ TEST_F(TYTToCHConversionTest, NullAndVoid)
                 logicalType = OptionalLogicalType(std::move(logicalType));
             }
 
-            YT_LOG_TRACE(
-                "Running tests (SimpleLogicalValueType: %v, NestingLevel: %v)",
-                simpleLogicalValueType,
-                nestingLevel);
+            YT_TLOG_TRACE("Running tests")
+                .With("SimpleLogicalValueType", simpleLogicalValueType)
+                .With("NestingLevel", nestingLevel);
 
             TComplexTypeFieldDescriptor descriptor(logicalType);
             ExpectTypeConversion(descriptor, expectedDataType);
@@ -1625,7 +1654,8 @@ TEST(TTestKeyConversion, TestLowCardinality)
 
         auto& column1 = columnSchemas.emplace_back("dummy_name", ESimpleLogicalValueType::Int64);
         column1.SetRequired(true);
-        auto& column2 = columnSchemas.emplace_back(column1);
+        columnSchemas.push_back(column1);
+        auto& column2 = columnSchemas.back();
         column2.SetLogicalType(TaggedLogicalType(LowCardinalityTag, column2.LogicalType()));
 
         schema = TTableSchema(std::move(columnSchemas));
@@ -1642,9 +1672,17 @@ TEST(TTestKeyConversion, TestLowCardinality)
         /*isUpper=*/false);
     auto upperBound = MakeUpperBound({MakeUnversionedInt64Value(10)});
 
-    auto chKeys = ToClickHouseKeys(lowerBound, upperBound, schema, dataTypes, 2, false);
-    YT_LOG_DEBUG("MinKey %v %v", chKeys.MinKey[0], chKeys.MinKey[1]);
-    YT_LOG_DEBUG("MaxKey %v %v", chKeys.MaxKey[0], chKeys.MaxKey[1]);
+
+    auto chKeys = ToClickHouseKeys(
+        lowerBound,
+        upperBound,
+        schema,
+        dataTypes,
+        /*usedKeyColumnCount*/ 2,
+        /*tryMakeBoundsInclusive*/false);
+    YT_TLOG_DEBUG("Computed CH key bounds")
+        .WithFormat("MinKey", "%v %v", chKeys.MinKey[0], chKeys.MinKey[1])
+        .WithFormat("MaxKey", "%v %v", chKeys.MaxKey[0], chKeys.MaxKey[1]);
     EXPECT_EQ(chKeys.MinKey, std::vector<DB::FieldRef>({DB::Field(5L), DB::Field(std::numeric_limits<DB::Int64>::max())}));
     EXPECT_EQ(chKeys.MaxKey, std::vector<DB::FieldRef>({DB::Field(10L), DB::Field(std::numeric_limits<DB::Int64>::min())}));
 
@@ -1658,9 +1696,16 @@ TEST(TTestKeyConversion, TestLowCardinality)
         /*isInclusive=*/false,
         /*isUpper=*/false);
 
-    chKeys = ToClickHouseKeys(lowerBound, upperBound, schema, dataTypes, 2, true);
-    YT_LOG_DEBUG("MinKey %v %v", chKeys.MinKey[0], chKeys.MinKey[1]);
-    YT_LOG_DEBUG("MaxKey %v %v", chKeys.MaxKey[0], chKeys.MaxKey[1]);
+    chKeys = ToClickHouseKeys(
+        lowerBound,
+        upperBound,
+        schema,
+        dataTypes,
+        /*usedKeyColumnCount*/ 2,
+        /*tryMakeBoundsInclusive*/ true);
+    YT_TLOG_DEBUG("Computed CH key bounds")
+        .WithFormat("MinKey", "%v %v", chKeys.MinKey[0], chKeys.MinKey[1])
+        .WithFormat("MaxKey", "%v %v", chKeys.MaxKey[0], chKeys.MaxKey[1]);
     EXPECT_EQ(chKeys.MaxKey, std::vector<DB::FieldRef>({DB::Field(10L), DB::Field(4L)}));
     EXPECT_EQ(chKeys.MinKey, std::vector<DB::FieldRef>({DB::Field(5L), DB::Field(11L)}));
 }

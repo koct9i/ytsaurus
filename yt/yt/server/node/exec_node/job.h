@@ -40,6 +40,8 @@
 
 #include <yt/yt/core/yson/string.h>
 
+#include <library/cpp/yt/memory/non_null_ptr.h>
+
 namespace NYT::NExecNode {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -48,6 +50,15 @@ DEFINE_ENUM(EGpuCheckType,
     (Preliminary)
     (Extra)
 );
+
+////////////////////////////////////////////////////////////////////////////////
+
+//! Tmpfs volume as requested by the job spec.
+struct TTmpfsVolumeSpec
+{
+    i64 Size = 0;
+    std::string Path;
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -163,9 +174,13 @@ public:
 
     void SetCoreInfos(NControllerAgent::TCoreInfos value);
 
-    const NJobAgent::TArtifactCacheStatistics& GetArtifactCacheStatistics() const;
+    const NJobAgent::TArtifactStatistics& GetArtifactStatistics() const;
 
     NYson::TYsonString GetStatistics() const;
+    NYson::TYsonString GetStatisticsForHeartbeat(bool omitDataStatisticsFromYson) const;
+    void FillStatisticsForHeartbeat(
+        TNonNullPtr<NControllerAgent::NProto::TJobStatus> status,
+        bool omitDataStatisticsFromYson) const;
     NChunkClient::NProto::TDataStatistics GetTotalInputDataStatistics() const;
     std::vector<NChunkClient::NProto::TDataStatistics> GetOutputDataStatistics() const;
 
@@ -175,9 +190,10 @@ public:
 
     void UpdateUserJobMonitoring();
 
-    void SetStatistics(const NYson::TYsonString& statisticsYson);
-    void SetTotalInputDataStatistics(NChunkClient::NProto::TDataStatistics dataStatistics);
-    void SetOutputDataStatistics(std::vector<NChunkClient::NProto::TDataStatistics> dataStatistics);
+    void SetStatistics(
+        const NYson::TYsonString& statisticsYson,
+        NChunkClient::NProto::TDataStatistics inputDataStatistics,
+        std::vector<NChunkClient::NProto::TDataStatistics> outputDataStatistics);
 
     TBriefJobInfo GetBriefInfo() const;
     NYTree::IYPathServicePtr GetOrchidService();
@@ -268,7 +284,7 @@ public:
     i64 GetJobProxyHeartbeatEpoch() const;
     bool UpdateJobProxyHearbeatEpoch(i64 epoch);
 
-    const std::vector<NScheduler::TTmpfsVolumeConfigPtr>& GetTmpfsVolumeInfos() const noexcept;
+    const std::vector<TTmpfsVolumeSpec>& GetTmpfsVolumeSpecs() const noexcept;
 
     bool HasUserJobSpec() const noexcept;
 
@@ -298,7 +314,7 @@ private:
 
     // NB(pogorelov): GuardedJobSpec_ is mutated only from job thread, so we can store reference to an object and
     // read it from job thread without lock.
-    NThreading::TAtomicObject<NControllerAgent::NProto::TJobSpec> GuardedJobSpec_;
+    TAtomicObject<NControllerAgent::NProto::TJobSpec> GuardedJobSpec_;
     // Thread affinity: JobThread
     const NControllerAgent::NProto::TJobSpec& JobSpec_;
     const NControllerAgent::NProto::TJobSpecExt& JobSpecExt_;
@@ -313,7 +329,7 @@ private:
 
     const bool HasUserJobSpec_;
 
-    const std::vector<NScheduler::TTmpfsVolumeConfigPtr> TmpfsVolumeInfos_;
+    const std::vector<TTmpfsVolumeSpec> TmpfsVolumeSpecs_;
 
     THashSet<std::string> RequestedMonitoringSensors_;
 
@@ -337,6 +353,14 @@ private:
     bool GracefulAbortRequested_ = false;
 
     NYson::TYsonString StatisticsYson_ = NYson::TYsonString(TStringBuf("{}"));
+    NYson::TYsonString StatisticsWithoutDataYson_ = NYson::TYsonString(TStringBuf("{}"));
+    bool HasJobProxyStatistics_ = false;
+    //! Data statistics included in the full StatisticsYson_.
+    //! Output statistics cover the first FullYsonOutputTableCount_ tables.
+    bool HasInputDataStatisticsInFullYson_ = false;
+    int FullYsonOutputTableCount_ = 0;
+    //! Captured from the configuration passed to job proxy.
+    std::optional<int> StatisticsOutputTableCountLimit_;
 
     using TGpuStatisticsWithUpdateTime = std::pair<TGpuStatistics, std::optional<TInstant>>;
     std::vector<TGpuStatisticsWithUpdateTime> GpuStatistics_;
@@ -396,7 +420,7 @@ private:
 
     std::atomic<bool> UseJobInputCache_ = false;
 
-    NThreading::TAtomicObject<THashMap<NChunkClient::TChunkId, TRefCountedChunkSpecPtr>> ProxiableChunks_;
+    TAtomicObject<THashMap<NChunkClient::TChunkId, TRefCountedChunkSpecPtr>> ProxiableChunks_;
 
     bool IsGpuRequested_;
 
@@ -418,7 +442,7 @@ private:
 
     TPromise<void> CleanupFinished_ = NewPromise<void>();
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, JobProbeLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, JobProbeLock_);
     NJobProxy::IJobProbePtr JobProbe_;
 
     NRpc::IChannelPtr JobProxyChannel_;
@@ -427,7 +451,7 @@ private:
     TNetworkAttributes NetworkAttributes_;
 
     // Artifact statistics.
-    NJobAgent::TArtifactCacheStatistics ArtifactCacheStatistics_;
+    NJobAgent::TArtifactStatistics ArtifactStatistics_;
 
     std::vector<TFuture<void>> ArtifactPrepareFutures_;
 
@@ -451,12 +475,18 @@ private:
 
     TJobFSSecretaryPtr FSSecretary_;
 
+    //! Interrupts this job on an NBD device error. Subscribed to each of the job's
+    //! NBD devices once its artifacts are prepared; the same instance is used to
+    //! unsubscribe on cleanup.
+    TCallback<void(const TError&)> NbdErrorInterrupter_;
+
     bool HasJobTrace_ = false;
     bool HasGpuCheckStderr_ = false;
 
     NYTree::IYPathServicePtr CreateStaticOrchidService();
     NYTree::IYPathServicePtr CreateJobProxyOrchidService();
     NYTree::IYPathServicePtr CreateDynamicOrchidService();
+    NYTree::IYPathServicePtr CreatePreliminaryGpuCheckOrchidService();
     NYTree::IYPathServicePtr CreateTestingOrchidService();
 
     // Helpers.
@@ -546,6 +576,7 @@ private:
     // Finalization.
     void Cleanup();
 
+    void SubscribeJobToNbdDevices();
     void UnsubscribeJobFromNbdDevices();
 
     // Preparation.
@@ -558,7 +589,7 @@ private:
 
     TNetworkAttributes BuildNetworkAttributes(NControllerAgent::TNetworkProject networkProject) const;
 
-    TArtifactDownloadOptions MakeArtifactDownloadOptions() const;
+    TArtifactDownloadOptions MakeArtifactDownloadOptions();
 
     // Start async artifacts download.
     TFuture<std::vector<TArtifactPtr>> DownloadArtifacts();
@@ -583,7 +614,10 @@ private:
 
     void UpdateIOStatistics(const TStatistics& statistics);
 
-    void UpdateArtifactStatistics(i64 compressedDataSize, bool cacheHit);
+    void UpdateArtifactStatistics(
+        i64 compressedDataSize,
+        bool cacheHit,
+        bool isLayer);
 
     std::vector<TShellCommandConfigPtr> GetSetupCommands();
 
@@ -601,8 +635,6 @@ private:
     NJobProxy::IJobProbePtr GetJobProbeOrThrow();
 
     void ReportJobProxyProcessFinish(const TError& error);
-
-    static bool ShouldCleanSandboxes();
 
     bool NeedGpuLayers();
 
@@ -629,9 +661,13 @@ private:
 
     void OnJobFinalized();
 
+    bool HasInput() const;
+
+    void UpdateStatisticsYson(TStatistics statisticsWithoutData);
+
     void DeduceAndSetFinishedJobState();
 
-    static std::vector<NScheduler::TTmpfsVolumeConfigPtr> ParseTmpfsVolumeInfos(
+    static std::vector<TTmpfsVolumeSpec> ParseTmpfsVolumeSpecs(
         const NControllerAgent::NProto::TUserJobSpec* maybeUserJobSpec);
 };
 

@@ -34,7 +34,7 @@ void CheckStackDepth()
 
 TLogger MakeQueryLogger(TGuid queryId)
 {
-    return QueryClientLogger().WithTag("FragmentId: %v", queryId);
+    return QueryClientLogger().WithTag("FragmentId", queryId);
 }
 
 TLogger MakeQueryLogger(TConstBaseQueryPtr query)
@@ -52,10 +52,10 @@ void ThrowTypeMismatchError(
     TStringBuf rhsSource)
 {
     THROW_ERROR_EXCEPTION("Type mismatch in expression %Qv", source)
-        << TErrorAttribute("lhs_source", lhsSource)
-        << TErrorAttribute("rhs_source", rhsSource)
-        << TErrorAttribute("lhs_type", lhsType)
-        << TErrorAttribute("rhs_type", rhsType);
+        .With("lhs_source", lhsSource)
+        .With("rhs_source", rhsSource)
+        .With("lhs_type", lhsType)
+        .With("rhs_type", rhsType);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

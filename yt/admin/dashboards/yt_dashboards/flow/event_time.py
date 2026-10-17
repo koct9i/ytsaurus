@@ -7,13 +7,14 @@
 
 from ..common.sensors import FlowController, FlowWorker
 
-from .common import create_dashboard
+from .common import build_event_lag_percentile, create_dashboard
 
 from yt_dashboard_generator.dashboard import Rowset
+from yt_dashboard_generator.backends.grafana import GrafanaTextboxDashboardParameter
 from yt_dashboard_generator.backends.monitoring import MonitoringTextDashboardParameter
 from yt_dashboard_generator.backends.monitoring.sensors import MonitoringExpr
 from yt_dashboard_generator.sensor import EmptyCell
-from yt_dashboard_generator.taggable import NotEquals
+from yt_dashboard_generator.taggable import NotEquals, SystemFields
 
 
 def build_lags():
@@ -66,7 +67,7 @@ def build_late_messages():
     )
 
 
-def build_event_lag_per_computation():
+def build_event_lag_per_computation(backend="monitoring"):
     # Per-message lag = now() - EventTimestamp, captured at three points:
     # input (in PostCommit, per processed input message/timer),
     # output (in PostCommit, per produced output message),
@@ -74,15 +75,8 @@ def build_event_lag_per_computation():
     # registration for sync sinks, on per-message ack for async sinks).
     # The percentile is the dashboard's "percentile" parameter.
     def lag_percentile(metric, alias, *extra):
-        sensor = (MonitoringExpr(FlowWorker(metric))
-            .aggr("host")
-            .all("computation_id")
-            .all("stream_id")
-            .all("bin"))
-        for label in extra:
-            sensor = sensor.all(label)
-        labels_vector = "as_vector(" + ", ".join(f'"{l}"' for l in ["computation_id", "stream_id"] + list(extra)) + ")"
-        return (MonitoringExpr.func("group_by_labels", sensor, labels_vector, "v -> histogram_percentile({{percentile}}, v)")
+        group_labels = ["computation_id", "stream_id"] + list(extra)
+        return (build_event_lag_percentile(metric, "{{percentile}}", SystemFields.All, group_labels, backend)
             .alias(alias)
             .unit("UNIT_SECONDS")
             .stack(False))
@@ -114,12 +108,13 @@ def build_event_lag_per_computation():
     )
 
 
-def build_flow_event_time():
+def build_flow_event_time(backend="monitoring"):
     def fill(d):
         d.add(build_lags())
         d.add(build_late_messages())
-        d.add(build_event_lag_per_computation())
+        d.add(build_event_lag_per_computation(backend))
 
-    d = create_dashboard("event-time", fill)
-    d.add_parameter("percentile", "Percentile", MonitoringTextDashboardParameter("90"))
+    d = create_dashboard("event-time", fill, backend=backend)
+    d.add_parameter("percentile", "Percentile", MonitoringTextDashboardParameter("90"), backends=["monitoring"])
+    d.add_parameter("percentile", "Percentile", GrafanaTextboxDashboardParameter("90"), backends=["grafana"])
     return d

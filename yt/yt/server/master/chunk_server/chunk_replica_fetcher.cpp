@@ -1,39 +1,41 @@
 #include "chunk_replica_fetcher.h"
-#include "public.h"
-#include "private.h"
+
 #include "chunk.h"
 #include "chunk_location.h"
+#include "chunk_manager.h"
 #include "config.h"
 #include "data_node_tracker.h"
-#include "domestic_medium.h"
-#include "chunk_manager.h"
 #include "helpers.h"
+#include "private.h"
 
 #include <yt/yt/server/master/object_server/object.h>
 
 #include <yt/yt/server/master/cell_master/bootstrap.h>
-#include <yt/yt/server/master/cell_master/hydra_facade.h>
-#include <yt/yt/server/master/cell_master/config_manager.h>
 #include <yt/yt/server/master/cell_master/config.h>
+#include <yt/yt/server/master/cell_master/config_manager.h>
+#include <yt/yt/server/master/cell_master/hydra_facade.h>
+#include <yt/yt/server/master/cell_master/multicell_manager.h>
 
 #include <yt/yt/server/master/node_tracker_server/node.h>
 
 #include <yt/yt/server/lib/transaction_supervisor/transaction_supervisor.h>
 
-#include <yt/yt/ytlib/sequoia_client/connection.h>
 #include <yt/yt/ytlib/sequoia_client/client.h>
-#include <yt/yt/ytlib/sequoia_client/transaction.h>
+#include <yt/yt/ytlib/sequoia_client/connection.h>
 #include <yt/yt/ytlib/sequoia_client/table_descriptor.h>
+#include <yt/yt/ytlib/sequoia_client/transaction.h>
 
+#include <yt/yt/ytlib/sequoia_client/records/chunk_refresh_queue.record.h>
 #include <yt/yt/ytlib/sequoia_client/records/chunk_replicas.record.h>
 #include <yt/yt/ytlib/sequoia_client/records/location_replicas.record.h>
 #include <yt/yt/ytlib/sequoia_client/records/unapproved_chunk_replicas.record.h>
-#include <yt/yt/ytlib/sequoia_client/records/chunk_refresh_queue.record.h>
 
 #include <yt/yt/client/table_client/public.h>
 #include <yt/yt/client/table_client/row_base.h>
 
 #include <yt/yt/core/logging/log.h>
+
+#include <yt/yt/core/rpc/dispatcher.h>
 
 namespace NYT::NChunkServer {
 
@@ -134,32 +136,46 @@ public:
 
         auto includeNonOnlineReplicas = GetBootstrap()->GetConfigManager()->GetConfig()->ChunkManager->AlwaysFetchNonOnlineReplicas;
 
+        const auto& chunkManager = Bootstrap_->GetChunkManager();
         const auto& dataNodeTracker = Bootstrap_->GetDataNodeTracker();
+
         TStoredChunkReplicaList aliveReplicas;
         for (const auto& replica : replicas) {
             auto chunkId = replica.ChunkId;
+            if (replica.NodeId == OffshoreNodeId) {
+                auto mediumIndex = replica.MediumIndex;
+                auto* medium = chunkManager->FindMediumByIndex(mediumIndex);
+                if (!IsObjectAlive(medium)) {
+                    YT_TLOG_DEBUG("Found offshore chunk replica with a non-alive medium")
+                        .With("ChunkId", chunkId)
+                        .With("MediumIndex", mediumIndex);
+                    continue;
+                }
+                aliveReplicas.emplace_back(TAugmentedStoredChunkReplicaPtr(medium, replica.ReplicaIndex, replica.ReplicaState));
+                continue;
+            }
+
             auto locationIndex = replica.LocationIndex;
             auto* location = dataNodeTracker->FindChunkLocationByIndex(locationIndex);
             if (!IsObjectAlive(location)) {
-                YT_LOG_DEBUG("Found Sequoia chunk replica with a non-existent location (ChunkId: %v, LocationIndex: %v)",
-                    chunkId,
-                    locationIndex);
+                YT_TLOG_DEBUG("Found Sequoia chunk replica with a non-existent location")
+                    .With("ChunkId", chunkId)
+                    .With("LocationIndex", locationIndex);
                 continue;
             }
             auto node = location->GetNode();
             if (!IsObjectAlive(node)) {
-                YT_LOG_ERROR("Found Sequoia chunk replica with a location not bound to any node (ChunkId: %v, LocationIndex: %v)",
-                    chunkId,
-                    locationIndex);
+                YT_TLOG_ERROR("Found Sequoia chunk replica with a location not bound to any node")
+                    .With("ChunkId", chunkId)
+                    .With("LocationIndex", locationIndex);
                 continue;
             }
 
-            if (!includeNonOnlineReplicas && !location->IsRegisteredOrOnline())
-            {
-                YT_LOG_TRACE("Found Sequoia chunk replica on non-online node, ignoring replica (ChunkId: %v, NodeAddress: %v, NodeState: %v)",
-                    chunkId,
-                    node->GetDefaultAddress(),
-                    node->GetLocalState());
+            if (!includeNonOnlineReplicas && !location->IsRegisteredOrOnline()) {
+                YT_TLOG_TRACE("Found Sequoia chunk replica on non-online node, ignoring replica")
+                    .With("ChunkId", chunkId)
+                    .With("NodeAddress", node->GetDefaultAddress())
+                    .With("NodeState", node->GetLocalState());
                 continue;
             }
             aliveReplicas.emplace_back(TAugmentedStoredChunkReplicaPtr(location, replica.ReplicaIndex, replica.ReplicaState));
@@ -235,19 +251,23 @@ public:
         auto chunkId = chunk->GetId();
         auto isErasure = chunk->IsErasure();
 
-        auto masterReplicas = chunk->LastSeenReplicas();
-        std::vector<TNodeId> replicas(masterReplicas.begin(), masterReplicas.end());
+        const auto& config = GetDynamicConfig();
+        auto chunkSequoiaConfig = GetChunkSequoiaConfig(chunkId, GetDynamicConfig());
+        std::vector<TNodeId> replicas;
+        if (config->AlwaysShowMasterLastSeenReplicas || !chunkSequoiaConfig.StoreInSequoia || chunkSequoiaConfig.StoreSequoiaReplicasOnMaster) {
+            auto masterReplicas = chunk->LastSeenReplicas();
+            replicas.assign(masterReplicas.begin(), masterReplicas.end());
+        }
 
         if (isErasure && std::ssize(replicas) < ::NErasure::MaxTotalPartCount) {
             if (!replicas.empty()) {
-                YT_LOG_ALERT("Last seen replicas count stored on master is weird (ChunkId: %v, ReplicaCount: %v)",
-                    chunkId,
-                    std::ssize(replicas));
+                YT_TLOG_ALERT("Last seen replicas count stored on master is weird")
+                    .With("ChunkId", chunkId)
+                    .With("ReplicaCount", std::ssize(replicas));
             }
             replicas.resize(::NErasure::MaxTotalPartCount);
         }
 
-        auto chunkSequoiaConfig = GetChunkSequoiaConfig(chunkId, GetDynamicConfig());
         if (!chunkSequoiaConfig.FetchReplicasFromSequoia) {
             return MakeFuture(replicas);
         }
@@ -585,11 +605,16 @@ private:
 
         for (const auto& chunk : chunks) {
             auto convertToSequoiaReplica = [&] (TAugmentedStoredChunkReplicaPtr masterReplica) {
+                auto mediumIndex = masterReplica.GetNodeId() == OffshoreNodeId ? masterReplica.GetEffectiveMediumIndex() : -1;
                 TSequoiaChunkReplica replica{
                     .ChunkId = chunk->GetId(),
                     .ReplicaIndex = masterReplica.GetReplicaIndex(),
                     .NodeId = masterReplica.GetNodeId(),
-                    .ReplicaState = masterReplica.GetReplicaState()
+                    .ReplicaState = masterReplica.GetReplicaState(),
+                    // For offshore media, -1 for domestic for correct Sequoia replica validation.
+                    // (Sequoia validation will consider replicas with -1 and normal medium index different,
+                    // but there is no way to set normal medium index for replicas fetched from Sequoia now).
+                    .MediumIndex = mediumIndex
                 };
                 if (auto* locationReplica = masterReplica.As<EStoredReplicaType::ChunkLocation>()) {
                     // NB: InvalidChunkLocationIndex will be used as default for offshore media.
@@ -608,9 +633,9 @@ private:
                 replicas.push_back(convertToSequoiaReplica(masterReplica));
             }
 
-            YT_LOG_TRACE("Fetched master replicas for chunk (ChunkId: %v, Replicas: %v)",
-                chunk->GetId(),
-                replicas);
+            YT_TLOG_TRACE("Fetched master replicas for chunk")
+                .With("ChunkId", chunk->GetId())
+                .With("Replicas", replicas);
 
             auto chunkSequoiaConfig = GetChunkSequoiaConfig(chunk->GetId(), GetDynamicConfig());
             if (chunkSequoiaConfig.ValidateSequoiaReplicasFetch) {
@@ -627,9 +652,9 @@ private:
                     approvedReplicas.push_back(convertToSequoiaReplica(masterReplica));
                 }
 
-                YT_LOG_TRACE("Fetched approved master replicas for chunk pending Sequoia fetch and validation (ChunkId: %v, ApprovedMasterReplicas: %v)",
-                    chunk->GetId(),
-                    approvedReplicas);
+                YT_TLOG_TRACE("Fetched approved master replicas for chunk pending Sequoia fetch and validation")
+                    .With("ChunkId", chunk->GetId())
+                    .With("ApprovedMasterReplicas", approvedReplicas);
             }
         }
     }
@@ -734,10 +759,10 @@ private:
             }
 
             auto replicasIt = result.find(chunkId);
-            YT_LOG_ALERT_AND_THROW_IF(
+            YT_TLOG_ALERT_AND_THROW_IF(
                 replicasIt == result.end(),
-                "Master replicas were not fetched for chunk during combined master and Sequoia replica fetch (ChunkId: %v)",
-                chunkId);
+                "Master replicas were not fetched for chunk during combined master and Sequoia replica fetch")
+                .With("ChunkId", chunkId);
 
             auto& replicas = replicasIt->second.Value();
             replicas.insert(replicas.end(), sequoiaReplicas.begin(), sequoiaReplicas.end());
@@ -755,41 +780,39 @@ private:
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
         if (CellTagFromId(chunkId) != state->CellTag) {
-            YT_LOG_TRACE("Skipping foreign chunk during Sequoia replica validation (ChunkId: %v)",
-                chunkId);
+            YT_TLOG_TRACE("Skipping foreign chunk during Sequoia replica validation")
+                .With("ChunkId", chunkId);
             return;
         }
 
-        YT_LOG_ALERT_AND_THROW_IF(
-            !state->ConfigForValidation,
-            "No Sequoia replicas config is found during Sequoia replica fetch validation");
+        YT_TLOG_ALERT_AND_THROW_IF(!state->ConfigForValidation, "No Sequoia replicas config is found during Sequoia replica fetch validation");
 
         auto chunkSequoiaConfig = GetChunkSequoiaConfig(chunkId, state->ConfigForValidation);
 
         SortUnique(sequoiaReplicas);
         SortUnique(masterReplicas);
 
-        YT_LOG_TRACE("Validating chunk replicas (ChunkId: %v, MasterReplicas: %v, SequoiaReplicas: %v, CommitTimestamp: %v)",
-            chunkId,
-            masterReplicas,
-            sequoiaReplicas,
-            state->Timestamp);
+        YT_TLOG_TRACE("Validating chunk replicas")
+            .With("ChunkId", chunkId)
+            .With("MasterReplicas", masterReplicas)
+            .With("SequoiaReplicas", sequoiaReplicas)
+            .With("CommitTimestamp", state->Timestamp);
 
         if (masterReplicas != sequoiaReplicas) {
             if (!chunkSequoiaConfig.AllowExtraMasterReplicasDuringValidation) {
-                YT_LOG_ALERT("Master and Sequoia replicas differ (ChunkId: %v, MasterReplicas: %v, SequoiaReplicas: %v, CommitTimestamp: %v)",
-                    chunkId,
-                    masterReplicas,
-                    sequoiaReplicas,
-                    state->Timestamp);
+                YT_TLOG_ALERT("Master and Sequoia replicas differ")
+                    .With("ChunkId", chunkId)
+                    .With("MasterReplicas", masterReplicas)
+                    .With("SequoiaReplicas", sequoiaReplicas)
+                    .With("CommitTimestamp", state->Timestamp);
             } else {
                 for (auto sequoiaReplica : sequoiaReplicas) {
                     if (std::find(masterReplicas.begin(), masterReplicas.end(), sequoiaReplica) == masterReplicas.end()) {
-                        YT_LOG_ALERT("Extra Sequoia replica found (ChunkId: %v, MasterReplicas: %v, ExtraSequoiaReplicas: %v, CommitTimestamp: %v)",
-                            chunkId,
-                            masterReplicas,
-                            sequoiaReplica,
-                            state->Timestamp);
+                        YT_TLOG_ALERT("Extra Sequoia replica found")
+                            .With("ChunkId", chunkId)
+                            .With("MasterReplicas", masterReplicas)
+                            .With("ExtraSequoiaReplica", sequoiaReplica)
+                            .With("CommitTimestamp", state->Timestamp);
                     }
                 }
             }
@@ -808,7 +831,7 @@ private:
         const TColumnFilter& columnFilter,
         TTimestamp timestamp,
         ISequoiaTransactionPtr transaction,
-        const std::vector<TErrorCode> retriableErrorCodes,
+        const std::vector<TErrorCode>& retriableErrorCodes,
         const std::function<NYson::TYsonString(const NRecords::TChunkReplicas&)>& extractReplicas) const
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
@@ -830,7 +853,7 @@ private:
         }
 
         return replicaRecordsFuture
-            .Apply(BIND([extractReplicas, retriableErrorCodes] (const TErrorOr<std::vector<std::optional<NRecords::TChunkReplicas>>>& replicaRecordsOrError) {
+            .Apply(BIND([extractReplicas, retriableErrorCodes = retriableErrorCodes] (const TErrorOr<std::vector<std::optional<NRecords::TChunkReplicas>>>& replicaRecordsOrError) {
                 ThrowOnSequoiaReplicasError(replicaRecordsOrError, retriableErrorCodes);
                 const auto& replicas = replicaRecordsOrError.ValueOrThrow();
                 return ParseReplicas(replicas, extractReplicas);

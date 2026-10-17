@@ -124,6 +124,7 @@ private: //IDqComputeActorAsyncInput
         InputFlowFetchStatus = NUdf::EFetchStatus::Finish;
         this->Send(LookupSourceId, new NActors::TEvents::TEvPoison{});
         static_cast<TDerived *>(this)->Free();
+        TActor::PassAway();
     }
 
     void Free() {
@@ -510,9 +511,9 @@ private:
                 ++row;
             }
             CheckPendingWatermark();
-            if (Batches && (!KeysForLookup->empty() || ReadyQueue.RowCount())) {
+            if (Batches && row) {
                 Batches->Inc();
-                LruHits->Add(ReadyQueue.RowCount());
+                LruHits->Add(row - AwaitingQueue.size());
                 LruMiss->Add(AwaitingQueue.size());
             }
             if (KeysForLookup->empty()) {
@@ -1134,7 +1135,8 @@ THashMap<TStringBuf, size_t> GetNameToIndex(TIndex size, TGetter&& getter) {
 }
 
 THashMap<TStringBuf, size_t> GetNameToIndex(const ::google::protobuf::RepeatedPtrField<TProtoStringType>& names) {
-    return GetNameToIndex(names.size(), [&names](auto idx) {
+    // the map keys are views: return the proto strings by reference, not as temporaries
+    return GetNameToIndex(names.size(), [&names](auto idx) -> const TProtoStringType& {
         return names[idx];
     });
 }
@@ -1159,7 +1161,7 @@ TVector<size_t> GetJoinColumnIndexes(TIndex size, TGetter&& getter, const THashM
 
 [[maybe_unused]]
 TVector<size_t> GetJoinColumnIndexes(const ::google::protobuf::RepeatedPtrField<TProtoStringType>& names, const THashMap<TStringBuf, size_t>& joinColumns) {
-    return GetJoinColumnIndexes(names.size(), [&names](auto idx) {
+    return GetJoinColumnIndexes(names.size(), [&names](auto idx) -> const TProtoStringType& {
         return names[idx];
     }, joinColumns);
 }

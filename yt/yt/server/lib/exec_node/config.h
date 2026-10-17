@@ -8,17 +8,17 @@
 
 #include <yt/yt/server/lib/misc/config.h>
 
-#include <yt/yt/server/lib/nbd/config.h>
-
-#include <yt/yt/server/lib/signature/components/public.h>
-
 #include <yt/yt/ytlib/chunk_client/public.h>
+
+#include <yt/yt/library/nbd/config.h>
 
 #include <yt/yt/library/dns_over_rpc/client/config.h>
 
 #include <yt/yt/library/gpu/config.h>
 
 #include <yt/yt/library/tracing/jaeger/public.h>
+
+#include <yt/yt/library/signature/components/public.h>
 
 #include <yt/yt/core/concurrency/config.h>
 
@@ -188,8 +188,6 @@ struct TSlotManagerDynamicConfig
     //! Copy artifacts without blocking any of the slot location IO invokers.
     bool EnableAsyncArtifactCopy;
 
-    std::optional<i64> ArtifactPipeSize;
-
     TDuration CopyRateAggregatorHalfLife;
 
     //! Polymorphic job environment configuration.
@@ -228,6 +226,9 @@ struct TVolumeManagerDynamicConfig
 
     //! For testing purpuses.
     bool ThrowOnPrepareVolume;
+
+    //! For testing purposes.
+    bool ThrowOnPrepareLayers;
 
     REGISTER_YSON_STRUCT(TVolumeManagerDynamicConfig);
 
@@ -365,6 +366,8 @@ struct TControllerAgentConnectorDynamicConfig
     TDuration RunningJobStatisticsSendingBackoff;
 
     bool ResendFullJobInfo;
+
+    bool OmitDataStatisticsFromYson;
 
     REGISTER_YSON_STRUCT(TControllerAgentConnectorDynamicConfig);
 
@@ -783,10 +786,6 @@ struct TJobProxyConfig
 
     bool JobProxySendHeartbeatBeforeAbort;
 
-    //! This is a special testing option.
-    //! Instead of actually setting root fs, it just provides special environment variable.
-    bool TestRootFS;
-
     //! This option is used for testing purposes only.
     //! It runs job shell under root user instead of slot user.
     bool TestPollJobShell;
@@ -826,7 +825,6 @@ struct TLogDumpConfig
 
     static void Register(TRegistrar registrar);
 };
-
 
 DEFINE_REFCOUNTED_TYPE(TLogDumpConfig)
 

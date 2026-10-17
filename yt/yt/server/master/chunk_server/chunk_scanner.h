@@ -1,7 +1,8 @@
 #pragma once
 
-#include "public.h"
 #include "private.h"
+
+#include <yt/yt/server/master/cell_master/bootstrap.h>
 
 #include <yt/yt/server/master/object_server/object.h>
 
@@ -50,6 +51,9 @@ public:
     void Stop(int shardIndex);
 
     void OnChunkDestroyed(TChunk* chunk);
+
+    //! Returns whether the chunk belongs to a started shard, even after its global scan has finished.
+    bool IsRelevant(TChunk* chunk) const;
 
     //! Tries to dequeue the next chunk.
     /*!
@@ -107,16 +111,15 @@ public:
 
 protected:
     static int GetShardIndex(TChunk* chunk);
-
-    bool IsRelevant(TChunk* chunk) const;
 };
 
 class TChunkScanQueueBase
 {
 public:
-    explicit TChunkScanQueueBase(EChunkScanKind kind);
+    TChunkScanQueueBase(NCellMaster::TBootstrap* bootstrap, EChunkScanKind kind);
 
 protected:
+    const NCellMaster::TBootstrap* Bootstrap_;
     const EChunkScanKind Kind_;
 
     static bool IsObjectAlive(TChunk* chunk);
@@ -249,6 +252,7 @@ public:
     using TQueuedChunk = TChunkQueue::TQueuedChunk;
 
     TChunkScannerWithPayload(
+        NCellMaster::TBootstrap* bootstrap,
         EChunkScanKind kind,
         bool journal);
 

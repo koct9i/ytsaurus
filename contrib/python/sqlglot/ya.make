@@ -2,7 +2,7 @@
 
 PY3_LIBRARY()
 
-VERSION(30.11.0)
+VERSION(30.15.0)
 
 LICENSE(MIT)
 
@@ -14,11 +14,13 @@ PY_SRCS(
     sqlglot/__main__.py
     sqlglot/_typing.py
     sqlglot/_version.py
+    sqlglot/anonymize.py
     sqlglot/dialects/__init__.py
     sqlglot/dialects/athena.py
     sqlglot/dialects/bigquery.py
     sqlglot/dialects/clickhouse.py
     sqlglot/dialects/databricks.py
+    sqlglot/dialects/dax.py
     sqlglot/dialects/dialect.py
     sqlglot/dialects/doris.py
     sqlglot/dialects/dremio.py
@@ -77,6 +79,7 @@ PY_SRCS(
     sqlglot/generators/bigquery.py
     sqlglot/generators/clickhouse.py
     sqlglot/generators/databricks.py
+    sqlglot/generators/dax.py
     sqlglot/generators/doris.py
     sqlglot/generators/dremio.py
     sqlglot/generators/drill.py
@@ -117,6 +120,7 @@ PY_SRCS(
     sqlglot/optimizer/eliminate_joins.py
     sqlglot/optimizer/eliminate_subqueries.py
     sqlglot/optimizer/isolate_table_selects.py
+    sqlglot/optimizer/journal.py
     sqlglot/optimizer/merge_subqueries.py
     sqlglot/optimizer/normalize.py
     sqlglot/optimizer/normalize_identifiers.py
@@ -138,6 +142,7 @@ PY_SRCS(
     sqlglot/parsers/bigquery.py
     sqlglot/parsers/clickhouse.py
     sqlglot/parsers/databricks.py
+    sqlglot/parsers/dax.py
     sqlglot/parsers/doris.py
     sqlglot/parsers/dremio.py
     sqlglot/parsers/drill.py
@@ -177,6 +182,7 @@ PY_SRCS(
     sqlglot/typing/__init__.py
     sqlglot/typing/bigquery.py
     sqlglot/typing/clickhouse.py
+    sqlglot/typing/databricks.py
     sqlglot/typing/duckdb.py
     sqlglot/typing/hive.py
     sqlglot/typing/mysql.py

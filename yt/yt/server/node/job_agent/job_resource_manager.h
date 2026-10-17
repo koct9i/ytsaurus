@@ -213,7 +213,7 @@ private:
 
     TJobResourceManager::TImpl* const ResourceManagerImpl_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, ResourcesLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, ResourcesLock_);
 
     NClusterNode::TJobResources BaseResourceUsage_;
     NClusterNode::TJobResources AdditionalResourceUsage_;
@@ -251,18 +251,18 @@ private:
 
     TResourceHolderInfo BuildResourceHolderInfo() const noexcept;
 
-    template <CInvocable<NClusterNode::TJobResources(const NClusterNode::TJobResources&)> TResourceUsageUpdater>
+    template <NMpl::CInvocable<NClusterNode::TJobResources(const NClusterNode::TJobResources&)> TResourceUsageUpdater>
     //! Semantic requirement: TResourceUsageUpdater::operator() must return delta between
     //! cumulative resource usages before and after the call to this function.
     bool DoSetResourceUsage(
         const NClusterNode::TJobResources& resourceUsage,
-        TStringBuf argumentName,
+        NLogging::TLoggingTagKey argumentName,
         TResourceUsageUpdater resourceUsageUpdater,
         bool isReleasing = false);
 
     bool DoTrySetResourceUsage(
         const NClusterNode::TJobResources& resourceUsageDelta,
-        TStringBuf argumentName);
+        NLogging::TLoggingTagKey argumentName);
 };
 
 DEFINE_REFCOUNTED_TYPE(TResourceHolder)

@@ -63,7 +63,7 @@ public:
         , MemoryUsageTracker_(std::move(memoryUsageTracker))
         , FileName_(std::move(fileName))
         , Config_(std::move(config))
-        , Logger(HydraLogger().WithTag("Path: %v", FileName_))
+        , Logger(HydraLogger().WithTag("Path", FileName_))
         , Index_(MakeIndex(MakeIndexFileName()))
     { }
 
@@ -87,7 +87,7 @@ public:
         Error_.ThrowOnError();
         ValidateNotOpen();
 
-        YT_LOG_DEBUG("Opening changelog");
+        YT_TLOG_DEBUG("Opening changelog");
 
         try {
             NFS::WrapIOErrors([&] {
@@ -111,7 +111,7 @@ public:
                         NHydra::EErrorCode::BrokenChangelog,
                         "Changelog file %v is too small to fit header",
                         FileName_)
-                        << TErrorAttribute("size", headerBuffer.Size());
+                        .With("size", headerBuffer.Size());
                 }
 
                 const auto* header = reinterpret_cast<const TChangelogHeader*>(headerBuffer.Begin());
@@ -165,13 +165,12 @@ public:
                         std::max(guessedRecordReadSize, Config_->RecoveryBufferSize),
                         dataFileLength - currentDataOffset);
 
-                    YT_LOG_DEBUG("Recovering records "
-                        "(CurrentRecordIndex: %v, CurrentDataOffset: %v, DataFileLength: %v, GuessedRecordReadSize: %v, BlockSize: %v)",
-                        currentRecordIndex,
-                        currentDataOffset,
-                        dataFileLength,
-                        guessedRecordReadSize,
-                        blockSize);
+                    YT_TLOG_DEBUG("Recovering records")
+                        .With("CurrentRecordIndex", currentRecordIndex)
+                        .With("CurrentDataOffset", currentDataOffset)
+                        .With("DataFileLength", dataFileLength)
+                        .With("GuessedRecordReadSize", guessedRecordReadSize)
+                        .With("BlockSize", blockSize);
 
                     auto result = ReadAndParseRange(
                         std::pair(currentDataOffset, currentDataOffset + blockSize),
@@ -179,12 +178,12 @@ public:
                         false);
 
                     if (result.Records.empty()) {
-                        YT_LOG_DEBUG("No more records to recover");
+                        YT_TLOG_DEBUG("No more records to recover");
                         break;
                     }
 
-                    YT_LOG_DEBUG("Records recovered (RecordCount: %v)",
-                        result.Records.size());
+                    YT_TLOG_DEBUG("Records recovered")
+                        .With("RecordCount", result.Records.size());
 
                     for (const auto& range : result.RecordRanges) {
                         Index_->AppendRecord(currentRecordIndex, range);
@@ -201,13 +200,13 @@ public:
                     WaitFor(IOEngine_->FlushFile({.Handle = DataFileHandle_, .Mode = EFlushFileMode::All}))
                         .ThrowOnError();
 
-                    YT_LOG_DEBUG("Changelog data file truncated (RecordCount: %v, DataFileLength: %v)",
-                        currentRecordIndex,
-                        currentDataOffset);
+                    YT_TLOG_DEBUG("Changelog data file truncated")
+                        .With("RecordCount", currentRecordIndex)
+                        .With("DataFileLength", currentDataOffset);
                 } else {
-                    YT_LOG_DEBUG("Changelog data does not need truncation (RecordCount: %v, DataFileLength: %v)",
-                        currentRecordIndex,
-                        dataFileLength);
+                    YT_TLOG_DEBUG("Changelog data does not need truncation")
+                        .With("RecordCount", currentRecordIndex)
+                        .With("DataFileLength", dataFileLength);
                 }
 
                 CurrentFileOffset_.store(currentDataOffset);
@@ -222,14 +221,14 @@ public:
                 NHydra::EErrorCode::ChangelogIOError,
                 "Error opening changelog %v",
                 FileName_)
-                << ex);
+                .With(ex));
         }
 
         Open_ = true;
 
-        YT_LOG_DEBUG("Changelog opened (RecordCount: %v, Format: %v)",
-            RecordCount_.load(),
-            Format_);
+        YT_TLOG_DEBUG("Changelog opened")
+            .With("RecordCount", RecordCount_.load())
+            .With("Format", Format_);
     }
 
     void Close() override
@@ -241,8 +240,8 @@ public:
         }
 
         auto recordCount = GetRecordCount();
-        YT_LOG_DEBUG("Closing changelog (RecordCount: %v)",
-            recordCount);
+        YT_TLOG_DEBUG("Closing changelog")
+            .With("RecordCount", recordCount);
 
         try {
             NFS::WrapIOErrors([&] {
@@ -256,12 +255,12 @@ public:
         } catch (const std::exception& ex) {
             Cleanup();
             RecordErrorAndThrow(TError("Error closing changelog")
-                << ex);
+                .With(ex));
         }
 
         Cleanup();
 
-        YT_LOG_DEBUG("Changelog closed");
+        YT_TLOG_DEBUG("Changelog closed");
     }
 
     void Create(
@@ -271,7 +270,7 @@ public:
         Error_.ThrowOnError();
         ValidateNotOpen();
 
-        YT_LOG_DEBUG("Creating changelog");
+        YT_TLOG_DEBUG("Creating changelog");
 
         try {
             Format_ = format;
@@ -292,12 +291,12 @@ public:
                 NHydra::EErrorCode::ChangelogIOError,
                 "Error creating changelog %v",
                 FileName_)
-                << ex);
+                .With(ex));
         }
 
         Open_ = true;
 
-        YT_LOG_DEBUG("Changelog created");
+        YT_TLOG_DEBUG("Changelog created");
     }
 
     const TChangelogMeta& GetMeta() const override
@@ -364,8 +363,8 @@ public:
         Error_.ThrowOnError();
         ValidateOpen();
 
-        YT_LOG_DEBUG("Started flushing changelog (WithIndex: %v)",
-            withIndex);
+        YT_TLOG_DEBUG("Started flushing changelog")
+            .With("WithIndex", withIndex);
 
         try {
             WaitFor(IOEngine_->FlushFile({.Handle = DataFileHandle_, .Mode = EFlushFileMode::Data}))
@@ -392,10 +391,10 @@ public:
                 NHydra::EErrorCode::ChangelogIOError,
                 "Error flushing changelog %v",
                 FileName_)
-                << ex);
+                .With(ex));
         }
 
-        YT_LOG_DEBUG("Finished flushing changelog");
+        YT_TLOG_DEBUG("Finished flushing changelog");
     }
 
     std::vector<TSharedRef> Read(
@@ -446,10 +445,10 @@ public:
         try {
             auto dataOffset = Index_->GetRecordRange(recordCount).first;
 
-            YT_LOG_DEBUG("Started truncating file changelog (RecordCount: %v -> %v, DataOffset: %v)",
-                oldRecordCount,
-                recordCount,
-                dataOffset);
+            YT_TLOG_DEBUG("Started truncating file changelog")
+                .With("OldRecordCount", oldRecordCount)
+                .With("NewRecordCount", recordCount)
+                .With("DataOffset", dataOffset);
 
             auto indexFileName = MakeIndexFileName();
             auto tempIndexFileName = MakeTempIndexFileName();
@@ -483,15 +482,15 @@ public:
             CurrentFileOffset_.store(dataOffset);
             RecordCount_.store(recordCount);
 
-            YT_LOG_DEBUG("Finished truncating file changelog (RecordCount: %v -> %v)",
-                oldRecordCount,
-                recordCount);
+            YT_TLOG_DEBUG("Finished truncating file changelog")
+                .With("OldRecordCount", oldRecordCount)
+                .With("NewRecordCount", recordCount);
         } catch (const std::exception& ex) {
             RecordErrorAndThrow(TError(
                 NHydra::EErrorCode::ChangelogIOError,
                 "Error truncating changelog %v",
                 FileName_)
-                << ex);
+                .With(ex));
         }
     }
 
@@ -528,7 +527,8 @@ private:
     [[noreturn]]
     void RecordErrorAndThrow(const TError& error)
     {
-        YT_LOG_ERROR(error);
+        YT_TLOG_ERROR("Changelog operation failed")
+            .With(error);
         Error_ = error;
         THROW_ERROR(error);
     }
@@ -544,11 +544,10 @@ private:
         auto amplification = static_cast<double>(MediaWrittenBytes_) / PayloadWrittenBytes_;
         WriteAmplificationRatio_.store(amplification, std::memory_order::relaxed);
 
-        YT_LOG_DEBUG("Updating write amplification "
-            "(PayloadWrittenBytes: %v, MediaWrittenBytes: %v, WriteAmplification: %v)",
-            PayloadWrittenBytes_,
-            MediaWrittenBytes_,
-            amplification);
+        YT_TLOG_DEBUG("Updating write amplification")
+            .With("PayloadWrittenBytes", PayloadWrittenBytes_)
+            .With("MediaWrittenBytes", MediaWrittenBytes_)
+            .With("WriteAmplification", amplification);
     }
 
     std::string MakeIndexFileName()
@@ -607,7 +606,7 @@ private:
     {
         int index = 0;
         while (true) {
-            YT_LOG_DEBUG("Locking data file");
+            YT_TLOG_DEBUG("Locking data file");
 
             auto error = WaitFor(IOEngine_->Lock({
                 .Handle = DataFileHandle_,
@@ -623,10 +622,11 @@ private:
                     NHydra::EErrorCode::ChangelogIOError,
                     "Cannot lock %v",
                     FileName_)
-                    << error;
+                    .With(error);
             }
 
-            YT_LOG_WARNING(error, "Error locking data file; backing off and retrying");
+            YT_TLOG_WARNING("Error locking data file; backing off and retrying")
+                .With(error);
             TDelayedExecutor::WaitForDuration(LockBackoffTime);
         }
     }
@@ -712,9 +712,9 @@ private:
         YT_VERIFY(firstRecordIndex == RecordCount_);
 
         try {
-            YT_LOG_DEBUG("Started appending to changelog (FirstRecordIndex: %v, RecordCount: %v)",
-                firstRecordIndex,
-                records.size());
+            YT_TLOG_DEBUG("Started appending to changelog")
+                .With("FirstRecordIndex", firstRecordIndex)
+                .With("RecordCount", records.size());
 
             i64 prevFileOffset = CurrentFileOffset_.load();
             i64 currentFileOffset = prevFileOffset;
@@ -803,16 +803,16 @@ private:
 
             UpdateWriteAmplificationStat();
 
-            YT_LOG_DEBUG("Finished appending to changelog (FirstRecordIndex: %v, RecordCount: %v, Bytes: %v)",
-                firstRecordIndex,
-                records.size(),
-                bytesWritten);
+            YT_TLOG_DEBUG("Finished appending to changelog")
+                .With("FirstRecordIndex", firstRecordIndex)
+                .With("RecordCount", records.size())
+                .With("Bytes", bytesWritten);
         } catch (const std::exception& ex) {
             RecordErrorAndThrow(TError(
                 NHydra::EErrorCode::ChangelogIOError,
                 "Error appending to changelog %v",
                 FileName_)
-                << ex);
+                .With(ex));
         }
     }
 
@@ -826,10 +826,10 @@ private:
         YT_VERIFY(maxRecords >= 0);
 
         try {
-            YT_LOG_DEBUG("Started reading changelog (FirstRecordIndex: %v, MaxRecords: %v, MaxBytes: %v)",
-                firstRecordIndex,
-                maxRecords,
-                maxBytes);
+            YT_TLOG_DEBUG("Started reading changelog")
+                .With("FirstRecordIndex", firstRecordIndex)
+                .With("MaxRecords", maxRecords)
+                .With("MaxBytes", maxBytes);
 
             auto optionalRange = Index_->FindRecordsRange(firstRecordIndex, maxRecords, maxBytes);
             if (!optionalRange) {
@@ -840,9 +840,9 @@ private:
                 firstRecordIndex,
                 /*throwError*/ true);
 
-            YT_LOG_DEBUG("Finished reading changelog (RecordCount: %v, Bytes: %v)",
-                result.Records.size(),
-                GetByteSize(result.Records));
+            YT_TLOG_DEBUG("Finished reading changelog")
+                .With("RecordCount", result.Records.size())
+                .With("Bytes", GetByteSize(result.Records));
 
             return std::move(result.Records);
         } catch (const std::exception& ex) {
@@ -850,7 +850,7 @@ private:
                 NHydra::EErrorCode::ChangelogIOError,
                 "Error reading changelog %v",
                 FileName_)
-                << ex);
+                .With(ex));
         }
     }
 
@@ -870,7 +870,7 @@ private:
             THROW_ERROR_EXCEPTION(
                 NChunkClient::EErrorCode::MalformedReadRequest,
                 "Negative block index in fragment descriptor")
-                << makeErrorAttributes();
+                .With(makeErrorAttributes());
         }
 
         auto flushedRecordCount = Index_->GetFlushedDataRecordCount();
@@ -878,8 +878,8 @@ private:
             THROW_ERROR_EXCEPTION(
                 NChunkClient::EErrorCode::MissingJournalChunkRecord,
                 "Journal chunk record is missing")
-                << makeErrorAttributes()
-                << TErrorAttribute("flushed_record_count", flushedRecordCount);
+                .With(makeErrorAttributes())
+                .With("flushed_record_count", flushedRecordCount);
         }
 
         auto range = Index_->GetRecordRange(fragmentDescriptor.BlockIndex);
@@ -892,7 +892,7 @@ private:
             THROW_ERROR_EXCEPTION(
                 NChunkClient::EErrorCode::MalformedReadRequest,
                 "Negative length in fragment descriptor")
-                << makeErrorAttributes();
+                .With(makeErrorAttributes());
         }
 
         if (fragmentDescriptor.BlockOffset < 0 ||
@@ -901,8 +901,8 @@ private:
             THROW_ERROR_EXCEPTION(
                 NChunkClient::EErrorCode::MalformedReadRequest,
                 "Fragment is out of record range")
-                << makeErrorAttributes()
-                << TErrorAttribute("record_length", recordLength);
+                .With(makeErrorAttributes())
+                .With("record_length", recordLength);
         }
 
         return TReadRequest{
@@ -1043,7 +1043,7 @@ private:
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Record buffer is too small to fit record header")
-                << TErrorAttribute("record_index", recordIndex));
+                .With("record_index", recordIndex));
         }
 
         const auto* header = reinterpret_cast<const TRecordHeader*>(buffer.Begin() + currentOffset);
@@ -1053,37 +1053,37 @@ private:
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Invalid record index in header")
-                << TErrorAttribute("expected_record_index", recordIndex)
-                << TErrorAttribute("actual_record_index", header->RecordIndex));
+                .With("expected_record_index", recordIndex)
+                .With("actual_record_index", header->RecordIndex));
         }
 
         if (header->ChangelogUuid != Uuid_) {
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Invalid changelog UUID in record header")
-                << TErrorAttribute("expected_uuid", Uuid_)
-                << TErrorAttribute("actual_uuid", header->ChangelogUuid));
+                .With("expected_uuid", Uuid_)
+                .With("actual_uuid", header->ChangelogUuid));
         }
 
         if (header->PayloadSize < 0) {
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Negative payload size in record header")
-                << TErrorAttribute("record_index", recordIndex));
+                .With("record_index", recordIndex));
         }
 
         if (header->PagePaddingSize < 0) {
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Negative page padding size in record header")
-                << TErrorAttribute("record_index", recordIndex));
+                .With("record_index", recordIndex));
         }
 
         if (currentOffset + header->PayloadSize > std::ssize(buffer)) {
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Read buffer is too small to fit record data")
-                << TErrorAttribute("record_index", recordIndex));
+                .With("record_index", recordIndex));
         }
 
         auto record = buffer.Slice(currentOffset, currentOffset + header->PayloadSize);
@@ -1093,7 +1093,7 @@ private:
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Invalid record data checksum")
-                << TErrorAttribute("record_index", recordIndex));
+                .With("record_index", recordIndex));
         }
 
         currentOffset += AlignUpSpace<i64>(header->PayloadSize, ChangelogQWordAlignment);
@@ -1103,7 +1103,7 @@ private:
             return onError(TError(
                 NHydra::EErrorCode::BrokenChangelog,
                 "Read buffer is too small to fit record padding")
-                << TErrorAttribute("record_index", recordIndex));
+                .With("record_index", recordIndex));
         }
 
         return TRecordParseResult{
@@ -1114,9 +1114,9 @@ private:
 
     void WipeDataFileRange(std::pair<i64, i64> range)
     {
-        YT_LOG_DEBUG("Started wiping changelog data file range (StartOffset: %v, EndOffset: %v)",
-            range.first,
-            range.second);
+        YT_TLOG_DEBUG("Started wiping changelog data file range")
+            .With("StartOffset", range.first)
+            .With("EndOffset", range.second);
 
         auto wipeBuffer = TSharedMutableRef::AllocatePageAligned<TUnbufferedFileChangelogWipeTag>(
             WipeBufferSize,
@@ -1137,7 +1137,7 @@ private:
             currentOffset += currentSize;
         }
 
-        YT_LOG_DEBUG("Finished wiping changelog data file range");
+        YT_TLOG_DEBUG("Finished wiping changelog data file range");
     }
 };
 

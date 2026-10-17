@@ -6,9 +6,9 @@
 
 #include <yt/yt/client/chunk_client/read_limit.h>
 
-#include <yt/yt/client/table_client/unversioned_value.h>
-#include <yt/yt/client/table_client/unversioned_row.h>
 #include <yt/yt/client/table_client/row_buffer.h>
+#include <yt/yt/client/table_client/unversioned_row.h>
+#include <yt/yt/client/table_client/unversioned_value.h>
 
 #include <yt/yt/library/query/base/query.h>
 
@@ -117,6 +117,7 @@ NYT::TSharedRange<TUnversionedRow> ConvertConstantSetToSharedRange(
     });
     column = column->permute(permutation, /*limit*/ 0);
 
+    // TODO(buyval01): Handle the different NaN comparison semantics in ClickHouse and YT.
     return NYT::NClickHouseServer::ToRowRange(
         DB::Block(std::move(set)),
         {targetDataType},
@@ -211,9 +212,10 @@ std::optional<TExpressionConvertionResult> ConnverterImpl(
             result->DataType = (desiredDataType != nullptr) ? desiredDataType : constantDataType;
             result->ValueType = (desiredValueType.has_value() ? *desiredValueType : constantValueType);
 
+            // TODO(buyval01): Handle the different NaN comparison semantics in ClickHouse and YT.
             result->Expression = New<TLiteralExpression>(
                 result->ValueType,
-                ToUnversionedOwningValue(field,result->DataType, context.ConversionSettings));
+                ToUnversionedOwningValue(field, result->DataType, context.ConversionSettings));
 
             break;
         }
@@ -261,7 +263,7 @@ std::optional<TExpressionConvertionResult> ConnverterImpl(
 
                 TConstExpressionPtr foldedExpr;
                 bool bailed = false;
-                for (auto& argNode : arguments) {
+                for (const auto& argNode : arguments) {
                     // NB: CH uses integer literals and columns with the UInt8 data type as boolean values.
                     // To use QL inferrer, we need to adapt such cases to valid logical expressions.
                     auto booleanNode = AdjustToYTBooleanExpression(argNode);
@@ -378,9 +380,12 @@ std::vector<TReadRange> InferReadRange(
     const TTableSchemaPtr& schema,
     const DB::Settings& settings)
 {
-    if (!filterNode) {
+    int keyColumnCount = schema->GetKeyColumnCount();
+    if (!filterNode || keyColumnCount == 0) {
         return {};
     }
+
+    auto keyColumns = schema->GetKeyColumns();
 
     DB::GetSetElementParams setParams{
         .transform_null_in = settings[DB::Setting::transform_null_in],
@@ -399,7 +404,7 @@ std::vector<TReadRange> InferReadRange(
     auto rowRanges = NQueryClient::CreateNewRangeInferrer(
         predicateExpr,
         schema,
-        schema->GetKeyColumns(),
+        keyColumns,
         /*evaluatorCache*/ nullptr,
         NQueryClient::GetBuiltinConstraintExtractors(),
         /*options*/ {.RangeExpansionLimit = 1000},
@@ -409,8 +414,8 @@ std::vector<TReadRange> InferReadRange(
     std::vector<TReadRange> result;
     result.reserve(rowRanges.size());
     for (const auto& rowRange : rowRanges) {
-        auto lowerLimit = KeyBoundFromLegacyRow(rowRange.first, /*isUpper*/ false, schema->GetKeyColumnCount());
-        auto upperLimit = KeyBoundFromLegacyRow(rowRange.second, /*isUpper*/ true, schema->GetKeyColumnCount());
+        auto lowerLimit = KeyBoundFromLegacyRow(rowRange.first, /*isUpper*/ false, keyColumnCount);
+        auto upperLimit = KeyBoundFromLegacyRow(rowRange.second, /*isUpper*/ true, keyColumnCount);
         if (lowerLimit.IsUniversal() && upperLimit.IsUniversal()) {
             continue;
         }

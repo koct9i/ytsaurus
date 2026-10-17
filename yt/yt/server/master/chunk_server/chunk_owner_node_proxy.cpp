@@ -1,21 +1,22 @@
-#include "chunk.h"
-#include "dynamic_store.h"
-#include "chunk_list.h"
-#include "chunk_view.h"
-#include "chunk_manager.h"
 #include "chunk_owner_node_proxy.h"
+
+#include "chunk.h"
+#include "chunk_list.h"
+#include "chunk_manager.h"
 #include "chunk_reincarnator.h"
+#include "chunk_replica_fetcher.h"
+#include "chunk_view.h"
 #include "chunk_visitor.h"
 #include "config.h"
+#include "dynamic_store.h"
 #include "helpers.h"
 #include "medium_base.h"
 #include "private.h"
-#include "chunk_replica_fetcher.h"
 
 #include <yt/yt/server/master/cell_master/config.h>
-#include <yt/yt/server/master/cell_master/multicell_manager.h>
-#include <yt/yt/server/master/cell_master/hydra_facade.h>
 #include <yt/yt/server/master/cell_master/config_manager.h>
+#include <yt/yt/server/master/cell_master/hydra_facade.h>
+#include <yt/yt/server/master/cell_master/multicell_manager.h>
 
 #include <yt/yt/server/master/cypress_server/cypress_manager.h>
 #include <yt/yt/server/master/cypress_server/helpers.h>
@@ -24,9 +25,10 @@
 
 #include <yt/yt/server/master/object_server/object.h>
 
-#include <yt/yt/server/master/table_server/table_manager.h>
 #include <yt/yt/server/master/table_server/master_table_schema.h>
+#include <yt/yt/server/master/table_server/table_manager.h>
 
+#include <yt/yt/server/master/tablet_server/tablet.h>
 #include <yt/yt/server/master/tablet_server/tablet_manager.h>
 
 #include <yt/yt/server/master/security_server/access_log.h>
@@ -60,8 +62,6 @@
 
 #include <yt/yt/core/concurrency/scheduler.h>
 
-#include <yt/yt/core/misc/range_formatters.h>
-
 #include <yt/yt/core/ytree/fluent.h>
 #include <yt/yt/core/ytree/helpers.h>
 #include <yt/yt/core/ytree/node.h>
@@ -72,6 +72,7 @@
 #include <yt/yt/library/numeric/util.h>
 
 #include <library/cpp/yt/misc/numeric_helpers.h>
+#include <library/cpp/yt/misc/range_formatters.h>
 
 namespace NYT::NChunkServer {
 
@@ -122,34 +123,34 @@ static void PopulateChunkSpecWithReplicas(
     NNodeTrackerServer::TNodeDirectoryBuilder* nodeDirectoryBuilder,
     NChunkClient::NProto::TChunkSpec* chunkSpec)
 {
-    TNodePtrWithReplicaAndMediumIndexList replicas;
-    replicas.reserve(chunkReplicas.size());
-
     auto erasureCodecId = FromProto<NErasure::ECodec>(chunkSpec->erasure_codec());
     auto firstInfeasibleReplicaIndex = (erasureCodecId == NErasure::ECodec::None || fetchParityReplicas)
         ? std::numeric_limits<int>::max() // all replicas are feasible
-        : NErasure::GetCodec(erasureCodecId)->GetDataPartCount();
-
-    auto addReplica = [&] (const TAugmentedStoredChunkReplicaPtr& replica)  {
-        auto* locationReplica = replica.As<EStoredReplicaType::ChunkLocation>();
-        if (!locationReplica) {
-            // TODO(cherepashka): actually return medium replicas in chunk specs, once more logic is here.
-            return false;
-        }
-        if (replica.GetReplicaIndex() >= firstInfeasibleReplicaIndex) {
-            return false;
-        }
-        const auto* location = locationReplica->AsChunkLocationPtr();
-        replicas.emplace_back(location->GetNode(), replica.GetReplicaIndex(), replica.GetEffectiveMediumIndex());
-        nodeDirectoryBuilder->Add(replica);
-        return true;
-    };
+        : NErasure::GetCodecOrThrow(erasureCodecId)->GetParams().DataPartCount;
 
     for (auto replica : chunkReplicas) {
-        addReplica(replica);
-    }
+        if (replica.GetReplicaIndex() >= firstInfeasibleReplicaIndex) {
+            continue;
+        }
 
-    ToProto(chunkSpec->mutable_replicas(), replicas);
+        if (auto* locationReplica = replica.As<EStoredReplicaType::ChunkLocation>()) {
+            const auto* location = locationReplica->AsChunkLocationPtr();
+            TNodePtrWithReplicaAndMediumIndex nodeReplica(
+                location->GetNode(),
+                replica.GetReplicaIndex(),
+                replica.GetEffectiveMediumIndex());
+            chunkSpec->add_replicas(ToProto<ui64>(nodeReplica));
+            nodeDirectoryBuilder->Add(nodeReplica);
+        }
+
+        if (replica.As<EStoredReplicaType::OffshoreMedia>()) {
+            NChunkClient::TChunkReplicaWithMedium offshoreReplica(
+                OffshoreNodeId,
+                replica.GetReplicaIndex(),
+                replica.GetEffectiveMediumIndex());
+            chunkSpec->add_replicas(ToProto<ui64>(offshoreReplica));
+        }
+    }
 }
 
 void BuildReplicalessChunkSpec(
@@ -232,11 +233,11 @@ void BuildReplicalessChunkSpec(
         if (auto timestampTransactionId = modifier->GetTransactionId()) {
             const auto& transactionManager = bootstrap->GetTransactionManager();
             chunkSpec->set_override_timestamp(
-                transactionManager->GetTimestampHolderTimestamp(timestampTransactionId));
+                ToProto(transactionManager->GetTimestampHolderTimestamp(timestampTransactionId)));
         }
 
         if (auto maxClipTimestamp = modifier->GetMaxClipTimestamp()) {
-            chunkSpec->set_max_clip_timestamp(maxClipTimestamp);
+            chunkSpec->set_max_clip_timestamp(ToProto(maxClipTimestamp));
         }
     }
 }
@@ -443,7 +444,8 @@ private:
         YT_VERIFY(!Finished_);
         Finished_ = true;
 
-        RpcContext_->SetResponseInfo("ChunkCount: %v", RpcContext_->Response().chunks_size());
+        RpcContext_->AnnotateResponse()
+            .With("ChunkCount", RpcContext_->Response().chunks_size());
         RpcContext_->Reply();
     }
 
@@ -473,7 +475,7 @@ private:
         if (RpcContext_->Response().chunks_size() >= dynamicConfig->MaxChunksPerFetch) {
             ReplyError(TError(NChunkClient::EErrorCode::TooManyChunksToFetch,
                 "Attempt to fetch too many chunks in a single request")
-                << TErrorAttribute("limit", dynamicConfig->MaxChunksPerFetch));
+                .With("limit", dynamicConfig->MaxChunksPerFetch));
             return false;
         }
 
@@ -639,6 +641,8 @@ void TChunkOwnerNodeProxy::ListSystemAttributes(std::vector<TAttributeDescriptor
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::HunkChunkListId)
         .SetExternal(isExternal)
         .SetOpaque(true));
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::HasHunkChunkList)
+        .SetExternal(isExternal));
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ChunkIds)
         .SetExternal(isExternal)
         .SetOpaque(true));
@@ -709,21 +713,22 @@ void TChunkOwnerNodeProxy::ListSystemAttributes(std::vector<TAttributeDescriptor
         .SetWritable(true)
         .SetReplicated(true)
         .SetExternal(isExternal));
-    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ChunkMergerStatus)
-        .SetExternal(isExternal)
-        .SetOpaque(true));
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::EnableSkynetSharing)
         .SetWritable(true)
         .SetReplicated(true));
-    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ChunkMergerTraversalInfo)
-        .SetExternal(isExternal)
-        .SetOpaque(true));
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::VersionedResourceUsage)
         .SetPresent(!isTrunk));
     descriptors->emplace_back(EInternedAttributeKey::ScheduleReincarnation)
         .SetWritable(!isExternal)
         .SetPresent(false);
     descriptors->emplace_back(EInternedAttributeKey::TableBackupEnabled);
+
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ChunkMergerStatus)
+        .SetExternal(isExternal)
+        .SetOpaque(true));
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ChunkMergerInfo)
+        .SetExternal(isExternal)
+        .SetOpaque(true));
 }
 
 bool TChunkOwnerNodeProxy::GetBuiltinAttribute(
@@ -753,6 +758,15 @@ bool TChunkOwnerNodeProxy::GetBuiltinAttribute(
 
             BuildYsonFluently(consumer)
                 .Value(GetObjectId(hunkChunkList));
+            return true;
+
+        case EInternedAttributeKey::HasHunkChunkList:
+            if (isExternal) {
+                break;
+            }
+
+            BuildYsonFluently(consumer)
+                .Value(hunkChunkList != nullptr);
             return true;
 
         case EInternedAttributeKey::ChunkCount:
@@ -946,16 +960,18 @@ bool TChunkOwnerNodeProxy::GetBuiltinAttribute(
                 .Value(node->GetEnableSkynetSharing());
             return true;
 
-        case EInternedAttributeKey::ChunkMergerTraversalInfo: {
+        case EInternedAttributeKey::ChunkMergerInfo: {
             if (isExternal) {
                 break;
             }
 
-            const auto& traversalInfo = node->ChunkMergerTraversalInfo();
+            const auto& info = node->ChunkMergerInfo();
             BuildYsonFluently(consumer)
                 .BeginMap()
-                    .Item("chunk_count").Value(traversalInfo.ChunkCount)
-                    .Item("config_version").Value(traversalInfo.ConfigVersion)
+                    .Item("chunk_count").Value(info.TraversalInfo.ChunkCount)
+                    .Item("config_version").Value(info.TraversalInfo.ConfigVersion)
+                    .Item("updated_since_last_merge").Value(info.UpdatedSinceLastMerge)
+                    .Item("revision").Value(info.Revision)
                 .EndMap();
             return true;
         }
@@ -1104,11 +1120,10 @@ TFuture<TYsonString> TChunkOwnerNodeProxy::GetBuiltinAttributeAsync(TInternedAtt
                             const auto& sequoiaReplicas = it->second
                                 .ValueOrThrow();
 
-                            if (sequoiaReplicas.empty()) {
+                            auto replicas = chunkReplicaFetcher->FilterAliveReplicas(sequoiaReplicas);
+                            if (replicas.empty()) {
                                 return std::nullopt;
                             }
-
-                            auto replicas = chunkReplicaFetcher->FilterAliveReplicas(sequoiaReplicas);
 
                             // We should choose a single medium for the chunk if there are replicas
                             // with different media. We choose the most frequent medium if more than
@@ -1280,10 +1295,10 @@ bool TChunkOwnerNodeProxy::SetBuiltinAttribute(
             securityTags.Validate();
 
             // TODO(babenko): audit
-            YT_LOG_DEBUG("Updating node security tags (NodeId: %v, OldSecurityTags: %v, NewSecurityTags: %v)",
-                node->GetVersionedId(),
-                node->ComputeSecurityTags().Items,
-                securityTags.Items);
+            YT_TLOG_DEBUG("Updating node security tags")
+                .With("NodeId", node->GetVersionedId())
+                .With("OldSecurityTags", node->ComputeSecurityTags().Items)
+                .With("NewSecurityTags", securityTags.Items);
 
             const auto& securityManager = Bootstrap_->GetSecurityManager();
             const auto& securityTagsRegistry = securityManager->GetSecurityTagsRegistry();
@@ -1452,13 +1467,11 @@ void TChunkOwnerNodeProxy::SetReplication(
     OnStorageParametersUpdated();
 
     const auto* medium = chunkManager->GetMediumByIndex(mediumIndex);
-    YT_LOG_DEBUG(
-        IsHunk
-            ? "Chunk owner hunk replication changed (NodeId: %v, HunkPrimaryMedium: %v, HunkReplication %v)"
-            : "Chunk owner replication changed (NodeId: %v, PrimaryMedium: %v, Replication %v)",
-        node->GetId(),
-        medium->GetName(),
-        replication);
+    YT_TLOG_DEBUG("Chunk owner replication changed")
+        .With("Hunk", IsHunk)
+        .With("NodeId", node->GetId())
+        .With("PrimaryMedium", medium->GetName())
+        .With("Replication", replication);
 }
 
 template <bool IsHunk>
@@ -1505,12 +1518,10 @@ void TChunkOwnerNodeProxy::SetPrimaryMedium(const std::string& mediumName, bool 
 
     OnStorageParametersUpdated();
 
-    YT_LOG_DEBUG(
-        IsHunk
-        ? "Chunk owner hunk primary medium changed (NodeId: %v, PrimaryMedium: %v)"
-        : "Chunk owner primary medium changed (NodeId: %v, PrimaryMedium: %v)",
-        node->GetId(),
-        medium->GetName());
+    YT_TLOG_DEBUG("Chunk owner primary medium changed")
+        .With("Hunk", IsHunk)
+        .With("NodeId", node->GetId())
+        .With("PrimaryMedium", medium->GetName());
 }
 
 void TChunkOwnerNodeProxy::RemoveHunkPrimaryMedium()
@@ -1532,10 +1543,10 @@ void TChunkOwnerNodeProxy::RemoveHunkPrimaryMedium()
     auto* hunkPrimaryMedium = chunkManager->GetMediumByIndex(*hunkPrimaryMediumIndex);
     auto* primaryMedium = chunkManager->GetMediumByIndex(node->GetPrimaryMediumIndex());
 
-    YT_LOG_DEBUG("Chunk owner hunk primary medium removed, falling back to main primary medium (NodeId: %v, HunkPrimaryMedium: %v, MainPrimaryMedium: %v)",
-        node->GetId(),
-        hunkPrimaryMedium->GetName(),
-        primaryMedium->GetName());
+    YT_TLOG_DEBUG("Chunk owner hunk primary medium removed, falling back to main primary medium")
+        .With("NodeId", node->GetId())
+        .With("HunkPrimaryMedium", hunkPrimaryMedium->GetName())
+        .With("MainPrimaryMedium", primaryMedium->GetName());
 }
 
 void TChunkOwnerNodeProxy::ValidateResourceUsageIncreaseOnPrimaryMediumChange(TMedium* newPrimaryMedium, const TChunkReplication& newReplication)
@@ -1745,9 +1756,9 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, Fetch)
 {
     DeclareNonMutating();
 
-    context->SetRequestInfo("OmitDynamicStores: %v, ThrowOnChunkViews: %v",
-        request->omit_dynamic_stores(),
-        request->throw_on_chunk_views());
+    context->AnnotateRequest()
+        .With("OmitDynamicStores", request->omit_dynamic_stores())
+        .With("ThrowOnChunkViews", request->throw_on_chunk_views());
 
     // NB: No need for a permission check;
     // the client must have invoked GetBasicAttributes.
@@ -1859,19 +1870,17 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
     auto replicateStartToCellTags = replicatedToCellTags;
     replicateStartToCellTags.erase(externalCellTag);
 
-    context->SetRequestInfo(
-        "SchemaMode: %v, UpdateMode: %v, OptimizeFor: %v, LockMode: %v, Title: %v, Timeout: %v, "
-        "ReplicatedToCellTags: %v, IsTableSchemaPresent: %v, TableSchemaId: %v, ChunkSchemaId: %v",
-        uploadContext.SchemaMode,
-        uploadContext.Mode,
-        uploadContext.OptimizeFor,
-        lockMode,
-        uploadTransactionTitle,
-        uploadTransactionTimeout,
-        replicatedToCellTags,
-        tableSchema || tableSchemaId,
-        tableSchemaId,
-        chunkSchemaId);
+    context->AnnotateRequest()
+        .With("SchemaMode", uploadContext.SchemaMode)
+        .With("UpdateMode", uploadContext.Mode)
+        .With("OptimizeFor", uploadContext.OptimizeFor)
+        .With("LockMode", lockMode)
+        .With("Title", uploadTransactionTitle)
+        .With("Timeout", uploadTransactionTimeout)
+        .With("ReplicatedToCellTags", replicatedToCellTags)
+        .With("IsTableSchemaPresent", tableSchema || tableSchemaId)
+        .With("TableSchemaId", tableSchemaId)
+        .With("ChunkSchemaId", chunkSchemaId);
 
     // NB: No need for a permission check;
     // the client must have invoked GetBasicAttributes.
@@ -1883,18 +1892,19 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
     const auto& transactionManager = Bootstrap_->GetTransactionManager();
     const auto& tableManager = Bootstrap_->GetTableManager();
 
-    YT_LOG_ALERT_IF(!IsSchemafulType(node->GetType()) && (tableSchema || tableSchemaId),
-        "Received a schema or schema ID while beginning upload into a non-schemaful node (NodeId: %v, Schema: %v, SchemaId: %v)",
-        node->GetId(),
-        tableManager->GetHeavyTableSchemaSync(tableSchema),
-        tableSchemaId);
+    YT_TLOG_ALERT_IF(
+        !IsSchemafulType(node->GetType()) && (tableSchema || tableSchemaId),
+        "Received a schema or schema ID while beginning upload into a non-schemaful node")
+        .With("NodeId", node->GetId())
+        .With("Schema", tableManager->GetHeavyTableSchemaSync(tableSchema))
+        .With("SchemaId", tableSchemaId);
 
-    YT_LOG_ALERT_IF(!IsSchemafulType(node->GetType()) && (chunkSchema || chunkSchemaId),
-        "Received a chunk schema or chunk schema ID while beginning upload into a non-schemaful node "
-        "(NodeId: %v, ChunkSchema: %v, ChunkSchemaId: %v)",
-        node->GetId(),
-        tableManager->GetHeavyTableSchemaSync(chunkSchema),
-        chunkSchemaId);
+    YT_TLOG_ALERT_IF(
+        !IsSchemafulType(node->GetType()) && (chunkSchema || chunkSchemaId),
+        "Received a chunk schema or chunk schema ID while beginning upload into a non-schemaful node")
+        .With("NodeId", node->GetId())
+        .With("ChunkSchema", tableManager->GetHeavyTableSchemaSync(chunkSchema))
+        .With("ChunkSchemaId", chunkSchemaId);
 
     std::vector<TTransactionRawPtr> prerequisiteTransactions;
     prerequisiteTransactions.reserve(request->upload_prerequisite_transaction_ids_size());
@@ -1957,13 +1967,13 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
 
                         chunkManager->AttachToChunkList(newChunkList, {snapshotChunkList});
 
-                        auto* deltaChunkList = chunkManager->CreateChunkList(EChunkListKind::Static);
-                        chunkManager->AttachToChunkList(newChunkList, {deltaChunkList});
+                        auto* appendDeltaChunkList = chunkManager->CreateChunkList(EChunkListKind::Static);
+                        chunkManager->AttachToChunkList(newChunkList, {appendDeltaChunkList});
 
-                        context->SetIncrementalResponseInfo("NewChunkListId: %v, SnapshotChunkListId: %v, DeltaChunkListId: %v",
-                            newChunkList->GetId(),
-                            snapshotChunkList->GetId(),
-                            deltaChunkList->GetId());
+                        context->AnnotateResponse()
+                            .With("NewChunkListId", newChunkList->GetId())
+                            .With("SnapshotChunkListId", snapshotChunkList->GetId())
+                            .With("AppendDeltaChunkListId", appendDeltaChunkList->GetId());
                         break;
                     }
 
@@ -1975,20 +1985,20 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
 
                         for (int tabletIndex = 0; tabletIndex < ssize(snapshotChunkList->Children()); ++tabletIndex) {
                             auto* newTabletChunkList = chunkManager->CreateChunkList(EChunkListKind::SortedDynamicTablet);
-                            auto* deltaChunkList = chunkManager->CreateChunkList(EChunkListKind::SortedDynamicSubtablet);
+                            auto* appendDeltaChunkList = chunkManager->CreateChunkList(EChunkListKind::SortedDynamicSubtablet);
 
                             chunkManager->AttachToChunkList(
                                 newTabletChunkList,
-                                {snapshotChunkList->Children()[tabletIndex], deltaChunkList});
+                                {snapshotChunkList->Children()[tabletIndex], appendDeltaChunkList});
 
                             chunkManager->AttachToChunkList(newChunkList, {newTabletChunkList});
 
                             newTabletChunkList->SetPivotKey(snapshotChunkList->Children()[tabletIndex]->AsChunkList()->GetPivotKey());
                         }
 
-                        context->SetIncrementalResponseInfo("NewChunkListId: %v, SnapshotChunkListId: %v",
-                            newChunkList->GetId(),
-                            snapshotChunkList->GetId());
+                        context->AnnotateResponse()
+                            .With("NewChunkListId", newChunkList->GetId())
+                            .With("SnapshotChunkListId", snapshotChunkList->GetId());
                         break;
                     }
 
@@ -2023,7 +2033,7 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
                             if (oldMainChunkList->GetKind() == EChunkListKind::SortedDynamicRoot) {
                                 for (int tabletIndex = 0; tabletIndex < ssize(oldMainChunkList->Children()); ++tabletIndex) {
                                     auto* newTabletChunkList = chunkManager->CreateChunkList(appendChunkListKind);
-                                    if (!IsHunkRelatedChunkList(newTabletChunkList)) {
+                                    if (!newTabletChunkList->IsHunkRelated()) {
                                         newTabletChunkList->SetPivotKey(
                                             oldMainChunkList->Children()[tabletIndex]->AsChunkList()->GetPivotKey());
                                     }
@@ -2045,9 +2055,9 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
                         auto hunkChunkListId = lockedNode->GetHunkChunkList()
                             ? lockedNode->GetHunkChunkList()->GetId()
                             : NullChunkListId;
-                        context->SetIncrementalResponseInfo("NewChunkListId: %v, NewHunkChunkListId: %v",
-                            lockedNode->GetChunkList()->GetId(),
-                            hunkChunkListId);
+                        context->AnnotateResponse()
+                            .With("NewChunkListId", lockedNode->GetChunkList()->GetId())
+                            .With("NewHunkChunkListId", hunkChunkListId);
 
                         break;
                     }
@@ -2095,8 +2105,8 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, BeginUpload)
         }
     }
 
-    context->SetIncrementalResponseInfo("UploadTransactionId: %v",
-        uploadTransactionId);
+    context->AnnotateResponse()
+        .With("UploadTransactionId", uploadTransactionId);
     context->Reply();
 }
 
@@ -2108,10 +2118,10 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, GetUploadParams)
     bool fetchHunkChunkListId = request->fetch_hunk_chunk_list_id();
     bool fetchTabletHunkChunkListIds = request->fetch_tablet_hunk_chunk_list_ids();
 
-    context->SetRequestInfo("FetchLastKey: %v, FetchHunkChunkListId: %v, FetchTabletHunkChunkListIds: %v",
-        fetchLastKey,
-        fetchHunkChunkListId,
-        fetchTabletHunkChunkListIds);
+    context->AnnotateRequest()
+        .With("FetchLastKey", fetchLastKey)
+        .With("FetchHunkChunkListId", fetchHunkChunkListId)
+        .With("FetchTabletHunkChunkListIds", fetchTabletHunkChunkListIds);
 
     ValidateNotExternal();
     ValidateInUpdate();
@@ -2127,10 +2137,10 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, GetUploadParams)
         case EChunkListKind::Static:
         case EChunkListKind::JournalRoot: {
             auto* snapshotChunkList = node->GetSnapshotChunkList();
-            auto* deltaChunkList = node->GetDeltaChunkList();
+            auto* appendDeltaChunkList = node->GetAppendDeltaChunkList();
 
             // NB: No hunk chunk list here as we only support appending into main chunk list.
-            const auto& uploadChunkListId = deltaChunkList->GetId();
+            const auto& uploadChunkListId = appendDeltaChunkList->GetId();
             ToProto(response->mutable_chunk_list_id(), uploadChunkListId);
 
             if (fetchLastKey) {
@@ -2147,10 +2157,10 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, GetUploadParams)
             node->GetUploadParams(&md5Hasher);
             ToProto(response->mutable_md5_hasher(), md5Hasher);
 
-            context->SetIncrementalResponseInfo("UploadChunkListId: %v, HasLastKey: %v, RowCount: %v",
-                uploadChunkListId,
-                response->has_last_key(),
-                response->row_count());
+            context->AnnotateResponse()
+                .With("UploadChunkListId", uploadChunkListId)
+                .With("HasLastKey", response->has_last_key())
+                .With("RowCount", response->row_count());
             break;
         }
 
@@ -2179,7 +2189,7 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, GetUploadParams)
                     ToProto(response->add_tablet_chunk_list_ids(), tabletChunkList->GetId());
                 } else {
                     auto appendTabletChunkLists = tabletChunkList->GetAppendTabletChunkLists();
-                    ToProto(response->add_tablet_chunk_list_ids(), appendTabletChunkLists.DeltaChunkList->GetId());
+                    ToProto(response->add_tablet_chunk_list_ids(), appendTabletChunkLists.AppendDeltaChunkList->GetId());
                 }
 
                 ToProto(response->add_pivot_keys(), tabletChunkList->GetPivotKey());
@@ -2269,14 +2279,13 @@ DEFINE_YPATH_SERVICE_METHOD(TChunkOwnerNodeProxy, EndUpload)
         uploadContext.ErasureCodec = FromProto<NErasure::ECodec>(request->erasure_codec());
     }
 
-    context->SetRequestInfo("Statistics: %v, CompressionCodec: %v, ErasureCodec: %v, ChunkFormat: %v, "
-        "MD5Hasher: %v, OptimizeFor: %v",
-        uploadContext.Statistics,
-        uploadContext.CompressionCodec,
-        uploadContext.ErasureCodec,
-        uploadContext.ChunkFormat,
-        uploadContext.MD5Hasher.has_value(),
-        uploadContext.OptimizeFor);
+    context->AnnotateRequest()
+        .With("Statistics", uploadContext.Statistics)
+        .With("CompressionCodec", uploadContext.CompressionCodec)
+        .With("ErasureCodec", uploadContext.ErasureCodec)
+        .With("ChunkFormat", uploadContext.ChunkFormat)
+        .With("MD5Hasher", uploadContext.MD5Hasher.has_value())
+        .With("OptimizeFor", uploadContext.OptimizeFor);
 
     ValidateTransaction();
     ValidateInUpdate();

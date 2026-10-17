@@ -36,6 +36,10 @@ public:
 
     void describeActions(DB::JSONBuilder::JSONMap& map) const override;
 
+    void describeDistributedPlan(FormatSettings& settings, const DB::ExplainPlanOptions& options) override;
+
+    const DB::SortDescription& getSortDescription() const override;
+
 private:
     const DB::SelectQueryInfo QueryInfo_;
     const std::vector<std::shared_ptr<IChytIndexStat>> IndexStats_;
@@ -43,6 +47,7 @@ private:
     TDistributedQueryExecutor Executor_;
 
     DB::ASTPtr DescribeFilterPushDown() const;
+    void AddAdditionalFiltersSuggestedByInterpreter();
 };
 
 ////////////////////////////////////////////////////////////////////////////////

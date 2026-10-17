@@ -1,11 +1,14 @@
 #include "user.h"
 #include "helpers.h"
+#include "security_manager.h"
 
 #include "yt/yt/server/master/security_server/private.h"
 
 #include <yt/yt/server/lib/security_server/proto/security_manager.pb.h>
 
 #include <yt/yt/server/master/cell_master/serialize.h>
+
+#include <yt/yt/server/lib/hydra/hydra_context.h>
 
 #include <yt/yt/core/concurrency/config.h>
 
@@ -403,6 +406,12 @@ TYPath TUser::GetObjectPath() const
     return Format("//sys/users/%v", NYPath::ToYPathLiteral(GetName()));
 }
 
+void TUser::TActiveTransactionCountLimitsOverride::Persist(const TStreamPersistenceContext& context)
+{
+    NYT::Persist(context, AlertThreshold);
+    NYT::Persist(context, Limit);
+}
+
 void TUser::Save(TSaveContext& context) const
 {
     TSubject::Save(context);
@@ -413,6 +422,7 @@ void TUser::Save(TSaveContext& context) const
     Save(context, PasswordSalt_);
     Save(context, PasswordRevision_);
     Save(context, *ObjectServiceRequestLimits_);
+    Save(context, ActiveTransactionCountAlertThresholdAndLimitOverride_);
     Save(context, Tags_);
     Save(context, LastSeenTime_);
     Save(context, PendingRemoval_);
@@ -430,6 +440,10 @@ void TUser::Load(TLoadContext& context)
     Load(context, PasswordSalt_);
     Load(context, PasswordRevision_);
     Load(context, *ObjectServiceRequestLimits_);
+    // COMPAT(ivpiskarev)
+    if (context.GetVersion() >= EMasterReign::AddPerUserActiveTransactionCountLimit) {
+        Load(context, ActiveTransactionCountAlertThresholdAndLimitOverride_);
+    }
     Load(context, Tags_);
     Load(context, LastSeenTime_);
     Load(context, PendingRemoval_);

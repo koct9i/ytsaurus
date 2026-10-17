@@ -83,7 +83,7 @@ private:
 
     void OnBeginSlotScan()
     {
-        YT_LOG_DEBUG("LSM interop begins slot scan");
+        YT_TLOG_DEBUG("LSM interop begins slot scan");
 
         StoreCompactor_->OnBeginSlotScan();
 
@@ -96,12 +96,14 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG("LSM interop scans slot (CellId: %v)", slot->GetCellId());
+        YT_TLOG_DEBUG("LSM interop scans slot")
+            .With("CellId", slot->GetCellId());
 
         const auto& tabletManager = slot->GetTabletManager();
 
         std::vector<NLsm::TTabletPtr> lsmTablets;
         lsmTablets.reserve(tabletManager->Tablets().size());
+
         {
             TForbidContextSwitchGuard guard;
 
@@ -113,9 +115,9 @@ private:
             }
         }
 
-        YT_LOG_DEBUG("Tablets collected (CellId: %v, TabletCount: %v)",
-            slot->GetCellId(),
-            lsmTablets.size());
+        YT_TLOG_DEBUG("Tablets collected")
+            .With("CellId", slot->GetCellId())
+            .With("TabletCount", lsmTablets.size());
 
         if (Bootstrap_->GetTabletNodeDynamicConfig()->TabletManager->YieldBeforeBuildingLsmActions) {
             Yield();
@@ -230,7 +232,7 @@ private:
         lsmTablet->SetMounted(tablet->GetState() == ETabletState::Mounted);
         lsmTablet->SetMountConfig(tablet->GetSettings().MountConfig);
         lsmTablet->SetMountRevision(tablet->GetMountRevision());
-        lsmTablet->SetLoggingTag(tablet->GetLoggingTag());
+        lsmTablet->LoggingTags() = tablet->GetLoggingTags();
         lsmTablet->SetIsOutOfBandRotationRequested(tablet->GetOutOfBandRotationRequested());
 
         lsmTablet->SetIsForcedRotationPossible(storeManager->IsForcedRotationPossible());

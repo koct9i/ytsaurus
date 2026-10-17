@@ -2,6 +2,9 @@
 
 #include "public.h"
 
+#include <yt/yt/core/phoenix/context.h>
+#include <yt/yt/core/phoenix/type_decl.h>
+
 #include <yt/yt/ytlib/controller_agent/helpers.h>
 #include <yt/yt/ytlib/controller_agent/proto/job.pb.h>
 
@@ -15,6 +18,8 @@
 #include <yt/yt/ytlib/chunk_client/public.h>
 
 #include <yt/yt/ytlib/api/native/public.h>
+
+#include <yt/yt/client/api/public.h>
 
 #include <yt/yt/client/node_tracker_client/node_directory.h>
 
@@ -148,10 +153,13 @@ public:
 
     std::string GetAclString() const;
 
-    void Persist(const TStreamPersistenceContext& context);
+    using TSaveContext = NPhoenix::TSaveContext;
+    using TLoadContext = NPhoenix::TLoadContext;
 
 private:
     std::variant<NSecurityClient::TSerializableAccessControlList, std::string> AccessControlRule_;
+
+    PHOENIX_DECLARE_TYPE(TAccessControlRule, 0x92de7eca);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -273,10 +281,6 @@ void ToProto(
     const TSidecarJobSpec& sidecarJobSpec);
 
 void FromProto(
-    TVolume* volume,
-    const NControllerAgent::NProto::TVolume& volumeProto);
-
-void FromProto(
     TVolumeMount* volumeMount,
     const NControllerAgent::NProto::TVolumeMount& volumeMountProto);
 
@@ -284,90 +288,6 @@ void ToProto(
     NControllerAgent::NProto::TVolumeMount* volumeMountProto,
     const TVolumeMount& volumeMount);
 
-void FromProto(
-    TTmpfsVolumeConfig* tmpfsVolumeConfig,
-    const NControllerAgent::NProto::TTmpfsVolume& protoTmpfsVolume);
-
-void ToProto(
-    NControllerAgent::NProto::TTmpfsVolume* protoTmpfsVolume,
-    const TTmpfsVolumeConfig& tmpfsVolumeConfig);
-
-void ToProto(
-    NProto::TNbdDisk* protoNbdDisk,
-    const TNbdDiskConfig& nbdDiskConfig);
-
-void FromProto(
-    TNbdDiskConfig* nbdDiskConfig,
-    const NProto::TNbdDisk& protoNbdDisk);
-
-void FromProto(
-    TStorageRequestConfig* diskRequestConfig,
-    const NProto::TDiskRequest& protoDiskRequest);
-
-void ToProto(
-    NProto::TDiskRequest* protoDiskRequest,
-    const TStorageRequestConfig& diskRequestConfig);
-
-template <class TProtoDiskRequest>
-void FromProto(
-    TNbdDiskRequest* diskRequestConfig,
-    const TProtoDiskRequest& protoDiskRequestConfig);
-
-template <class TProtoDiskRequest>
-void ToProto(
-    TProtoDiskRequest* protoDiskRequestConfig,
-    const TNbdDiskRequest& diskRequestConfig);
-
-template <class TProtoDiskRequest>
-void FromProto(
-    TLocalDiskRequest* diskRequestConfig,
-    const TProtoDiskRequest& protoDiskRequestConfig);
-
-template <class TProtoDiskRequest>
-void ToProto(
-    TProtoDiskRequest* protoDiskRequestConfig,
-    const TLocalDiskRequest& diskRequestConfig);
-
-template <class TProtoDiskRequest>
-void FromProto(
-    TDiskRequestConfig* diskRequestConfig,
-    const TProtoDiskRequest& protoDiskRequestConfig);
-
-template <class TProtoDiskRequest>
-void ToProto(
-    TProtoDiskRequest* protoDiskRequestConfig,
-    const TDiskRequestConfig& diskRequestConfig);
-
-void FromProto(
-    TTmpfsStorageRequest* diskRequestConfig,
-    const NProto::TTmpfsStorageRequest& protoDiskRequestConfig);
-
-void ToProto(
-    NProto::TTmpfsStorageRequest* protoDiskRequestConfig,
-    const TTmpfsStorageRequest& diskRequestConfig);
-
-void FromProto(
-    TStorageRequestConfig* diskRequestConfig,
-    const NProto::TDeprecatedDiskRequest& protoDiskRequestConfig);
-
-template <class TProtoDiskRequest>
-void FromProto(
-    TStorageRequestBase* diskRequestConfig,
-    const TProtoDiskRequest& protoDiskRequestConfig);
-
-template <class TProtoDiskRequest>
-void ToProto(
-    TProtoDiskRequest* protoDiskRequestConfig,
-    const TStorageRequestBase& diskRequestConfig);
-
-////////////////////////////////////////////////////////////////////////////////
-
-bool IsDiskRequestTmpfs(const std::optional<NScheduler::TStorageRequestConfig>& diskRequest);
-
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NScheduler
-
-#define HELPERS_INL_H
-#include "helpers-inl.h"
-#undef HELPERS_INL_H

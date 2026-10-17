@@ -2,7 +2,7 @@
 
 #include <yt/yt/library/query/base/ast.h>
 
-namespace NYT::NOrm::NServer::NObjects {
+namespace NYT::NOrm::NQuery {
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -14,18 +14,18 @@ struct TFilterSplit
 
 struct TFilterHints
 {
-    THashSet<std::string> WhereAliases;
+    THashSet<std::string> HavingAliases;
 };
 
 // Returns true if expression contains an aggregate function.
 bool ContainsAggregateFunction(NQueryClient::NAst::TExpressionPtr expression);
 
 // Splits expression into WHERE and HAVING parts using table aliases and aggregate functions.
-TFilterSplit SplitFilter(
+TFilterSplit SplitFilterIntoWhereAndHaving(
     NQueryClient::NAst::TExpressionPtr expression,
     const TFilterHints& hints,
     TObjectsHolder* objectsHolder);
 
 ////////////////////////////////////////////////////////////////////////////////
 
-} // namespace NYT::NOrm::NServer::NObjects
+} // namespace NYT::NOrm::NQuery

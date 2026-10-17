@@ -47,6 +47,9 @@ DECLARE_REFCOUNTED_CLASS(TJobTrackerOperationHandler)
 DECLARE_REFCOUNTED_STRUCT(TJobTrackerConfig)
 DECLARE_REFCOUNTED_STRUCT(TGangManagerConfig)
 
+DECLARE_REFCOUNTED_CLASS(TPushBasedShuffleRegistry)
+DECLARE_REFCOUNTED_STRUCT(TPushBasedShuffleConfig)
+
 DECLARE_REFCOUNTED_STRUCT(TDockerRegistryConfig)
 
 DECLARE_REFCOUNTED_STRUCT(TRemoteOperationsConfig)
@@ -90,12 +93,12 @@ struct TLivePreviewTableBase;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ControllerLogger, "Controller");
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ControllerAgentLogger, "ControllerAgent");
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ControllerEventLogger, NLogging::TLogger("ControllerEventLog").WithEssential());
-YT_DEFINE_GLOBAL(const NLogging::TLogger, ControllerFeatureStructuredLogger, NLogging::TLogger("ControllerFeatureStructuredLog").WithEssential());
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ControllerLogger, "Controller");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ControllerAgentLogger, "ControllerAgent");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ControllerEventLogger, NLogging::TLogger("ControllerEventLog").WithEssential());
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, ControllerFeatureStructuredLogger, NLogging::TLogger("ControllerFeatureStructuredLog").WithEssential());
 
-YT_DEFINE_GLOBAL(const NProfiling::TProfiler, ControllerAgentProfiler, "/controller_agent");
+YT_DEFINE_LEAKY_GLOBAL(const NProfiling::TProfiler, ControllerAgentProfiler, "/controller_agent");
 
 ////////////////////////////////////////////////////////////////////////////////
 

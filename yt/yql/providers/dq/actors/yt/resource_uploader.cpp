@@ -31,7 +31,6 @@ public:
         : TRichActor<TYtResourceUploader>(&TYtResourceUploader::Follower)
         , Options(options)
         , Coordinator(coordinator)
-        , Config(Coordinator->GetConfig())
         , ClusterName(Options.YtBackend.GetClusterName())
     {
         YQL_LOG_CTX_ROOT_SCOPE(ClusterName);
@@ -43,6 +42,8 @@ public:
             FileSize = Options.Counters->GetHistogram("FileSize", ExponentialHistogram(10, 4, 10));
             FileUploadTime = Options.Counters->GetHistogram("UploadTime", ExponentialHistogram(10, 3, 1));
             Errors = Options.Counters->GetCounter("Errors");
+            ContentMd5Checks = Options.Counters->GetCounter("ContentMd5Checks", /*derivative=*/ true);
+            ContentMd5Mismatches = Options.Counters->GetCounter("ContentMd5Mismatches", /*derivative=*/ true);
         }
     }
 
@@ -139,7 +140,7 @@ private:
     void Bootstrap(const NActors::TActorContext& ctx) {
         YtWrapper = Coordinator->GetWrapper(
             ctx.ActorSystem(),
-            Options.YtBackend.GetClusterName(),
+            Options.YtBackend.GetProxyAddress(),
             Options.YtBackend.GetUser(),
             Options.YtBackend.GetToken());
         YQL_LOG_CTX_ROOT_SCOPE(ClusterName);
@@ -170,7 +171,12 @@ private:
         UploadStart = TInstant::Now();
 
         remotePath += file.GetRemoteFileName();
-        auto message = MakeHolder<TEvWriteFile>(file.File, NYT::NYPath::TYPath(remotePath), attributes, options);
+        auto message = MakeHolder<TEvWriteFile>(
+            file.File,
+            NYT::NYPath::TYPath(remotePath),
+            attributes,
+            options,
+            file.ContentMd5);
         Send(YtWrapper, message.Release());
     }
 
@@ -181,6 +187,15 @@ private:
     void OnFileUploaded(TEvWriteFileResponse::TPtr& ev, const NActors::TActorContext& ctx) {
         YQL_LOG_CTX_ROOT_SCOPE(ClusterName, CurrentLockName);
         auto result = std::get<0>(*ev->Get());
+        const auto& contentMd5Matches = std::get<1>(*ev->Get());
+        if (contentMd5Matches.Defined()) {
+            if (ContentMd5Checks) {
+                *ContentMd5Checks += 1;
+            }
+            if (!*contentMd5Matches && ContentMd5Mismatches) {
+                *ContentMd5Mismatches += 1;
+            }
+        }
         if (result.IsOK()) {
             if (FileUploadTime) {
                 FileUploadTime->Collect((TInstant::Now() - UploadStart).Seconds());
@@ -212,6 +227,8 @@ private:
                 *Errors += 1;
             }
 
+            // Validate each hint only once.
+            Options.Files[CurrentFileId].ContentMd5.clear();
             std::random_shuffle(Options.Files.begin() + CurrentFileId, Options.Files.end());
             Tick(ctx);
         }
@@ -222,7 +239,6 @@ private:
 
     const ICoordinationHelper::TPtr Coordinator;
 
-    const NProto::TDqConfig::TYtCoordinator Config;
     const TString ClusterName;
 
     TActorId YtWrapper;
@@ -234,6 +250,8 @@ private:
     THistogramPtr FileSize;
     THistogramPtr FileUploadTime;
     TDynamicCounters::TCounterPtr Errors;
+    TDynamicCounters::TCounterPtr ContentMd5Checks;
+    TDynamicCounters::TCounterPtr ContentMd5Mismatches;
     TInstant UploadStart;
     TString CurrentLockName;
 };
@@ -242,7 +260,8 @@ IActor* CreateYtResourceUploader(
     const TResourceManagerOptions& options,
     const ICoordinationHelper::TPtr& coordinator)
 {
-    Y_ABORT_UNLESS(!options.YtBackend.GetClusterName().empty());
+    Y_ABORT_UNLESS(coordinator);
+    Y_ABORT_UNLESS(!options.YtBackend.GetProxyAddress().empty());
     Y_ABORT_UNLESS(!options.YtBackend.GetUser().empty());
     Y_ABORT_UNLESS(options.YtBackend.HasPrefix());
     Y_ABORT_UNLESS(!options.Files.empty());

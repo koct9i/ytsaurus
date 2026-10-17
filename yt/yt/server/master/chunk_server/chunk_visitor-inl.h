@@ -6,8 +6,8 @@
 
 #include "helpers.h"
 
-#include <yt/yt/core/ytree/helpers.h>
 #include <yt/yt/core/ytree/fluent.h>
+#include <yt/yt/core/ytree/helpers.h>
 
 #include <library/cpp/yt/misc/optional.h>
 
@@ -49,7 +49,7 @@ void TChunkVisitorBase<TResult>::OnFinish(const TError& error)
     if (error.IsOK()) {
         OnSuccess();
     } else {
-        Promise_.Set(TError("Error traversing chunk tree") << error);
+        Promise_.Set(TError("Error traversing chunk tree").With(error));
     }
 }
 
@@ -224,4 +224,3 @@ TFuture<NYson::TYsonString> ComputeChunkStatistics(
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NChunkServer
-

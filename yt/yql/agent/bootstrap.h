@@ -45,6 +45,8 @@ public:
 
     const NApi::NNative::TConnectionCompoundConfigPtr GetClusterConnectionConfig() const;
 
+    const NApi::NNative::IClientPtr& GetClient() const;
+
 private:
     TAgentId AgentId_;
 
@@ -58,6 +60,11 @@ private:
     NRpc::IServerPtr RpcServer_;
     NHttp::IServerPtr HttpServer_;
     NCoreDump::ICoreDumperPtr CoreDumper_;
+
+    NConcurrency::TActionQueuePtr TokenManagerQueue_;
+    NBus::IBusServerPtr TokenBusServer_;
+    NRpc::IServerPtr TokenRpcServer_;
+    ITokenManagerPtr TokenManager_;
 
     NComponentStateChecker::IComponentStateCheckerPtr ComponentStateChecker_;
 

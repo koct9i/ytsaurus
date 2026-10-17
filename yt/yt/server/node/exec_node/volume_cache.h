@@ -13,6 +13,7 @@
 #include <yt/yt/server/node/data_node/public.h>
 
 #include <yt/yt/server/lib/nbd/public.h>
+#include <yt/yt/server/lib/nbd/image/public.h>
 
 #include <yt/yt/ytlib/chunk_client/public.h>
 #include <yt/yt/ytlib/chunk_client/session_id.h>
@@ -158,19 +159,12 @@ public:
 
 private:
     const NClusterNode::TClusterNodeDynamicConfigManagerPtr DynamicConfigManager_;
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, InsertLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, InsertLock_);
 
     static void ValidatePrepareRONbdVolumeOptions(const TPrepareRONbdVolumeOptions& options);
     static void ValidatePrepareRWNbdVolumeOptions(const TPrepareRWNbdVolumeOptions& options);
 
     TInsertCookie GetInsertCookie(const std::string& deviceId, const NNbd::INbdServerPtr& nbdServer);
-
-    //! Make callback that subscribes job for NBD device errors.
-    TExtendedCallback<TVolumePtr(const TErrorOr<TVolumePtr>&)> MakeJobSubscriberForDeviceErrors(
-        TJobId jobId,
-        const std::string& deviceId,
-        const NNbd::INbdServerPtr& nbdServer,
-        const NLogging::TLogger& Logger);
 
     TFuture<NNbd::IBlockDevicePtr> InitializeNbdDevice(
         const NNbd::IBlockDevicePtr& device,
@@ -192,7 +186,7 @@ private:
 
     // RO volumes start here.
 
-    NNbd::IImageReaderPtr CreateArtifactReader(
+    NNbd::NImage::IImageReaderPtr CreateArtifactReader(
         const NLogging::TLogger& Logger,
         const TArtifactKey& artifactKey);
 
@@ -210,7 +204,7 @@ private:
 
     // RW volumes start here.
 
-    TFuture<NNbd::IBlockDevicePtr> CreateRWNbdDevice(
+    TFuture<NNbd::IBlockDevicePtr> CreateRWChunkNbdDevice(
         TGuid tag,
         TPrepareRWNbdVolumeOptions options);
 
@@ -218,7 +212,7 @@ private:
     //! 1. Create RW NBD device.
     //! 2. Register RW NBD device with NBD server.
     //! 3. Create RW NBD porto volume connected to RW NBD device.
-    TFuture<IVolumePtr> PrepareRWNbdVolume(
+    TFuture<IVolumePtr> PrepareRWChunkNbdVolume(
         TGuid tag,
         TPrepareRWNbdVolumeOptions options);
 
@@ -233,7 +227,7 @@ private:
         TPrepareRWNbdVolumeOptions options);
 
     //! Find data node suitable to host NBD disk and open NBD session.
-    TFuture<std::optional<std::tuple<NRpc::IChannelPtr, NYT::NChunkClient::TSessionId>>> PrepareNbdSession(
+    TFuture<std::optional<std::tuple<NRpc::IChannelPtr, NYT::NChunkClient::TSessionId>>> PrepareRWChunkNbdSession(
         const TPrepareRWNbdVolumeOptions& options);
 };
 

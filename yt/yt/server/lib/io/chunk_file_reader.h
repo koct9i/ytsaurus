@@ -106,6 +106,7 @@ public:
         const NChunkClient::TClientChunkReadOptions& options,
         const std::vector<int>& blockIndexes,
         TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {},
         NIO::TBlocksExtPtr blocksExt = nullptr);
 
     TFuture<std::vector<NChunkClient::TBlock>> ReadBlocks(
@@ -113,6 +114,7 @@ public:
         int firstBlockIndex,
         int blockCount,
         TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {},
         NIO::TBlocksExtPtr blocksExt = nullptr);
 
     i64 GetMetaSize() const;
@@ -122,6 +124,7 @@ public:
     TFuture<NChunkClient::TRefCountedChunkMetaPtr> GetMeta(
         const NChunkClient::TClientChunkReadOptions& options,
         TFairShareSlotId fairShareSlotId = {},
+        std::optional<TIOFairShareState> fairShareState = {},
         const std::optional<NChunkClient::TPartitionTags>& partitionTags = {});
 
     //! Returns the future indicating the moment when the underlying file is
@@ -149,11 +152,11 @@ private:
     const bool ValidateBlockChecksums_;
     IBlocksExtCache* const BlocksExtCache_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, DataFileHandleLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, DataFileHandleLock_);
     TEnumIndexedArray<EDirectIOFlag, TFuture<TIOEngineHandlePtr>> DataFileHandleFuture_;
     TEnumIndexedArray<EDirectIOFlag, TIOEngineHandlePtr> DataFileHandle_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, ChunkFragmentReadsLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, ChunkFragmentReadsLock_);
     TEnumIndexedArray<EDirectIOFlag, TFuture<void>> ChunkFragmentReadsPreparedFuture_;
     TEnumIndexedArray<EDirectIOFlag, std::atomic<bool>> ChunkFragmentReadsPrepared_;
     // Permanently caches blocks extension for readers with PrepareToReadChunkFragments invoked.
@@ -164,6 +167,7 @@ private:
         int firstBlockIndex,
         int blockCount,
         TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {},
         NIO::TBlocksExtPtr blocksExt = nullptr,
         TIOEngineHandlePtr dataFile = nullptr);
     std::vector<NChunkClient::TBlock> OnBlocksRead(
@@ -175,7 +179,8 @@ private:
     TFuture<NChunkClient::TRefCountedChunkMetaPtr> DoReadMeta(
         const NChunkClient::TClientChunkReadOptions& options,
         const std::optional<NChunkClient::TPartitionTags>& partitionTags,
-        TFairShareSlotId fairShareSlotId);
+        TFairShareSlotId fairShareSlotId,
+        std::optional<TIOFairShareState> fairShareState = {});
     NChunkClient::TRefCountedChunkMetaPtr OnMetaRead(
         const std::string& metaFileName,
         NChunkClient::TChunkReaderStatisticsPtr chunkReaderStatistics,

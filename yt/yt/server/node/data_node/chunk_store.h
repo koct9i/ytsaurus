@@ -11,8 +11,6 @@
 #include <yt/yt/core/concurrency/action_queue.h>
 #include <yt/yt/core/concurrency/thread_affinity.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <yt/yt/server/node/cluster_node/public.h>
 
 #include <yt/yt/ytlib/misc/public.h>
@@ -21,8 +19,10 @@
 
 #include <library/cpp/yt/memory/atomic_intrusive_ptr.h>
 
-#include <library/cpp/yt/threading/rw_spin_lock.h>
-#include <library/cpp/yt/threading/spin_lock.h>
+#include <library/cpp/yt/misc/property.h>
+
+#include <library/cpp/yt/system/rw_spin_lock.h>
+#include <library/cpp/yt/system/spin_lock.h>
 
 #include <util/generic/hash_multi_map.h>
 
@@ -48,7 +48,7 @@ struct IChunkStoreHost
 
 DEFINE_REFCOUNTED_TYPE(IChunkStoreHost)
 
-IChunkStoreHostPtr CreateChunkStoreHost(NClusterNode::IBootstrapBase* bootstrap);
+IChunkStoreHostPtr CreateChunkStoreHost(IBootstrap* bootstrap);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -96,7 +96,7 @@ public:
      */
     void UpdateExistingChunk(
         const IChunkPtr& chunk,
-        const NThreading::TWriterGuard<NThreading::TReaderWriterSpinLock>&);
+        const TWriterGuard<TReaderWriterSpinLock>&);
 
     //! Unregisters the chunk but does not remove any of its files.
     void UnregisterChunk(const IChunkPtr& chunk);
@@ -114,8 +114,6 @@ public:
 
     //! Finds a chunk by id on specified location.
     //! Returns |nullptr| if no chunk exists.
-    //! NB: must not be called until the node is registered at master (because
-    //! we lack medium name-to-index mapping until that).
     /*!
      *  \note
      *  Thread affinity: any
@@ -170,7 +168,7 @@ public:
 
     // Same as above, but the caller must hold lock.
     TPerLocationChunkMap GetPerLocationChunksUnsafe(
-        const NThreading::TReaderGuard<NThreading::TReaderWriterSpinLock>& guard);
+        const TReaderGuard<TReaderWriterSpinLock>& guard);
 
     //! Iterates over all registered chunks and checks that their cell tags are from existing master cell tags.
     /*!
@@ -197,6 +195,10 @@ public:
     //! Triggers medium change for all chunks in location.
     void ChangeLocationMedium(const TChunkLocationPtr& location, int oldMediumIndex);
 
+    void SetMediumAwareBlockCacheManager(IMediumAwareBlockCacheManagerPtr manager);
+
+    TLocationCountPerMedium GetLocationCountPerMedium() const;
+
     //! Finds a suitable storage location for a new chunk.
     /*!
      *  The initial set of candidates consists of locations that are not full,
@@ -220,8 +222,8 @@ public:
 
     bool ShouldPublishDisabledLocations();
 
-    NThreading::TReaderGuard<NThreading::TReaderWriterSpinLock> AcquireChunkMapReaderLock();
-    NThreading::TWriterGuard<NThreading::TReaderWriterSpinLock> AcquireChunkMapWriterLock();
+    TReaderGuard<TReaderWriterSpinLock> AcquireChunkMapReaderLock();
+    TWriterGuard<TReaderWriterSpinLock> AcquireChunkMapWriterLock();
 
     //! Storage locations.
     DEFINE_BYREF_RO_PROPERTY(std::vector<TStoreLocationPtr>, Locations);
@@ -246,6 +248,8 @@ private:
     const IChunkStoreHostPtr ChunkStoreHost_;
     const NConcurrency::TPeriodicExecutorPtr ProfilingExecutor_;
 
+    IMediumAwareBlockCacheManagerPtr MediumAwareBlockCacheManager_;
+
     TAtomicIntrusivePtr<TDataNodeDynamicConfig> DynamicConfig_;
 
     struct TChunkEntry
@@ -260,11 +264,11 @@ private:
         std::multimap<TInstant, NChunkClient::TPlacementId>::iterator DeadlineIterator;
     };
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, PlacementLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, PlacementLock_);
     THashMap<NChunkClient::TPlacementId, TPlacementInfo> PlacementIdToInfo_;
     std::multimap<TInstant, NChunkClient::TPlacementId> DeadlineToPlacementId_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, ChunkMapLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, ChunkMapLock_);
     // A chunk may have multiple copies present on one node - as long as those
     // copies are placed on distinct media.
     // Such copies may have different sizes, too.

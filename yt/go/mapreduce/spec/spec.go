@@ -21,10 +21,22 @@ type File struct {
 }
 
 type DiskRequest struct {
-	DiskSpace  int64  `yson:"disk_space,omitempty"`
-	InodeCount int64  `yson:"inode_count,omitempty"`
-	Account    string `yson:"account,omitempty"`
-	MediumName string `yson:"medium_name,omitempty"`
+	DiskSpace  int64    `yson:"disk_space,omitempty"`
+	InodeCount int64    `yson:"inode_count,omitempty"`
+	Account    string   `yson:"account,omitempty"`
+	MediumName string   `yson:"medium_name,omitempty"`
+	NBDDisk    *NBDDisk `yson:"nbd_disk,omitempty"`
+}
+
+type NBDDisk struct {
+	DataNodeRPCTimeout            yson.Duration `yson:"data_node_rpc_timeout,omitempty"`
+	DataNodeAddress               string        `yson:"data_node_address,omitempty"`
+	MasterRPCTimeout              yson.Duration `yson:"master_rpc_timeout,omitempty"`
+	MinDataNodeCount              int           `yson:"min_data_node_count,omitempty"`
+	MaxDataNodeCount              int           `yson:"max_data_node_count,omitempty"`
+	DataNodeNBDServiceRPCTimeout  yson.Duration `yson:"data_node_nbd_service_rpc_timeout,omitempty"`
+	DataNodeNBDServiceMakeTimeout yson.Duration `yson:"data_node_nbd_service_make_timeout,omitempty"`
+	MultiplexingParallelism       int           `yson:"multiplexing_parallelism,omitempty"`
 }
 
 type UserScript struct {
@@ -56,6 +68,9 @@ type UserScript struct {
 	DiskRequest         *DiskRequest  `yson:"disk_request,omitempty"`
 
 	NetworkProject string `yson:"network_project,omitempty"`
+
+	InterruptionSignal    string `yson:"interruption_signal,omitempty"`
+	SignalRootProcessOnly bool   `yson:"signal_root_process_only,omitempty"`
 
 	EnablePorto            string         `yson:"enable_porto,omitempty"`
 	UsePortoMemoryTracking *bool          `yson:"use_porto_memory_tracking,omitempty"`
@@ -221,6 +236,10 @@ type Spec struct {
 	ClusterName    string `yson:"cluster_name,omitempty"`
 	NetworkName    string `yson:"network_name,omitempty"`
 	CopyAttributes *bool  `yson:"copy_attributes,omitempty"`
+
+	// AllowUnfrozenInputTables enables best-effort remote copy of dynamic input
+	// tables whose tablets are neither frozen nor unmounted.
+	AllowUnfrozenInputTables bool `yson:"allow_unfrozen_input_tables,omitempty"`
 
 	IntermediateDataReplicationFactor int     `yson:"intermediate_data_replication_factor,omitempty"`
 	IntermediateDataAccount           string  `yson:"intermediate_data_account,omitempty"`

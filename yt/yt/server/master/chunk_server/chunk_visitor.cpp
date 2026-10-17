@@ -1,5 +1,7 @@
 #include "chunk_visitor.h"
+
 #include "chunk_manager.h"
+#include "chunk_replica_fetcher.h"
 
 #include <yt/yt/ytlib/chunk_client/chunk_meta_extensions.h>
 
@@ -52,7 +54,7 @@ void TChunkReplicasVisitor::OnSuccess()
         .AsUnique()
         .Subscribe(BIND([this, this_ = MakeStrong(this)] (TErrorOr<THashMap<TChunkId, TErrorOr<std::vector<TSequoiaChunkReplica>>>> replicasOrError) {
             Promise_.TrySet(std::move(replicasOrError));
-    }));
+        }));
 }
 
 ////////////////////////////////////////////////////////////////////////////////

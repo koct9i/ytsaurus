@@ -5,7 +5,7 @@ namespace {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TQueryEvaluateTest, HierarchicalJoinWithGroupByInParentQueryThrows)
+TEST_F(TQueryEvaluateTest, HierarchicalJoinInProjectClauseWithGroupByPlanStructure)
 {
     TSplitMap splits;
 
@@ -19,21 +19,28 @@ TEST_F(TQueryEvaluateTest, HierarchicalJoinWithGroupByInParentQueryThrows)
         {"c", EValueType::Int64},
     });
 
-    EXPECT_THROW_THAT(
-        Prepare(
-            R"(
-                select t.a as a,
-                    (select li, foreign_t.c
-                        from (array_agg(t.b, true) as li)
-                        join `//foreign` as foreign_t on li = foreign_t.x
-                    ) as joined_data
-                from `//t` as t
-                group by a
-            )",
-            splits,
-            {},
-            TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion}),
-        testing::HasSubstr("Subquery with JOIN with GROUP BY in parent query is not supported"));
+    auto query = Prepare(
+        R"(
+            select t.a as a,
+                (select li, foreign_t.c
+                    from (array_agg(t.b, true) as li)
+                    join `//foreign` as foreign_t on li = foreign_t.x
+                ) as joined_data
+            from `//t` as t
+            group by a
+        )",
+        splits,
+        {},
+        TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion});
+
+    EXPECT_TRUE(query->HierarchicalJoinsBeforeGroupBy.empty());
+    ASSERT_EQ(std::ssize(query->HierarchicalJoinsAfterGroupBy), 1);
+
+    const auto& hierarchicalJoin = query->HierarchicalJoinsAfterGroupBy[0];
+    EXPECT_EQ(hierarchicalJoin->ResultColumnName, "hierarchical_join_result_0");
+    EXPECT_FALSE(hierarchicalJoin->IsLeft);
+    ASSERT_NE(hierarchicalJoin->SelfSideJoinKeys, nullptr);
+    ASSERT_NE(hierarchicalJoin->JoiningSubquery, nullptr);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -811,7 +818,7 @@ TEST_F(TQueryEvaluateTest, HierarchicalJoinInHavingClauseWithGroupByThrows)
             splits,
             {},
             TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion}),
-        testing::HasSubstr("Subquery with JOIN with GROUP BY in parent query is not supported"));
+        testing::HasSubstr("Subquery with JOIN in HAVING clause is not supported"));
 }
 
 TEST_F(TQueryEvaluateTest, HierarchicalJoinInnerJoinMatchesRowsByKey)
@@ -909,6 +916,13 @@ TEST_F(TQueryEvaluateTest, HierarchicalJoinWorksWithStringJoinKey)
 
 TEST_F(TQueryEvaluateTest, HierarchicalJoinStressTestMatchesNaiveImplementation)
 {
+    struct TSubqueryClauses
+    {
+        std::optional<ESortOrder> SortOrder;
+        std::optional<i64> Offset;
+        std::optional<i64> Limit;
+    };
+
     auto splits = MakeSplitsWithListColumn2();
 
     i64 leftPksCount = 100;
@@ -919,6 +933,8 @@ TEST_F(TQueryEvaluateTest, HierarchicalJoinStressTestMatchesNaiveImplementation)
 
     for (bool isLeftJoin : {false, true}) {
         for (int iteration = 0; iteration < iterations; ++iteration) {
+            SCOPED_TRACE(Format("Left join: %v, Iteration: %v", isLeftJoin, iteration));
+
             auto leftRowsMap = THashMap<i64, std::vector<i64>>();
             {
                 for (i64 i = 0; i < leftPksCount; ++i) {
@@ -999,48 +1015,99 @@ TEST_F(TQueryEvaluateTest, HierarchicalJoinStressTestMatchesNaiveImplementation)
                 resultMap[leftPk] = joinedRow;
             }
 
-            auto resultSource = TSource();
-            {
+            i64 offset = std::rand() % (leftFksMaxLength + 1);
+            i64 limit = std::rand() % (leftFksMaxLength + 1);
+            for (const auto& clauses : std::vector<TSubqueryClauses>{
+                {},
+                {.Limit = limit},
+                {.Offset = offset, .Limit = limit},
+                {.SortOrder = ESortOrder::Ascending, .Limit = limit},
+                {.SortOrder = ESortOrder::Descending, .Limit = limit},
+                {.SortOrder = ESortOrder::Ascending, .Offset = offset, .Limit = limit},
+                {.SortOrder = ESortOrder::Descending, .Offset = offset, .Limit = limit},
+            }) {
+                auto clausesBuilder = TStringBuilder();
+                if (clauses.SortOrder) {
+                    clausesBuilder.AppendFormat("ORDER BY r.value %v, fk ASC ",
+                        *clauses.SortOrder == ESortOrder::Ascending ? "ASC" : "DESC");
+                }
+
+                if (clauses.Offset) {
+                    clausesBuilder.AppendFormat("OFFSET %v ", *clauses.Offset);
+                }
+
+                if (clauses.Limit) {
+                    clausesBuilder.AppendFormat("LIMIT %v", *clauses.Limit);
+                }
+
+                auto query = Format(R"(
+                    select l.pk as pk, (
+                        select fk, r.value as value
+                        from (l.fks as fk)
+                        %v join `//right` as r on fk = r.pk
+                        %v
+                    ) as joined_data
+                    from `//left` as l
+                )", isLeftJoin ? "left" : "", clausesBuilder.Flush());
+                SCOPED_TRACE(query);
+
+                auto resultSource = TSource();
                 auto buffer = std::vector<std::pair<i64, std::vector<std::pair<i64, std::optional<i64>>>>>();
                 {
                     for (const auto& [key, value] : resultMap) {
                         buffer.emplace_back(key, value);
                     }
+
                     std::sort(buffer.begin(), buffer.end());
                 }
 
-                for (const auto& [pk, joinedRow] : buffer) {
+                for (auto& [pk, joinedRow] : buffer) {
+                    if (clauses.SortOrder) {
+                        std::sort(joinedRow.begin(), joinedRow.end(), [&] (const auto& lhs, const auto& rhs) {
+                            if (lhs.second != rhs.second) {
+                                return *clauses.SortOrder == ESortOrder::Ascending
+                                    ? lhs.second < rhs.second
+                                    : lhs.second > rhs.second;
+                            }
+
+                            return lhs.first < rhs.first;
+                        });
+                    }
+
+                    i64 firstRowIndex = std::min<i64>(clauses.Offset.value_or(0), std::ssize(joinedRow));
+                    i64 endRowIndex = std::min<i64>(
+                        firstRowIndex + clauses.Limit.value_or(std::ssize(joinedRow)),
+                        std::ssize(joinedRow));
+
                     auto resultRow = TStringBuilder();
                     resultRow.AppendFormat("pk=%v;joined_data=[", pk);
-                    for (const auto& [fk, value] : joinedRow) {
+                    for (i64 joinedRowIndex = firstRowIndex; joinedRowIndex < endRowIndex; ++joinedRowIndex) {
+                        const auto& [fk, value] = joinedRow[joinedRowIndex];
                         if (value) {
                             resultRow.AppendFormat("[%v;%v];", fk, *value);
                         } else {
                             resultRow.AppendFormat("[%v;#];", fk);
                         }
                     }
+
                     resultRow.AppendString("];");
                     resultSource.push_back(resultRow.Flush());
                 }
+
+                auto result = YsonToRows(resultSource, resultSplit);
+
+                EvaluateOnlyViaNativeExecutionBackend(
+                    query,
+                    splits,
+                    {leftRowsSource, rightRowsSource},
+                    ResultMatcher(result, resultSplit.TableSchema),
+                    {
+                        .SyntaxVersion = 2,
+                        .MaxJoinBatchSize = leftFksMaxLength / 4,
+                        // COMPAT(dtorilov): Remove after 26.2.
+                        .EnableScalarSubqueryOrderByAndLimit = true,
+                    });
             }
-
-            auto result = YsonToRows(resultSource, resultSplit);
-
-            EvaluateOnlyViaNativeExecutionBackend(
-                Format(
-                    R"(
-                        select l.pk as pk,
-                            (select fk, r.value as value
-                                from (l.fks as fk)
-                                %v join `//right` as r on fk = r.pk
-                            ) as joined_data
-                        from `//left` as l
-                    )",
-                    isLeftJoin ? "left" : ""),
-                splits,
-                {leftRowsSource, rightRowsSource},
-                ResultMatcher(result, resultSplit.TableSchema),
-                {.SyntaxVersion = 2, .MaxJoinBatchSize = leftFksMaxLength / 4});
         }
     }
 }
@@ -2116,6 +2183,1498 @@ TEST_F(TQueryEvaluateTest, HierarchicalJoinGroupByQualifiedForeignColumnThrows)
             {},
             TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion}),
         testing::HasSubstr("Expression or its parts are not in GROUP BY keys"));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinMultipleBeforeGroupByPositionsEvaluates)
+{
+    auto splits = MakeSplitsWithListColumn();
+    splits["//foreign_a"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+    splits["//foreign_w"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+    splits["//foreign_k"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;arr=[10;20]",
+        "a=2;arr=[99]",
+        "a=3;arr=[10]",
+        "a=4;arr=[20;30]",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+        "x=30;c=300",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"k", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        {"total", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+
+    auto result = YsonToRows({
+        "k=1;total=1",
+        "k=2;total=4",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select k, sum(yson_length(
+                (select li_a, fa.c
+                    from (t.arr as li_a)
+                    join `//foreign_a` as fa on li_a = fa.x
+                )
+            )) as total
+            from `//t` as t
+            where yson_length(
+                (select fw.c
+                    from (t.arr as li_w)
+                    join `//foreign_w` as fw on li_w = fw.x
+                )
+            ) > 0
+            group by yson_length(
+                (select li_k, fk.c
+                    from (t.arr as li_k)
+                    join `//foreign_k` as fk on li_k = fk.x
+                )
+            ) as k
+            order by k
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows, foreignRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinInOrderByWithGroupByThrows)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"arr", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    EXPECT_THROW_THAT(
+        Prepare(
+            R"(
+                select t.a as a, sum(1) as cnt
+                from `//t` as t
+                group by a, t.arr as arr
+                order by yson_length(
+                    (select li, foreign_t.c
+                        from (arr as li)
+                        join `//foreign` as foreign_t on li = foreign_t.x
+                    )
+                )
+                limit 1
+            )",
+            splits,
+            {},
+            TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion}),
+        testing::HasSubstr("Subquery with JOIN in ORDER BY clause is not supported"));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryAsAggregateFunctionArgumentEvaluates)
+{
+    auto splits = MakeSplitsWithListColumn();
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;arr=[10;20]",
+        "a=1;arr=[99]",
+        "a=2;arr=[10]",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"total_matches", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        {"row_count", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        {"total_a", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;total_matches=2;row_count=2;total_a=2",
+        "a=2;total_matches=1;row_count=1;total_a=2",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                sum(yson_length(
+                    (select li, foreign_t.c
+                        from (t.arr as li)
+                        join `//foreign` as foreign_t on li = foreign_t.x
+                    )
+                )) as total_matches,
+                sum(1) as row_count,
+                sum(t.a) as total_a
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryReferencesOuterAggregateInWhereClauseThrows)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"arr", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    EXPECT_THROW_THAT(
+        Prepare(
+            R"(
+                select a,
+                    sum(yson_length(
+                        (select li, foreign_t.c
+                            from (t.arr as li)
+                            join `//foreign` as foreign_t on li = foreign_t.x
+                            where foreign_t.c < sum(t.a)
+                        )
+                    )) as total
+                from `//t` as t
+                group by t.a as a
+            )",
+            splits,
+            {},
+            TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion}),
+        testing::HasSubstr("Misuse of aggregate function"));
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryFromUsesOuterAggregateInsideAggregateArgumentThrows)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    EXPECT_THROW_THAT(
+        Prepare(
+            R"(
+                select a,
+                    sum(yson_length(
+                        (select li, foreign_t.c
+                            from (array_agg(t.b, true) as li)
+                            join `//foreign` as foreign_t on li = foreign_t.x
+                        )
+                    )) as total
+                from `//t` as t
+                group by t.a as a
+            )",
+            splits,
+            {},
+            TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion}),
+        testing::HasSubstr("Misuse of aggregate function"));
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryCoexistsWithAggregateInProjectionAfterGroupByPlanStructure)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto query = Prepare(
+        R"(
+            select a,
+                yson_length(
+                    (select li, foreign_t.c
+                        from (array_agg(t.b, true) as li)
+                        join `//foreign` as foreign_t on li = foreign_t.x
+                    )
+                ) + sum(t.b) as combined
+            from `//t` as t
+            group by t.a as a
+        )",
+        splits,
+        {},
+        TPreparePlanFragmentOptions{.SyntaxVersion = 2, .BuilderVersion = DefaultExpressionBuilderVersion});
+
+    EXPECT_TRUE(query->HierarchicalJoinsBeforeGroupBy.empty());
+    ASSERT_EQ(std::ssize(query->HierarchicalJoinsAfterGroupBy), 1);
+    EXPECT_EQ(query->HierarchicalJoinsAfterGroupBy[0]->ResultColumnName, "hierarchical_join_result_0");
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryCoexistsWithAggregateInsideAggregateArgumentEvaluates)
+{
+    auto splits = MakeSplitsWithListColumn();
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;arr=[10;20]",
+        "a=1;arr=[99]",
+        "a=2;arr=[10]",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"combined", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;combined=4",
+        "a=2;combined=2",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                sum(yson_length(
+                    (select li, foreign_t.c
+                        from (t.arr as li)
+                        join `//foreign` as foreign_t on li = foreign_t.x
+                    )
+                )) + sum(1) as combined
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByStressTestMatchesNaiveImplementation)
+{
+    TSplitMap splits;
+    splits["//left"] = MakeSplit({
+        {"pk", SimpleLogicalType(ESimpleLogicalValueType::Int64), ESortOrder::Ascending},
+        {"fk", SimpleLogicalType(ESimpleLogicalValueType::Int64), ESortOrder::Ascending},
+    });
+    splits["//right"] = MakeSplit({
+        {"pk", EValueType::Int64, ESortOrder::Ascending},
+        {"value", EValueType::Int64},
+    });
+
+    i64 leftPksCount = 100;
+    i64 leftFksMaxLength = 20;
+    i64 rightPksCount = 100;
+    i64 rightValuesCount = 100;
+    i64 iterations = 20;
+
+    for (bool isLeftJoin : {false, true}) {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            auto leftRowsMap = THashMap<i64, std::vector<i64>>();
+            {
+                for (i64 i = 0; i < leftPksCount; ++i) {
+                    i64 pk = std::rand() % leftPksCount;
+                    if (leftRowsMap.contains(pk)) {
+                        continue;
+                    }
+
+                    i64 length = std::rand() % leftFksMaxLength;
+                    for (int j = 0; j < length; ++j) {
+                        leftRowsMap[pk].push_back(std::rand() % rightPksCount);
+                    }
+                }
+            }
+
+            auto leftRowsSource = TSource();
+            {
+                auto buffer = std::vector<std::pair<i64, std::vector<i64>>>();
+                {
+                    for (const auto& [key, value] : leftRowsMap) {
+                        buffer.emplace_back(key, value);
+                    }
+                    std::sort(buffer.begin(), buffer.end());
+                }
+
+                for (const auto& [pk, fks] : buffer) {
+                    for (i64 fk : fks) {
+                        leftRowsSource.push_back(Format("pk=%v;fk=%v", pk, fk));
+                    }
+                }
+            }
+
+            auto rightRowsMap = THashMap<i64, i64>();
+            {
+                for (i64 i = 0; i < rightPksCount; ++i) {
+                    i64 pk = std::rand() % rightPksCount;
+                    if (rightRowsMap.contains(pk)) {
+                        continue;
+                    }
+                    rightRowsMap[pk] = std::rand() % rightValuesCount;
+                }
+            }
+
+            auto rightRowsSource = TSource();
+            {
+                auto buffer = std::vector<std::pair<i64, i64>>();
+                {
+                    for (const auto& [key, value] : rightRowsMap) {
+                        buffer.emplace_back(key, value);
+                    }
+                    std::sort(buffer.begin(), buffer.end());
+                }
+
+                for (const auto& [pk, value] : buffer) {
+                    rightRowsSource.push_back(Format("pk=%v;value=%v;", pk, value));
+                }
+            }
+
+            auto resultSplit = MakeSplit({
+                {"pk", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+                {"joined_data", ListLogicalType(StructLogicalType({
+                    {"fk", "fk", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+                    {"value", "value", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+                }, /*removedFieldStableNames*/ {}))},
+            });
+
+            auto resultMap = THashMap<i64, std::vector<std::pair<i64, std::optional<i64>>>>();
+            for (const auto& [leftPk, leftFks] : leftRowsMap) {
+                auto joinedRow = std::vector<std::pair<i64, std::optional<i64>>>();
+
+                for (i64 leftFk : leftFks) {
+                    auto it = rightRowsMap.find(leftFk);
+                    if (it != rightRowsMap.end()) {
+                        joinedRow.emplace_back(leftFk, it->second);
+                    } else if (isLeftJoin) {
+                        joinedRow.emplace_back(leftFk, std::nullopt);
+                    }
+                }
+
+                resultMap[leftPk] = joinedRow;
+            }
+
+            auto resultSource = TSource();
+            {
+                auto buffer = std::vector<std::pair<i64, std::vector<std::pair<i64, std::optional<i64>>>>>();
+                {
+                    for (const auto& [key, value] : resultMap) {
+                        buffer.emplace_back(key, value);
+                    }
+                    std::sort(buffer.begin(), buffer.end());
+                }
+
+                for (const auto& [pk, joinedRow] : buffer) {
+                    auto resultRow = TStringBuilder();
+                    resultRow.AppendFormat("pk=%v;joined_data=[", pk);
+                    for (const auto& [fk, value] : joinedRow) {
+                        if (value) {
+                            resultRow.AppendFormat("[%v;%v];", fk, *value);
+                        } else {
+                            resultRow.AppendFormat("[%v;#];", fk);
+                        }
+                    }
+                    resultRow.AppendString("];");
+                    resultSource.push_back(resultRow.Flush());
+                }
+            }
+
+            auto result = YsonToRows(resultSource, resultSplit);
+
+            EvaluateOnlyViaNativeExecutionBackend(
+                Format(
+                    R"(
+                        select l.pk as pk,
+                            (select fk, r.value as value
+                                from (array_agg(l.fk, true) as fk)
+                                %v join `//right` as r on fk = r.pk
+                            ) as joined_data
+                        from `//left` as l
+                        group by pk
+                        order by pk
+                        limit 1000
+                    )",
+                    isLeftJoin ? "left" : ""),
+                splits,
+                {leftRowsSource, rightRowsSource},
+                ResultMatcher(result, resultSplit.TableSchema),
+                {.SyntaxVersion = 2, .MaxJoinBatchSize = leftFksMaxLength / 4});
+        }
+    }
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByInnerJoin)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10",
+        "a=1;b=20",
+        "a=2;b=30",
+        "a=2;b=40",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+        "x=30;c=300",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"joined_data", ListLogicalType(StructLogicalType({
+            {"li", "li", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"foreign_t.c", "foreign_t.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;joined_data=[[10;100;];[20;200;];]",
+        "a=2;joined_data=[[30;300;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                (select li, foreign_t.c
+                    from (array_agg(t.b, true) as li)
+                    join `//foreign` as foreign_t on li = foreign_t.x
+                ) as joined_data
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByLeftJoinReturnsNullForUnmatched)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10",
+        "a=1;b=99",
+        "a=2;b=40",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=40;c=400",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"joined_data", ListLogicalType(StructLogicalType({
+            {"li", "li", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"foreign_t.c", "foreign_t.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;joined_data=[[10;100;];[99;#;];]",
+        "a=2;joined_data=[[40;400;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                (select li, foreign_t.c
+                    from (array_agg(t.b, true) as li)
+                    left join `//foreign` as foreign_t on li = foreign_t.x
+                ) as joined_data
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByWithForeignSideFilter)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10",
+        "a=1;b=20",
+        "a=1;b=30",
+        "a=2;b=40",
+        "a=2;b=50",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=5",
+        "x=20;c=15",
+        "x=30;c=25",
+        "x=40;c=5",
+        "x=50;c=35",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"joined_data", ListLogicalType(StructLogicalType({
+            {"li", "li", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"foreign_t.c", "foreign_t.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;joined_data=[[20;15;];[30;25;];]",
+        "a=2;joined_data=[[50;35;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                (select li, foreign_t.c
+                    from (array_agg(t.b, true) as li)
+                    join `//foreign` as foreign_t on li = foreign_t.x
+                    where foreign_t.c > 10
+                ) as joined_data
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByAlongsideAggregateInProjection)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10",
+        "a=1;b=20",
+        "a=2;b=30",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+        "x=30;c=300",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"combined", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;combined=32",
+        "a=2;combined=31",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select a,
+                yson_length(
+                    (select li, foreign_t.c
+                        from (array_agg(t.b, true) as li)
+                        join `//foreign` as foreign_t on li = foreign_t.x
+                    )
+                ) + sum(t.b) as combined
+            from `//t` as t
+            group by t.a as a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByMultipleSubqueries)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign_a"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+    splits["//foreign_b"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10",
+        "a=1;b=20",
+        "a=2;b=30",
+    };
+
+    auto foreignARows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+    };
+
+    auto foreignBRows = std::vector<std::string>{
+        "x=10;c=1000",
+        "x=20;c=2000",
+        "x=30;c=3000",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"sq_a", ListLogicalType(StructLogicalType({
+            {"li_a", "li_a", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"foreign_t.c", "foreign_t.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+        {"sq_b", ListLogicalType(StructLogicalType({
+            {"li_b", "li_b", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"f2.c", "f2.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;sq_a=[[10;100;];[20;200;];];sq_b=[[10;1000;];[20;2000;];]",
+        "a=2;sq_a=[];sq_b=[[30;3000;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                (select li_a, foreign_t.c
+                    from (array_agg(t.b, true) as li_a)
+                    join `//foreign_a` as foreign_t on li_a = foreign_t.x
+                ) as sq_a,
+                (select li_b, f2.c
+                    from (array_agg(t.b, true) as li_b)
+                    join `//foreign_b` as f2 on li_b = f2.x
+                ) as sq_b
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignARows, foreignBRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByCoexistsWithBeforeGroupBy)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"arr", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+    splits["//foreign_before"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+    splits["//foreign_after"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10;arr=[7;8]",
+        "a=1;b=20;arr=[8;9]",
+        "a=2;b=30;arr=[7]",
+    };
+
+    auto foreignBeforeRows = std::vector<std::string>{
+        "x=7;c=70",
+        "x=8;c=80",
+        "x=9;c=90",
+    };
+
+    auto foreignAfterRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+        "x=30;c=300",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"sum_before_len", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        {"sq_after", ListLogicalType(StructLogicalType({
+            {"li_after", "li_after", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"foreign_after.c", "foreign_after.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;sum_before_len=4;sq_after=[[10;100;];[20;200;];]",
+        "a=2;sum_before_len=1;sq_after=[[30;300;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                sum(yson_length(
+                    (select li_before, foreign_before.c
+                        from (t.arr as li_before)
+                        join `//foreign_before` as foreign_before on li_before = foreign_before.x
+                    )
+                )) as sum_before_len,
+                (select li_after, foreign_after.c
+                    from (array_agg(t.b, true) as li_after)
+                    join `//foreign_after` as foreign_after on li_after = foreign_after.x
+                ) as sq_after
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignBeforeRows, foreignAfterRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByCompositeKey)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b1", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b2", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"pk1", EValueType::Int64, ESortOrder::Ascending},
+        {"pk2", EValueType::Int64, ESortOrder::Ascending},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b1=10;b2=1",
+        "a=1;b1=10;b2=2",
+        "a=1;b1=20;b2=1",
+        "a=2;b1=30;b2=3",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "pk1=10;pk2=1;c=11",
+        "pk1=10;pk2=2;c=12",
+        "pk1=20;pk2=1;c=21",
+        "pk1=30;pk2=3;c=33",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"joined_data", ListLogicalType(StructLogicalType({
+            {"li1", "li1", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"li2", "li2", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"f.c", "f.c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;joined_data=[[10;1;11;];[10;2;12;];[20;1;21;];]",
+        "a=2;joined_data=[[30;3;33;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                (select li1, li2, f.c
+                    from (array_agg(t.b1, true) as li1, array_agg(t.b2, true) as li2)
+                    join `//foreign` as f on (li1, li2) = (f.pk1, f.pk2)
+                ) as joined_data
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByWithSubqueryGroupBy)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "a=1;b=10",
+        "a=1;b=10",
+        "a=1;b=20",
+        "a=2;b=30",
+        "a=2;b=30",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=1",
+        "x=20;c=2",
+        "x=30;c=3",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"a", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"joined_data", ListLogicalType(StructLogicalType({
+            {"total", "total", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"cnt", "cnt", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "a=1;joined_data=[[4;3;];]",
+        "a=2;joined_data=[[6;2;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.a as a,
+                (select sum(foreign_t.c) as total, sum(1) as cnt
+                    from (array_agg(t.b, true) as li)
+                    join `//foreign` as foreign_t on li = foreign_t.x
+                    group by 0
+                ) as joined_data
+            from `//t` as t
+            group by a
+            order by a
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByReferencesGroupKey)
+{
+    TSplitMap splits;
+    splits["//t"] = MakeSplit({
+        {"grp", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"b", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"x", EValueType::Int64},
+        {"c", EValueType::Int64},
+    });
+
+    auto outerRows = std::vector<std::string>{
+        "grp=1;b=9",
+        "grp=1;b=19",
+        "grp=2;b=8",
+        "grp=2;b=18",
+    };
+
+    auto foreignRows = std::vector<std::string>{
+        "x=10;c=100",
+        "x=20;c=200",
+    };
+
+    auto resultSplit = MakeSplit({
+        {"grp", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
+        {"joined_data", ListLogicalType(StructLogicalType({
+            {"c", "c", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+
+    auto result = YsonToRows({
+        "grp=1;joined_data=[[100;];[200;];]",
+        "grp=2;joined_data=[[100;];[200;];]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            select t.grp as grp,
+                (select foreign_t.c as c
+                    from (array_agg(t.b, true) as li)
+                    join `//foreign` as foreign_t on li + grp = foreign_t.x
+                ) as joined_data
+            from `//t` as t
+            group by grp
+            order by grp
+            limit 100
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {.SyntaxVersion = 2});
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+std::string MakeRowWithHashColumn(ui64 hashKey, TStringBuf row)
+{
+    auto value = MakeUnversionedUint64Value(hashKey);
+    ui64 hash = GetFarmFingerprint(TUnversionedValueRange(&value, 1));
+    return Format("hash=%vu;%v", hash, row);
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinCompositeKeyTopDistinctValues)
+{
+    auto splits = TSplitMap();
+    splits["//t"] = MakeSplit({
+        TColumnSchema("hash", EValueType::Uint64, ESortOrder::Ascending)
+            .SetExpression("farm_hash([meta.group_id])"),
+        TColumnSchema("meta.group_id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("meta.id", EValueType::Uint64, ESortOrder::Ascending),
+    });
+    splits["//foreign"] = MakeSplit({
+        TColumnSchema("hash", EValueType::Uint64, ESortOrder::Ascending)
+            .SetExpression("farm_hash([group_id])"),
+        TColumnSchema("group_id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("source_id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("value_id", EValueType::Uint64, ESortOrder::Ascending),
+    });
+
+    auto outerRows = std::vector<std::string>{
+        MakeRowWithHashColumn(1, "meta.group_id=1u;meta.id=10u"),
+        MakeRowWithHashColumn(1, "meta.group_id=1u;meta.id=20u"),
+        MakeRowWithHashColumn(1, "meta.group_id=1u;meta.id=30u"),
+    };
+    auto foreignRows = std::vector<std::string>{
+        MakeRowWithHashColumn(1, "group_id=1u;source_id=10u;value_id=1u"),
+    };
+    for (ui64 valueId = 1; valueId <= 102; ++valueId) {
+        foreignRows.push_back(MakeRowWithHashColumn(1, Format(
+            "group_id=1u;source_id=10u;value_id=%vu", valueId)));
+    }
+
+    foreignRows.push_back(MakeRowWithHashColumn(1, "group_id=1u;source_id=20u;value_id=200u"));
+    foreignRows.push_back(MakeRowWithHashColumn(1, "group_id=1u;source_id=20u;value_id=201u"));
+
+    auto resultSplit = MakeSplit({
+        {"key_id", EValueType::Uint64},
+        {"value_ids", ListLogicalType(StructLogicalType({
+            {"value_id", "value_id", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Uint64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+    auto valueIds = TStringBuilder();
+    valueIds.AppendString("key_id=10u;value_ids=[");
+    for (ui64 valueId = 1; valueId <= 100; ++valueId) {
+        valueIds.AppendFormat("[%vu;];", valueId);
+    }
+
+    valueIds.AppendString("]");
+    auto result = YsonToRows({
+        valueIds.Flush(),
+        "key_id=20u;value_ids=[[200u;];[201u;];]",
+        "key_id=30u;value_ids=[]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            SELECT
+                t.`meta.id` AS key_id,
+                (
+                    SELECT value_id
+                    FROM (
+                        CAST(make_list(t.`meta.group_id`) AS `List<Uint64>`) AS group_id,
+                        CAST(make_list(t.`meta.id`) AS `List<Uint64>`) AS join_key
+                    )
+                    JOIN `//foreign` AS f
+                        ON (group_id, join_key) =
+                        (f.group_id, f.source_id)
+                    GROUP BY f.value_id AS value_id
+                    ORDER BY value_id ASC
+                    LIMIT 100
+                ) AS value_ids
+            FROM `//t` AS t
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        // COMPAT(dtorilov): Remove after 26.2.
+        {.SyntaxVersion = 2, .EnableScalarSubqueryOrderByAndLimit = true});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinFilteredTopValues)
+{
+    auto splits = TSplitMap();
+    splits["//t"] = MakeSplit({
+        TColumnSchema("hash", EValueType::Uint64, ESortOrder::Ascending)
+            .SetExpression("farm_hash([meta.id])"),
+        TColumnSchema("meta.id", EValueType::Uint64, ESortOrder::Ascending),
+    });
+    splits["//foreign"] = MakeSplit({
+        TColumnSchema("hash", EValueType::Uint64, ESortOrder::Ascending)
+            .SetExpression("farm_hash([id])"),
+        TColumnSchema("id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("kind", EValueType::String, ESortOrder::Ascending),
+        TColumnSchema("name", EValueType::String, ESortOrder::Ascending),
+        TColumnSchema("value", EValueType::Int64)
+            .SetAggregate("sum")
+            .SetLock("value")
+            .SetGroup("value"),
+    });
+
+    auto outerRows = std::vector<std::string>{
+        MakeRowWithHashColumn(1, "meta.id=1u"),
+        MakeRowWithHashColumn(2, "meta.id=2u"),
+    };
+    auto foreignRows = std::vector<std::string>{
+        "name=item01;value=5",
+        "name=item02;value=100",
+        "name=item03;value=20",
+        "name=item04;value=20",
+        "name=item05;value=10",
+        "name=item06;value=9",
+        "name=item07;value=8",
+        "name=item08;value=7",
+        "name=item09;value=6",
+        "name=item10;value=4",
+        "name=item11;value=3",
+        "name=item12;value=2",
+        "name=negative;value=-1",
+        "name=zero;value=0",
+    };
+    for (auto& foreignRow : foreignRows) {
+        foreignRow = MakeRowWithHashColumn(1, "id=1u;kind=selected;" + foreignRow);
+    }
+
+    foreignRows.push_back(MakeRowWithHashColumn(1, "id=1u;kind=unrelated;name=other;value=1000"));
+
+    auto resultSplit = MakeSplit({
+        {"key_id", EValueType::Uint64},
+        {"top_items", ListLogicalType(StructLogicalType({
+            {"item", "item", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))},
+            {"score", "score", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+    auto result = YsonToRows({
+        "key_id=1u;top_items=[[item02;100;];[item03;20;];[item04;20;];"
+            "[item05;10;];[item06;9;];[item07;8;];[item08;7;];[item09;6;];"
+            "[item01;5;];[item10;4;];]",
+        "key_id=2u;top_items=[]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            SELECT
+                t.`meta.id` AS key_id,
+                (
+                    SELECT f.name AS item, f.value AS score
+                    FROM (CAST(make_list(t.`meta.id`) AS `List<Uint64>`) AS join_key)
+                    JOIN `//foreign` AS f
+                        ON join_key = f.id
+                    WHERE
+                        f.kind = 'selected'
+                        AND f.value > 0
+                    ORDER BY f.value DESC, f.name ASC
+                    LIMIT 10
+                ) AS top_items
+            FROM `//t` AS t
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        // COMPAT(dtorilov): Remove after 26.2.
+        {.SyntaxVersion = 2, .EnableScalarSubqueryOrderByAndLimit = true});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinFilteredTopAggregates)
+{
+    auto splits = TSplitMap();
+    splits["//t"] = MakeSplit({
+        TColumnSchema("hash", EValueType::Uint64, ESortOrder::Ascending)
+            .SetExpression("farm_hash([meta.group_id])"),
+        TColumnSchema("meta.group_id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("meta.id", EValueType::Uint64, ESortOrder::Ascending),
+    });
+    splits["//foreign"] = MakeSplit({
+        TColumnSchema("key_id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("category_id", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("timestamp", EValueType::Uint64, ESortOrder::Ascending),
+        TColumnSchema("amount", EValueType::Double),
+        TColumnSchema("count", EValueType::Int64),
+    });
+
+    auto outerRows = std::vector<std::string>{
+        MakeRowWithHashColumn(1, "meta.group_id=1u;meta.id=10u"),
+        MakeRowWithHashColumn(1, "meta.group_id=1u;meta.id=20u"),
+        MakeRowWithHashColumn(1, "meta.group_id=1u;meta.id=30u"),
+    };
+    auto foreignRows = std::vector<std::string>{
+        "key_id=10u;category_id=1u;timestamp=999u;amount=1000.0;count=100",
+        "key_id=10u;category_id=1u;timestamp=1000u;amount=40.25;count=2",
+        "key_id=10u;category_id=1u;timestamp=1999u;amount=59.75;count=3",
+        "key_id=10u;category_id=1u;timestamp=2000u;amount=1000.0;count=100",
+        "key_id=10u;category_id=2u;timestamp=1500u;amount=100.0;count=4",
+    };
+    for (ui64 categoryId = 3; categoryId <= 12; ++categoryId) {
+        foreignRows.push_back(Format(
+            "key_id=10u;category_id=%vu;timestamp=1500u;amount=%v.0;count=%v",
+            categoryId,
+            100 - categoryId,
+            categoryId));
+    }
+
+    foreignRows.push_back("key_id=10u;category_id=99u;timestamp=1500u;amount=1000.0;count=100");
+    foreignRows.push_back("key_id=20u;category_id=1u;timestamp=1100u;amount=1.5;count=1");
+    foreignRows.push_back("key_id=20u;category_id=1u;timestamp=1200u;amount=2.5;count=2");
+    foreignRows.push_back("key_id=20u;category_id=2u;timestamp=1500u;amount=4.0;count=5");
+    foreignRows.push_back("key_id=30u;category_id=1u;timestamp=2000u;amount=1000.0;count=100");
+
+    auto resultSplit = MakeSplit({
+        {"key_id", EValueType::Uint64},
+        {"top_groups", ListLogicalType(StructLogicalType({
+            {"category_id", "category_id", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Uint64))},
+            {"amount", "amount", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Double))},
+            {"total_count", "total_count", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+    auto topGroups = TStringBuilder();
+    topGroups.AppendString("key_id=10u;top_groups=[[1u;100.0;5;];[2u;100.0;4;];");
+    for (ui64 categoryId = 3; categoryId <= 10; ++categoryId) {
+        topGroups.AppendFormat("[%vu;%v.0;%v;];", categoryId, 100 - categoryId, categoryId);
+    }
+
+    topGroups.AppendString("]");
+    auto result = YsonToRows({
+        topGroups.Flush(),
+        "key_id=20u;top_groups=[[1u;4.0;3;];[2u;4.0;5;];]",
+        "key_id=30u;top_groups=[]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            SELECT
+                t.`meta.id` AS key_id,
+                (
+                    SELECT
+                        category_id,
+                        sum(f.amount) AS amount,
+                        sum(f.count) AS total_count
+                    FROM (CAST(make_list(t.`meta.id`) AS `List<Uint64>`) AS join_key)
+                    JOIN `//foreign` AS f
+                        ON join_key = f.key_id
+                    WHERE
+                        f.timestamp >= {from_time}
+                        AND f.timestamp < {to_time}
+                        AND f.category_id IN {category_ids}
+                    GROUP BY f.category_id AS category_id
+                    ORDER BY sum(f.amount) DESC, category_id ASC
+                    LIMIT 10
+                ) AS top_groups
+            FROM `//t` AS t
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        {
+            .PlaceholderValues = NYson::TYsonStringBuf(
+                "{from_time=1000u;to_time=2000u;category_ids=[1u;2u;3u;4u;5u;6u;7u;8u;9u;10u;11u;12u]}"),
+            .SyntaxVersion = 2,
+            // COMPAT(dtorilov): Remove after 26.2.
+            .EnableScalarSubqueryOrderByAndLimit = true,
+        });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryOrderByOffsetAndLimit)
+{
+    auto splits = TSplitMap();
+    splits["//t"] = MakeSplit({
+        {"id", EValueType::Int64},
+        {"keys", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"key", EValueType::Int64},
+        {"name", EValueType::String},
+        {"score", EValueType::Int64},
+    });
+    auto outerRows = std::vector<std::string>{
+        "id=1;keys=[10;20;30;40]",
+        "id=2;keys=[20;30;50]",
+        "id=3;keys=[99]",
+        "id=4;keys=[]",
+    };
+    auto foreignRows = std::vector<std::string>{
+        "key=10;name=low;score=2",
+        "key=20;name=b;score=9",
+        "key=30;name=a;score=9",
+        "key=40;name=high;score=12",
+        "key=50;name=other;score=1",
+        "key=60;name=unrelated;score=100",
+    };
+    auto resultSplit = MakeSplit({
+        {"id", EValueType::Int64},
+        {"nested", ListLogicalType(StructLogicalType({
+            {"name", "name", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+    auto cases = std::vector<std::tuple<std::string, std::string, std::string>>{
+        {"ORDER BY f.score DESC, f.name ASC LIMIT 2", "[[high];[a]]", "[[a];[b]]"},
+        {"ORDER BY f.score ASC, f.name DESC LIMIT 2", "[[low];[b]]", "[[b];[a]]"},
+        {"ORDER BY f.score DESC LIMIT 0", "[]", "[]"},
+        {"LIMIT 1", "[[low]]", "[[b]]"},
+        {"ORDER BY f.score DESC, f.name ASC LIMIT 100", "[[high];[a];[b];[low]]", "[[a];[b]]"},
+        {"ORDER BY f.score DESC, f.name ASC OFFSET 1 LIMIT 2", "[[a];[b]]", "[[b]]"},
+        {"ORDER BY f.score DESC OFFSET 100 LIMIT 2", "[]", "[]"},
+        {"ORDER BY f.score DESC OFFSET 1 LIMIT 0", "[]", "[]"},
+        {"OFFSET 1 LIMIT 2", "[[b];[a]]", "[[a]]"},
+        {"OFFSET 100 LIMIT 2", "[]", "[]"},
+        {Format("ORDER BY f.score DESC, f.name ASC LIMIT %v", MaxQueryLimit), "[[high];[a];[b];[low]]", "[[a];[b]]"},
+        {Format("ORDER BY f.score DESC, f.name ASC OFFSET 2 LIMIT %v", MaxQueryLimit), "[[b];[low]]", "[]"},
+        {Format("OFFSET 1 LIMIT %v", MaxQueryLimit), "[[b];[a];[high]]", "[[a]]"},
+    };
+    for (const auto& [clauses, firstResult, secondResult] : cases) {
+        auto result = YsonToRows({
+            Format("id=1;nested=%v", firstResult),
+            Format("id=2;nested=%v", secondResult),
+            "id=3;nested=[]",
+            "id=4;nested=[]",
+        }, resultSplit);
+
+        EvaluateOnlyViaNativeExecutionBackend(
+            Format(R"(
+                SELECT
+                    t.id AS id,
+                    (
+                        SELECT f.name AS name
+                        FROM (t.keys AS join_key)
+                        JOIN `//foreign` AS f ON join_key = f.key
+                        WHERE f.score > 1
+                        %v
+                    ) AS nested
+                FROM `//t` AS t
+            )", clauses),
+            splits,
+            {outerRows, foreignRows},
+            ResultMatcher(result, resultSplit.TableSchema),
+            // COMPAT(dtorilov): Remove after 26.2.
+            {.SyntaxVersion = 2, .EnableScalarSubqueryOrderByAndLimit = true});
+    }
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinSubqueryTopRows)
+{
+    auto splits = TSplitMap();
+    splits["//t"] = MakeSplit({
+        {"keys", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"key", EValueType::Int64},
+        {"score", EValueType::Int64},
+        {"name", EValueType::String},
+    });
+    auto makeName = [] (int index) {
+        return Format("value%v%v", index, std::string(80, 'a' + index % 26));
+    };
+    auto foreignRows = TSource();
+    for (int index = 0; index < 64; ++index) {
+        foreignRows.push_back(Format("key=1;score=%v;name=%v", index, makeName(index)));
+    }
+
+    auto resultSplit = MakeSplit({
+        {"nested", ListLogicalType(StructLogicalType({
+            {"name", "name", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+    auto result = YsonToRows({
+        Format("nested=[[%v_selected];[%v_selected];[%v_selected]]", makeName(61), makeName(60), makeName(59)),
+        "nested=[]",
+        "nested=[]",
+    }, resultSplit);
+
+    EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            SELECT (
+                SELECT concat(f.name, '_selected') AS name
+                FROM (t.keys AS join_key)
+                JOIN `//foreign` AS f ON join_key = f.key
+                ORDER BY f.score DESC, f.name ASC
+                OFFSET 2
+                LIMIT 3
+            ) AS nested
+            FROM `//t` AS t
+        )",
+        splits,
+        {{"keys=[1]", "keys=[]", "keys=[2]"}, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        // COMPAT(dtorilov): Remove after 26.2.
+        {.SyntaxVersion = 2, .EnableScalarSubqueryOrderByAndLimit = true});
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinOrderByOrOffsetWithoutLimit)
+{
+    auto splits = TSplitMap{{"//t", MakeSplit({
+        {"keys", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+    })}, {"//foreign", MakeSplit({
+        {"key", EValueType::Int64},
+        {"score", EValueType::Int64},
+    })}};
+
+    for (const auto& [clause, error] : std::vector<std::pair<std::string, std::string>>{
+        {"ORDER BY f.score DESC", "ORDER BY used without LIMIT"},
+        {"OFFSET 1", "OFFSET used without LIMIT"},
+    }) {
+        EXPECT_THROW_THAT(
+            EvaluateOnlyViaNativeExecutionBackend(
+                Format(R"(
+                    SELECT (
+                        SELECT f.score
+                        FROM (t.keys AS join_key)
+                        JOIN `//foreign` AS f ON join_key = f.key
+                        %v
+                    ) AS nested
+                    FROM `//t` AS t
+                )", clause),
+                splits,
+                {{"keys=[1;2]"}, {"key=1;score=10", "key=2;score=20"}},
+                AnyMatcher,
+                // COMPAT(dtorilov): Remove after 26.2.
+                {.SyntaxVersion = 2, .EnableScalarSubqueryOrderByAndLimit = true}),
+            testing::HasSubstr(error));
+    }
+}
+
+TEST_F(TQueryEvaluateTest, HierarchicalJoinAfterGroupByOrderByOffsetAndLimit)
+{
+    auto splits = TSplitMap();
+    splits["//t"] = MakeSplit({
+        {"id", EValueType::Int64},
+        {"key", EValueType::Int64},
+    });
+    splits["//foreign"] = MakeSplit({
+        {"key", EValueType::Int64},
+        {"category", EValueType::Int64},
+        {"amount", EValueType::Double},
+    });
+    auto outerRows = std::vector<std::string>{
+        "id=1;key=10",
+        "id=1;key=20",
+        "id=1;key=30",
+        "id=1;key=40",
+        "id=2;key=20",
+        "id=2;key=30",
+        "id=2;key=50",
+        "id=3;key=99",
+    };
+    auto foreignRows = std::vector<std::string>{
+        "key=10;category=1;amount=2.0",
+        "key=20;category=2;amount=9.0",
+        "key=30;category=1;amount=8.0",
+        "key=40;category=3;amount=10.0",
+        "key=50;category=4;amount=1.0",
+    };
+    auto resultSplit = MakeSplit({
+        {"id", EValueType::Int64},
+        {"nested", ListLogicalType(StructLogicalType({
+            {"category_id", "category_id", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int64))},
+            {"total", "total", OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Double))},
+        }, /*removedFieldStableNames*/ {}))},
+    });
+    auto result = YsonToRows({
+        "id=1;nested=[[3;10.0];[2;9.0]]",
+        "id=2;nested=[[1;8.0];[4;1.0]]",
+        "id=3;nested=[]",
+    }, resultSplit);
+
+    auto query = EvaluateOnlyViaNativeExecutionBackend(
+        R"(
+            SELECT
+                id,
+                (
+                    SELECT category_id, sum(f.amount) AS total
+                    FROM (array_agg(t.key, true) AS join_key)
+                    JOIN `//foreign` AS f ON join_key = f.key
+                    GROUP BY f.category AS category_id
+                    ORDER BY total DESC, category_id ASC
+                    OFFSET 1
+                    LIMIT 2
+                ) AS nested
+            FROM `//t` AS t
+            GROUP BY t.id AS id
+        )",
+        splits,
+        {outerRows, foreignRows},
+        ResultMatcher(result, resultSplit.TableSchema),
+        // COMPAT(dtorilov): Remove after 26.2.
+        {.SyntaxVersion = 2, .EnableScalarSubqueryOrderByAndLimit = true});
+
+    ASSERT_EQ(std::ssize(query->HierarchicalJoinsAfterGroupBy), 1);
+    const auto& hierarchicalJoin = query->HierarchicalJoinsAfterGroupBy[0];
+    EXPECT_NE(hierarchicalJoin->JoiningSubquery->OrderClause, nullptr);
+    EXPECT_EQ(hierarchicalJoin->JoiningSubquery->Offset, 1);
+    EXPECT_EQ(hierarchicalJoin->JoiningSubquery->Limit, 2);
+    EXPECT_EQ(hierarchicalJoin->SelfSideJoinKeys->OrderClause, nullptr);
+    EXPECT_EQ(hierarchicalJoin->SelfSideJoinKeys->Offset, 0);
+    EXPECT_EQ(hierarchicalJoin->SelfSideJoinKeys->Limit, UnorderedReadHint);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

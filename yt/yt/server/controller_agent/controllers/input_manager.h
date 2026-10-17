@@ -143,10 +143,10 @@ public:
 
     NLogging::TLogger GetLogger() const;
 
-    PHOENIX_DECLARE_TYPE(TInputCluster, 0xe1f2a3b4);
-
 private:
     NLogging::TSerializableLogger Logger;
+
+    PHOENIX_DECLARE_TYPE(TInputCluster, 0xe1f2a3b4);
 };
 
 DEFINE_REFCOUNTED_TYPE(TInputCluster)
@@ -183,7 +183,12 @@ public:
     bool HasRowLevelAcl() const;
 
     void RegisterInputStripe(const NChunkPools::TChunkStripePtr& stripe, const TTaskPtr& task);
-    NChunkClient::TInputChunkPtr GetInputChunk(NChunkClient::TChunkId chunkId, int chunkIndex) const;
+    NChunkClient::TInputChunkPtr GetInputChunk(
+        NChunkClient::TChunkId chunkId,
+        std::optional<int> chunkIndex = {}) const;
+    NChunkClient::TInputChunkPtr FindInputChunk(
+        NChunkClient::TChunkId chunkId,
+        std::optional<int> chunkIndex = {}) const;
 
     void RegisterUnavailableInputChunks(bool reportIfFound = false);
     void BuildUnavailableInputChunksYson(NYTree::TFluentAny fluent) const;
@@ -292,7 +297,7 @@ private:
 
     NChunkClient::TMasterChunkSpecFetcherPtr CreateChunkSpecFetcher(
         const TInputClusterPtr& cluster,
-        bool fetchHunkChunks = false) const;
+        NChunkClient::EChunkListContentType chunkListContentType) const;
 
     PHOENIX_DECLARE_TYPE(TInputManager, 0xc5d6e7f8);
 };

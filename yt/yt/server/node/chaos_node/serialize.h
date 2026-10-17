@@ -42,13 +42,21 @@ DEFINE_ENUM(EChaosReign,
     ((ChaosLeaseRemoveLeaseOnlyAfterChildren)   (300308)) // gryzlov-ad
     ((FixParentIdDuringChaosLeaseMigration)     (300309)) // gryzlov-ad
     ((FixChaosLeasePersist)                     (300310)) // gryzlov-ad
+    ((BlockCardPropagationOnAlter_25_4)         (300311)) // osidorkin
     // 26.1 starts here.
     ((Start_26_1)                               (300400)) // atalmenev
     ((ExpectedPrepareSignature)                 (300401)) // atalmenev
-    ((SecondaryIndices_26_1)                    (300402)) // sabdenovch
+    ((BlockCardPropagationOnAlter_26_1)         (300403)) // osidorkin
+    ((GrantChaosLeaseShortcutsToNewCells_26_1)  (300404)) // shamteev
+    ((CheckLastTransactionCommitTimestamp_26_1) (300405)) // osidorkin
     // 26.2 starts here.
     ((Start_26_2)                               (300500)) // sabdenovch
     ((SecondaryIndices)                         (300501)) // sabdenovch
+    ((SecondaryIndexTransitionStates)           (300502)) // sabdenovch
+    ((BlockCardPropagationOnAlter)              (300503)) // osidorkin
+    ((WaitForChaosLeaseRemovalBeforeDisabling)  (300504)) // shamteev
+    ((GrantChaosLeaseShortcutsToNewCells)       (300505)) // shamteev
+    ((CheckLastTransactionCommitTimestamp)      (300506)) // osidorkin
 );
 
 static_assert(TEnumTraits<EChaosReign>::IsMonotonic, "Chaos reign enum is not monotonic");

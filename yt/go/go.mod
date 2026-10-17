@@ -31,7 +31,7 @@ require (
 	go.ytsaurus.tech/library/go/httputil/middleware/httpmetrics v0.0.2
 	go.ytsaurus.tech/library/go/ptr v0.0.2
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
-	golang.org/x/sync v0.15.0
+	golang.org/x/sync v0.16.0
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da
 	google.golang.org/protobuf v1.36.8
 )

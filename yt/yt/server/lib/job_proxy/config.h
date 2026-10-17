@@ -21,7 +21,7 @@
 
 #include <yt/yt/library/containers/cri/config.h>
 
-#include <yt/yt/library/tracing/jaeger/tracer.h>
+#include <yt/yt/library/tracing/jaeger/config.h>
 
 #include <yt/yt/client/file_client/config.h>
 
@@ -389,6 +389,7 @@ struct TJobProxyPeakMemoryProfilerConfig
     : public NYTree::TYsonStruct
 {
     bool Enabled;
+
     //! NB(coteeq): This is probably what you want to get symbolized profiles,
     //! but external symbolizer is very slow and consumes large amounts
     //! of memory (this is a process, so think of 30M+ of additional memory).
@@ -456,6 +457,14 @@ struct TJobProxyInternalConfig
     TDuration HeartbeatPeriod;
     TDuration InputPipeBlinkerPeriod;
 
+    //! Enables reporting per-job I/O statistics to data nodes.
+    //! When disabled, neither io_consumed nor io_fair_share_weight is sent,
+    //! including an explicitly configured reader or writer weight.
+    bool EnableJobIoStatistics;
+
+    //! Time span over which the job I/O meter retains accounted I/O history.
+    TDuration JobIoMeterMaxHistoryDuration;
+
     TJobEnvironmentConfig JobEnvironment;
 
     //! Addresses derived from node local descriptor to leverage locality.
@@ -467,8 +476,6 @@ struct TJobProxyInternalConfig
     i64 AheadMemoryReserve;
 
     bool AlwaysAbortOnMemoryReserveOverdraft;
-
-    bool TestRootFS;
 
     TJobThrottlerConfigPtr JobThrottler;
 
@@ -555,12 +562,11 @@ struct TJobProxyInternalConfig
     i64 AdaptiveRowCountUpperBound;
 
     std::optional<int> OomScoreAdjOnExceededMemoryReserve;
+    bool ReadOomScoreAdjBeforeUpdate;
 
     bool UseNewDeliveryFencedConnection;
 
-    //! Enable root volume disk quota.
-    //! Apply the quota to the entire root filesystem instead of the sandbox and tmp folders individually.
-    bool EnableRootVolumeDiskQuota;
+    bool DisableRbindRootVolume;
 
     //! Restrict places allowed for porto volumes and layers.
     bool RestrictPortoPlace;
@@ -575,6 +581,8 @@ struct TJobProxyInternalConfig
 
     bool EnableGrpcServer;
     bool EnableHttpServer;
+
+    NBus::NTcp::TBusServerConfigPtr PrivateBusServer;
 
     NRpc::NGrpc::TServerConfigPtr GrpcServer;
 
@@ -599,6 +607,8 @@ struct TJobProxyDynamicConfig
     : public NYTree::TYsonStruct
 {
     NTracing::TJaegerTracerDynamicConfigPtr Jaeger;
+
+    bool EnableJobIoStatistics;
 
     bool EnableJobShellSeccopm;
 
@@ -628,6 +638,7 @@ struct TJobProxyDynamicConfig
     i64 AdaptiveRowCountUpperBound;
 
     std::optional<int> OomScoreAdjOnExceededMemoryReserve;
+    bool ReadOomScoreAdjBeforeUpdate;
 
     bool UseNewDeliveryFencedConnection;
 

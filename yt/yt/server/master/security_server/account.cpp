@@ -1,6 +1,7 @@
 #include "account.h"
 #include "private.h"
 #include "helpers.h"
+#include "security_manager.h"
 
 #include <yt/yt/server/master/cell_master/serialize.h>
 
@@ -41,6 +42,11 @@ void TAccountStatistics::Persist(const NCellMaster::TPersistenceContext& context
     using NYT::Persist;
     Persist(context, ResourceUsage);
     Persist(context, CommittedResourceUsage);
+}
+
+bool TAccountStatistics::IsPersistentlyEmpty() const
+{
+    return ResourceUsage.IsPersistentlyEmpty() && CommittedResourceUsage.IsPersistentlyEmpty();
 }
 
 void ToProto(NProto::TAccountStatistics* protoStatistics, const TAccountStatistics& statistics)
@@ -135,7 +141,6 @@ void SubtractFromAccountMulticellStatistics(
         lhs[cellTag] -= accountStatistics;
     }
 }
-
 
 TAccountMulticellStatistics AddAccountMulticellStatistics(
     const TAccountMulticellStatistics& lhs,
@@ -296,7 +301,8 @@ void SerializeAccountBackupConfig(
     try {
         config.Validate(bootstrap);
     } catch (const std::exception& e) {
-        YT_LOG_ALERT_AND_THROW(e, "Failed to validate account during backup config serialization");
+        YT_TLOG_ALERT_AND_THROW("Failed to validate account during backup config serialization")
+            .With(e);
     }
 
     const auto& securityManager = bootstrap->GetSecurityManager();
@@ -404,9 +410,9 @@ void TAccount::Load(NCellMaster::TLoadContext& context)
     const auto& attributeName = EInternedAttributeKey::ChunkMergerNodeTraversalConcurrency.Unintern();
     if (auto value = FindAttribute(attributeName)) {
         YT_VERIFY(Attributes_->TryRemove(attributeName));
-        YT_LOG_INFO("Dropping custom chunk merger traversal concurrency value (Value: %v, AccountId: %v)",
-            *value,
-            GetId());
+        YT_TLOG_INFO("Dropping custom chunk merger traversal concurrency value")
+            .With("Value", *value)
+            .With("AccountId", GetId());
     }
 
     Load(context, AllowUsingChunkMerger_);

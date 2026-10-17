@@ -74,9 +74,8 @@ using namespace NTabletClient;
 using namespace NTracing;
 using namespace NServer;
 
-using NYT::FromProto;
-
 using NTransactionClient::TReadTimestampRange;
+using NYT::FromProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -524,26 +523,22 @@ protected:
     {
         auto flushIndex = RowCache_->GetFlushIndex();
 
-        YT_LOG_DEBUG("Lookup in row cache finished "
-            "(CacheHits: %v, CacheMisses: %v, CacheOutdated: %v, CacheInserts: %v, FailedInserts: %v, SuccessfulInserts: %v, "
-            "FailedSealAttemptsByRevision: %v, NotSealedRows: %v, "
-            "FailedFlushIndex: %v, MaxInsertedTimestamp: %v, FailedUpdates: %v, SuccessfulReinserts: %v, FailedReinserts: %v, "
-            "StoreFlushIndex: %v, CacheFlushIndex: %v)",
-            CacheHits_,
-            CacheMisses_,
-            CacheOutdated_,
-            CacheInserts_,
-            FailedInserts_,
-            SuccessfulInserts_,
-            FailedSealAttemptsByRevision_,
-            NotSealedRows_,
-            FailedFlushIndex_,
-            MaxInsertedTimestamp_,
-            FailedUpdates_,
-            SuccessfulReinserts_,
-            FailedReinserts_,
-            StoreFlushIndex_,
-            flushIndex);
+        YT_TLOG_DEBUG("Lookup in row cache finished")
+            .With("CacheHits", CacheHits_)
+            .With("CacheMisses", CacheMisses_)
+            .With("CacheOutdated", CacheOutdated_)
+            .With("CacheInserts", CacheInserts_)
+            .With("FailedInserts", FailedInserts_)
+            .With("SuccessfulInserts", SuccessfulInserts_)
+            .With("FailedSealAttemptsByRevision", FailedSealAttemptsByRevision_)
+            .With("NotSealedRows", NotSealedRows_)
+            .With("FailedFlushIndex", FailedFlushIndex_)
+            .With("MaxInsertedTimestamp", MaxInsertedTimestamp_)
+            .With("FailedUpdates", FailedUpdates_)
+            .With("SuccessfulReinserts", SuccessfulReinserts_)
+            .With("FailedReinserts", FailedReinserts_)
+            .With("StoreFlushIndex", StoreFlushIndex_)
+            .With("CacheFlushIndex", flushIndex);
 
         switch (InitialQueryKind_) {
             case EInitialQueryKind::LookupRows: {
@@ -585,9 +580,9 @@ protected:
 
         auto flushIndex = RowCache_->GetFlushIndex();
 
-        YT_LOG_DEBUG("Lookup in row cache started (StoreFlushIndex: %v, RowCacheFlushIndex: %v)",
-            StoreFlushIndex_,
-            flushIndex);
+        YT_TLOG_DEBUG("Lookup in row cache started")
+            .With("StoreFlushIndex", StoreFlushIndex_)
+            .With("RowCacheFlushIndex", flushIndex);
 
         auto lookuper = RowCache_->GetCache()->GetLookuper();
         CacheInserter_ = RowCache_->GetCache()->GetInserter();
@@ -605,16 +600,17 @@ protected:
                     ++CacheOutdated_;
                 } else {
                     ++CacheHits_;
-                    YT_LOG_TRACE("Row found (Key: %v)", key);
+                    YT_TLOG_TRACE("Row found")
+                        .With("Key", key);
 
                     auto insertTable = CacheInserter_.GetTable();
                     if (insertTable == foundItemRef.Origin) {
-                        YT_LOG_TRACE("Updating row");
+                        YT_TLOG_TRACE("Updating row");
                         if (!foundItemRef.Replace(latestItem, foundItem.Get(), true)) {
                             ++FailedUpdates_;
                         }
                     } else if (insertTable->Next == foundItemRef.Origin) {
-                        YT_LOG_TRACE("Reinserting row");
+                        YT_TLOG_TRACE("Reinserting row");
                         if (auto insertedRef = insertTable->Insert(latestItem)) {
                             if (RowCache_->GetCache()->IsHead(insertTable)) {
                                 insertedRef.SealItem();
@@ -631,7 +627,8 @@ protected:
                 }
             } else {
                 ++CacheMisses_;
-                YT_LOG_TRACE("Row not found (Key: %v)", key);
+                YT_TLOG_TRACE("Row not found")
+                    .With("Key", key);
             }
 
             chunkLookupKeys.push_back(key);
@@ -717,7 +714,7 @@ protected:
             }
         }
 
-        Merger_->AddPartialRow(lookupedRow, Timestamp_ + 1);
+        Merger_->AddPartialRow(lookupedRow, NTransactionClient::TTimestamp(Timestamp_.Underlying() + 1));
 
         if (const auto* cachedItem = RowsFromCache_[WriteRowIndex_].Get()) {
             if (Timestamp_ < cachedItem->RetainedTimestamp) {
@@ -728,14 +725,14 @@ protected:
                     TabletId_);
             }
 
-            YT_LOG_TRACE("Using row from cache (CacheRow: %v, Outdated: %v, ReadTimestamp: %v)",
-                cachedItem->GetVersionedRow(),
-                cachedItem->Outdated.load(),
-                Timestamp_);
+            YT_TLOG_TRACE("Using row from cache")
+                .With("CacheRow", cachedItem->GetVersionedRow())
+                .With("Outdated", cachedItem->Outdated.load())
+                .With("ReadTimestamp", Timestamp_);
 
-            Merger_->AddPartialRow(cachedItem->GetVersionedRow(), Timestamp_ + 1);
+            Merger_->AddPartialRow(cachedItem->GetVersionedRow(), NTransactionClient::TTimestamp(Timestamp_.Underlying() + 1));
         } else {
-            Merger_->AddPartialRow(RowsFromActiveStore_[WriteRowIndex_], Timestamp_ + 1);
+            Merger_->AddPartialRow(RowsFromActiveStore_[WriteRowIndex_], NTransactionClient::TTimestamp(Timestamp_.Underlying() + 1));
 
             auto newItem = CachedRowFromVersionedRow(
                 RowCache_->GetAllocator(),
@@ -753,9 +750,9 @@ protected:
                         newItem->GetVersionedRow().BeginWriteTimestamps()[0]);
                 }
 
-                YT_LOG_TRACE("Populating cache (Row: %v, Revision: %v)",
-                    newItem->GetVersionedRow(),
-                    StoreFlushIndex_);
+                YT_TLOG_TRACE("Populating cache")
+                    .With("Row", newItem->GetVersionedRow())
+                    .With("Revision", StoreFlushIndex_);
 
                 ++CacheInserts_;
 
@@ -941,7 +938,7 @@ private:
 
     i64 DataWeight_ = 0;
 
-    TTimestamp MaxInsertedTimestamp_ = 0;
+    TTimestamp MaxInsertedTimestamp_ = NullTimestamp;
 
     static TTimestamp GetCompactionTimestamp(
         const TTableMountConfigPtr& mountConfig,
@@ -951,8 +948,8 @@ private:
         auto compactionTimestamp = NTransactionClient::InstantToTimestamp(
             NTransactionClient::TimestampToInstant(retainedTimestamp).first + mountConfig->MinDataTtl).first;
 
-        YT_LOG_DEBUG("Creating row merger for row cache (CompactionTimestamp: %v)",
-            compactionTimestamp);
+        YT_TLOG_DEBUG("Creating row merger for row cache")
+            .With("CompactionTimestamp", compactionTimestamp);
 
         return compactionTimestamp;
     }
@@ -1168,6 +1165,8 @@ struct TPartitionSession
     // TODO(akozhikhov): Proper block fetcher: Create all partition sessions at the beginning of the lookup session.
     // Right know we cannot do that because chunk reader may call Open in ctor and start reading blocks.
     bool SessionStarted = false;
+    // Prevents reading the partition until all its store sessions are open.
+    TFuture<void> OpenStoreSessionsFuture;
 
     TStoreSessionList StoreSessions;
     bool StoreSessionsPrepared = false;
@@ -1351,7 +1350,7 @@ private:
     TDuration InitializationDuration_;
     TDuration PartitionsLookupDuration_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, CancelationSpinLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, CancelationSpinLock_);
     std::optional<TError> CancelationError_;
     TFuture<void> SessionFuture_ = OKFuture;
 
@@ -1365,6 +1364,7 @@ private:
         const TSharedRange<TLegacyKey>& keys);
 
     std::vector<TFuture<void>> OpenStoreSessions(const TStoreSessionList& sessions);
+    void StartPartitionSession(TPartitionSession* partitionSession);
 
     void LookupInPartitions(const TError& error);
 
@@ -1414,7 +1414,7 @@ TLookupSession::TLookupSession(
     , SnapshotStore_(snapshotStore)
     , ProfilingUser_(std::move(profilingUser))
     , Invoker_(std::move(invoker))
-    , Logger(TabletNodeLogger().WithTag("ReadSessionId: %v", chunkReadOptions.ReadSessionId))
+    , Logger(TabletNodeLogger().WithTag("ReadSessionId", chunkReadOptions.ReadSessionId))
     , ChunkReadOptions_(std::move(chunkReadOptions))
 {
     TabletRequests_.reserve(tabletRequestCount);
@@ -1571,11 +1571,11 @@ TFuture<TSharedRef> TLookupSession::OnTabletLookupAttemptFailed(
     if (NQueryAgent::IsRetriableQueryError(error)) {
         request.InnerErrors.push_back(error);
         if (std::ssize(request.InnerErrors) < MaxRetryCount_) {
-            YT_LOG_INFO(error, "Tablet lookup request failed, retrying "
-                "(Iteration: %v, MaxRetryCount: %v, TabletId: %v)",
-                std::ssize(request.InnerErrors),
-                MaxRetryCount_,
-                request.TabletId);
+            YT_TLOG_INFO("Tablet lookup request failed, retrying")
+                .With("Iteration", std::ssize(request.InnerErrors))
+                .With("MaxRetryCount", MaxRetryCount_)
+                .With("TabletId", request.TabletId)
+                .With(error);
 
             RetryCount_.fetch_add(1, std::memory_order::relaxed);
 
@@ -1585,11 +1585,12 @@ TFuture<TSharedRef> TLookupSession::OnTabletLookupAttemptFailed(
                 request.TabletId,
                 TError("Request failed after %v retries",
                     MaxRetryCount_)
-                    << request.InnerErrors);
+                    .With(request.InnerErrors));
         }
     } else {
-        YT_LOG_DEBUG(error, "Tablet lookup request failed (TabletId: %v)",
-            request.TabletId);
+        YT_TLOG_DEBUG("Tablet lookup request failed")
+            .With("TabletId", request.TabletId)
+            .With(error);
 
         return OnTabletLookupFailed(request.TabletId, error);
     }
@@ -1628,7 +1629,8 @@ std::vector<TSharedRef> TLookupSession::ProcessResults(
                 results.emplace_back();
                 continue;
             } else {
-                YT_LOG_DEBUG(resultOrError, "Lookup session failed");
+                YT_TLOG_DEBUG("Lookup session failed")
+                    .With(resultOrError);
                 resultOrError.ThrowOnError();
             }
         }
@@ -1638,12 +1640,11 @@ std::vector<TSharedRef> TLookupSession::ProcessResults(
 
     FinishedSuccessfully_ = true;
 
-    YT_LOG_DEBUG("Lookup session finished successfully "
-        "(CpuTime: %v, RemoteCpuTime: %v, WallTime: %v, SkippedTabletResultCount: %v)",
-        CpuTime_,
-        ChunkReadOptions_.ChunkReaderStatistics->RemoteCpuTime.load(std::memory_order::relaxed),
-        WallTimer_.GetElapsedTime(),
-        skippedTabletResultCount);
+    YT_TLOG_DEBUG("Lookup session finished successfully")
+        .With("CpuTime", CpuTime_)
+        .With("RemoteCpuTime", ChunkReadOptions_.ChunkReaderStatistics->RemoteCpuTime.load(std::memory_order::relaxed))
+        .With("WallTime", WallTimer_.GetElapsedTime())
+        .With("SkippedTabletResultCount", skippedTabletResultCount);
 
     return results;
 }
@@ -1827,11 +1828,11 @@ TFuture<TSharedRef> TTabletLookupRequest::RunTabletLookupSession(
     lookupKeys = MakeSharedRange(lookupKeys, lookupKeys, RequestData);
 
     const auto& Logger = lookupSession->Logger;
-    YT_LOG_DEBUG("Creating tablet lookup session (TabletId: %v, CellId: %v, KeyCount: %v, IsTimestamped: %v)",
-        TabletId,
-        CellId,
-        lookupKeys.Size(),
-        columnMappingInfo.IsTimestampedLookup());
+    YT_TLOG_DEBUG("Creating tablet lookup session")
+        .With("TabletId", TabletId)
+        .With("CellId", CellId)
+        .With("KeyCount", lookupKeys.Size())
+        .With("IsTimestamped", columnMappingInfo.IsTimestampedLookup());
 
     bool useLookupCache = GetUseLookupCache(tabletSnapshot, lookupSession->UseLookupCache_);
 
@@ -1955,7 +1956,7 @@ TTabletLookupSession<TPipeline>::TTabletLookupSession(
             /*isSystemWorkload*/ false);
         SessionChunkReadOptions_.AddStatisticsFrom(TabletChunkReadOptions_);
     })
-    , Logger(lookupSession->Logger().WithTag("TabletId: %v", TabletSnapshot_->TabletId))
+    , Logger(lookupSession->Logger().WithTag("TabletId", TabletSnapshot_->TabletId))
 {
     YT_VERIFY(SessionChunkReadOptions_.InitialQueryKind == EInitialQueryKind::LookupRows);
 }
@@ -2012,7 +2013,7 @@ TTabletLookupSession<TPipeline>::TTabletLookupSession(
             counters->WastedUnmergedDataWeight.Increment(DataStatistics_.data_weight());
         }
     })
-    , Logger(logger.WithTag("TabletId: %v", TabletSnapshot_->TabletId))
+    , Logger(logger.WithTag("TabletId", TabletSnapshot_->TabletId))
 {
     YT_VERIFY(SessionChunkReadOptions_.InitialQueryKind == EInitialQueryKind::SelectRows);
 }
@@ -2054,7 +2055,8 @@ auto TTabletLookupSession<TPipeline>::Run() -> TFuture<typename decltype(TPipeli
         }
     }
 
-    YT_LOG_DEBUG("Creating store sessions (ActiveStoreIndex: %v)", ActiveStoreIndex_);
+    YT_TLOG_DEBUG("Creating store sessions")
+        .With("ActiveStoreIndex", ActiveStoreIndex_);
 
     DynamicEdenSessions_ = CreateStoreSessions(
         dynamicEdenStores,
@@ -2090,11 +2092,10 @@ auto TTabletLookupSession<TPipeline>::Run() -> TFuture<typename decltype(TPipeli
     openStoreSessions(ChunkEdenSessions_);
 
     YT_VERIFY(!PartitionSessions_.empty());
-    PartitionSessions_[0].SessionStarted = true;
-    PartitionSessions_[0].StoreSessions = CreateStoreSessions(
-        PartitionSessions_[0].PartitionSnapshot->Stores,
-        PartitionSessions_[0].ChunkLookupKeys);
-    openStoreSessions(PartitionSessions_[0].StoreSessions);
+    StartPartitionSession(&PartitionSessions_[0]);
+    if (PartitionSessions_[0].OpenStoreSessionsFuture != OKFuture) {
+        openFutures.push_back(PartitionSessions_[0].OpenStoreSessionsFuture);
+    }
 
     InflightKeyLookupCount_ += std::ssize(PartitionSessions_[0].ChunkLookupKeys);
     ++OpenedPartitionSessionCount_;
@@ -2122,6 +2123,10 @@ TStoreSessionList TTabletLookupSession<TPipeline>::CreateStoreSessions(
 {
     YT_ASSERT_INVOKER_AFFINITY(Invoker_);
 
+    if (keys.empty()) {
+        return {};
+    }
+
     TStoreSessionList sessions;
     sessions.reserve(stores.size());
 
@@ -2132,10 +2137,10 @@ TStoreSessionList TTabletLookupSession<TPipeline>::CreateStoreSessions(
             storeFlushIndex = store->AsSortedDynamic()->GetFlushIndex();
         }
 
-        YT_LOG_DEBUG("Creating reader (Store: %v, KeyCount: %v, StoreFlushIndex: %v)",
-            store->GetId(),
-            keys.Size(),
-            storeFlushIndex);
+        YT_TLOG_DEBUG("Creating reader")
+            .With("Store", store->GetId())
+            .With("KeyCount", keys.Size())
+            .With("StoreFlushIndex", storeFlushIndex);
 
         RequestedUnmergedRowCount_ += keys.Size();
 
@@ -2172,6 +2177,21 @@ std::vector<TFuture<void>> TTabletLookupSession<TPipeline>::OpenStoreSessions(
     }
 
     return futures;
+}
+
+template <class TPipeline>
+void TTabletLookupSession<TPipeline>::StartPartitionSession(TPartitionSession* partitionSession)
+{
+    YT_VERIFY(!std::exchange(partitionSession->SessionStarted, true));
+
+    partitionSession->StoreSessions = CreateStoreSessions(
+        partitionSession->PartitionSnapshot->Stores,
+        partitionSession->ChunkLookupKeys);
+
+    auto openFutures = OpenStoreSessions(partitionSession->StoreSessions);
+    partitionSession->OpenStoreSessionsFuture = openFutures.empty()
+        ? OKFuture
+        : AllSucceeded(std::move(openFutures));
 }
 
 template <class TPipeline>
@@ -2281,22 +2301,17 @@ void TTabletLookupSession<TPipeline>::MaybePrefetchPartitionSessions()
         prefetched = true;
 
         auto& partitionSession = PartitionSessions_[OpenedPartitionSessionCount_];
-        YT_VERIFY(!std::exchange(partitionSession.SessionStarted, true));
-        partitionSession.StoreSessions = CreateStoreSessions(
-            partitionSession.PartitionSnapshot->Stores,
-            partitionSession.ChunkLookupKeys);
-        OpenStoreSessions(partitionSession.StoreSessions);
+        StartPartitionSession(&partitionSession);
 
         InflightKeyLookupCount_ += std::ssize(partitionSession.ChunkLookupKeys);
         ++OpenedPartitionSessionCount_;
     }
 
     if (prefetched) {
-        YT_LOG_DEBUG("Prefetched some partition sessions "
-            "(InflightKeyLookupCount: %v, CurrentPartitionSessionIndex: %v, OpenedPartitionSessionCount: %v)",
-            InflightKeyLookupCount_,
-            CurrentPartitionSessionIndex_,
-            OpenedPartitionSessionCount_);
+        YT_TLOG_DEBUG("Prefetched some partition sessions")
+            .With("InflightKeyLookupCount", InflightKeyLookupCount_)
+            .With("CurrentPartitionSessionIndex", CurrentPartitionSessionIndex_)
+            .With("OpenedPartitionSessionCount", OpenedPartitionSessionCount_);
     }
 }
 
@@ -2309,24 +2324,23 @@ bool TTabletLookupSession<TPipeline>::LookupInCurrentPartition()
     if (!partitionSession.SessionStarted) {
         YT_VERIFY(CurrentPartitionSessionIndex_ == OpenedPartitionSessionCount_);
 
-        partitionSession.SessionStarted = true;
-        partitionSession.StoreSessions = CreateStoreSessions(
-            partitionSession.PartitionSnapshot->Stores,
-            partitionSession.ChunkLookupKeys);
-        auto openFutures = OpenStoreSessions(partitionSession.StoreSessions);
+        StartPartitionSession(&partitionSession);
 
         ++OpenedPartitionSessionCount_;
         InflightKeyLookupCount_ += std::ssize(partitionSession.ChunkLookupKeys);
+    }
 
-        if (!openFutures.empty()) {
-            auto sessionFuture = AllSucceeded(std::move(openFutures));
-            sessionFuture.Subscribe(BIND(
-                &TTabletLookupSession::LookupInPartitions,
-                MakeStrong(this))
-                .Via(Invoker_));
-            SetSessionFuture(std::move(sessionFuture));
-            return true;
-        }
+    YT_VERIFY(partitionSession.OpenStoreSessionsFuture);
+    if (const auto& maybeError = partitionSession.OpenStoreSessionsFuture.TryGet()) {
+        maybeError->ThrowOnError();
+    } else {
+        auto sessionFuture = partitionSession.OpenStoreSessionsFuture;
+        sessionFuture.Subscribe(BIND(
+            &TTabletLookupSession::LookupInPartitions,
+            MakeStrong(this))
+            .Via(Invoker_));
+        SetSessionFuture(std::move(sessionFuture));
+        return true;
     }
 
     return DoLookupInCurrentPartition();
@@ -2427,7 +2441,7 @@ void TTabletLookupSession<TPipeline>::LookupFromStoreSessions(
             YT_VERIFY(session.PrepareBatch());
         }
         auto row = session.FetchRow();
-        TPipeline::AddPartialRow(row, Timestamp_ + 1, activeStoreIndex == sessionIndex);
+        TPipeline::AddPartialRow(row, NTransactionClient::TTimestamp(Timestamp_.Underlying() + 1), activeStoreIndex == sessionIndex);
     }
 }
 
@@ -2446,21 +2460,17 @@ void TTabletLookupSession<TPipeline>::FinishSession(const TError& error)
         throttler->Acquire(FoundDataWeight_);
     }
 
-    YT_LOG_DEBUG(
-        "Tablet lookup completed "
-        "(TabletId: %v, CellId: %v, EnableDetailedProfiling: %v, "
-        "FoundRowCount: %v, FoundDataWeight: %v, DecompressionCpuTime: %v, "
-        "InitializationTime: %v, PartitionsLookupTime: %v, HunksDecodingTime: %v, ResponseCompressionTime: %v)",
-        TabletSnapshot_->TabletId,
-        TabletSnapshot_->CellId,
-        TabletSnapshot_->Settings.MountConfig->EnableDetailedProfiling,
-        FoundRowCount_,
-        FoundDataWeight_,
-        DecompressionStatistics_.GetTotalDuration(),
-        InitializationDuration_,
-        PartitionsLookupDuration_,
-        HunksDecodingTime_,
-        ResponseCompressionTime_);
+    YT_TLOG_DEBUG("Tablet lookup completed")
+        .With("TabletId", TabletSnapshot_->TabletId)
+        .With("CellId", TabletSnapshot_->CellId)
+        .With("EnableDetailedProfiling", TabletSnapshot_->Settings.MountConfig->EnableDetailedProfiling)
+        .With("FoundRowCount", FoundRowCount_)
+        .With("FoundDataWeight", FoundDataWeight_)
+        .With("DecompressionCpuTime", DecompressionStatistics_.GetTotalDuration())
+        .With("InitializationTime", InitializationDuration_)
+        .With("PartitionsLookupTime", PartitionsLookupDuration_)
+        .With("HunksDecodingTime", HunksDecodingTime_)
+        .With("ResponseCompressionTime", ResponseCompressionTime_);
 
     YT_VERIFY(ResultPromise_.IsSet());
 }
@@ -2635,16 +2645,15 @@ ISchemafulUnversionedReaderPtr CreateLookupSessionReader(
         tabletSnapshot,
         chunkReadOptions);
 
-    YT_LOG_DEBUG("Creating lookup session reader (TabletId: %v, CellId: %v, WorkloadDescriptor: %v, "
-        "ReadSessionId: %v, ColumnFilter: %v, LookupKeyCount: %v, UseLookupCache: %v, Timestamp: %v)",
-        tabletSnapshot->TabletId,
-        tabletSnapshot->CellId,
-        chunkReadOptions.WorkloadDescriptor,
-        chunkReadOptions.ReadSessionId,
-        columnFilter,
-        lookupKeys.Size(),
-        useLookupCache,
-        timestamp);
+    YT_TLOG_DEBUG("Creating lookup session reader")
+        .With("TabletId", tabletSnapshot->TabletId)
+        .With("CellId", tabletSnapshot->CellId)
+        .With("WorkloadDescriptor", chunkReadOptions.WorkloadDescriptor)
+        .With("ReadSessionId", chunkReadOptions.ReadSessionId)
+        .With("ColumnFilter", columnFilter)
+        .With("LookupKeyCount", lookupKeys.Size())
+        .With("UseLookupCache", useLookupCache)
+        .With("Timestamp", timestamp);
 
     auto rowBuffer = New<TRowBuffer>(TLookupRowsBufferTag(), memoryChunkProvider);
 

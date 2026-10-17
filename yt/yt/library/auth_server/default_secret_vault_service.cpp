@@ -109,21 +109,18 @@ public:
             || request.Signature.empty()
             || request.SecretId.empty())
         {
-            YT_LOG_WARNING(
-                "Invalid call to revoke delegation token with signature %Qv, secret id %Qv",
-                request.Signature,
-                request.SecretId);
+            YT_TLOG_WARNING("Invalid call to revoke delegation token")
+                .With("Signature", request.Signature)
+                .With("SecretId", request.SecretId);
             return;
         }
 
         const auto callId = TGuid::Create();
 
-        YT_LOG_DEBUG(
-            "Revoking delegation token from Vault "
-            "(SecretId: %v, Signature: %v, CallId: %v)",
-            request.SecretId,
-            request.Signature,
-            callId);
+        YT_TLOG_DEBUG("Revoking delegation token from Vault")
+            .With("SecretId", request.SecretId)
+            .With("Signature", request.Signature)
+            .With("CallId", callId);
 
         CallCountCounter_.Increment();
 
@@ -150,8 +147,8 @@ public:
             }
             if (responseStatus == ESecretVaultResponseStatus::Warning) {
                 WarningSubrequestCountCounter_.Increment();
-                YT_LOG_WARNING("Received warning message from Vault: %v",
-                    GetWarningMessageFromResponse(response));
+                YT_TLOG_WARNING("Received warning message from Vault")
+                    .With("Message", GetWarningMessageFromResponse(response));
             }
 
             auto resultsNode = response->GetChildOrThrow("result")->AsList();
@@ -170,23 +167,20 @@ public:
             }
             if (responseStatus == ESecretVaultResponseStatus::Warning) {
                 WarningSubrequestCountCounter_.Increment();
-                YT_LOG_WARNING("Received warning message from Vault: %v",
-                    GetWarningMessageFromResponse(response));
+                YT_TLOG_WARNING("Received warning message from Vault")
+                    .With("Message", GetWarningMessageFromResponse(response));
             }
-            YT_LOG_DEBUG(
-                "Revoked delegation token from Vault "
-                "(SecretId: %v, Signature: %v, CallId: %v)",
-                request.SecretId,
-                request.Signature,
-                callId);
+            YT_TLOG_DEBUG("Revoked delegation token from Vault")
+                .With("SecretId", request.SecretId)
+                .With("Signature", request.Signature)
+                .With("CallId", callId);
         } catch (const std::exception& ex) {
             FailedCallCountCounter_.Increment();
-            YT_LOG_WARNING(ex,
-                "Failed to revoke delegation token from Vault "
-                "(SecretId: %v, Signature: %v, CallId: %v)",
-                request.SecretId,
-                request.Signature,
-                callId);
+            YT_TLOG_WARNING("Failed to revoke delegation token from Vault")
+                .With("SecretId", request.SecretId)
+                .With("Signature", request.Signature)
+                .With("CallId", callId)
+                .With(ex);
         }
     }
 
@@ -217,9 +211,9 @@ private:
     {
         const auto callId = TGuid::Create();
 
-        YT_LOG_DEBUG("Retrieving secrets from Vault (Count: %v, CallId: %v)",
-            subrequests.size(),
-            callId);
+        YT_TLOG_DEBUG("Retrieving secrets from Vault")
+            .With("Count", subrequests.size())
+            .With("CallId", callId);
 
         CallCountCounter_.Increment();
         SubrequestCountCounter_.Increment(subrequests.size());
@@ -264,12 +258,10 @@ private:
                     // NB! Warning status is supposed to contain valid data so we proceed parsing the response.
                     ++warningCount;
                     auto warningMessage = GetWarningMessageFromResponse(secretMapNode);
-                    YT_LOG_DEBUG(
-                        "Received warning status in subresponse from Vault "
-                        "(CallId: %v, SubresponseIndex: %v, WarningMessage: %v)",
-                        callId,
-                        subresponseIndex,
-                        warningMessage);
+                    YT_TLOG_DEBUG("Received warning status in subresponse from Vault")
+                        .With("CallId", callId)
+                        .With("SubresponseIndex", subresponseIndex)
+                        .With("WarningMessage", warningMessage);
                 } else if (subresponseStatus == ESecretVaultResponseStatus::Error) {
                     subresponses.push_back(GetErrorFromResponse(
                         secretMapNode,
@@ -302,21 +294,21 @@ private:
             WarningSubrequestCountCounter_.Increment(warningCount);
             FailedSubrequestCountCounter_.Increment(errorCount);
 
-            YT_LOG_DEBUG(
-                "Secrets retrieved from Vault "
-                "(CallId: %v, SuccessCount: %v, WarningCount: %v, ErrorCount: %v)",
-                callId,
-                successCount,
-                warningCount,
-                errorCount);
+            YT_TLOG_DEBUG("Secrets retrieved from Vault")
+                .With("CallId", callId)
+                .With("SuccessCount", successCount)
+                .With("WarningCount", warningCount)
+                .With("ErrorCount", errorCount);
             return subresponses;
         } catch (const std::exception& ex) {
             FailedCallCountCounter_.Increment();
-            auto error = TError("Failed to get secrets from Vault")
-                << ex
-                << TErrorAttribute("call_id", callId);
-            YT_LOG_DEBUG(error);
-            THROW_ERROR error;
+            static constexpr auto Message = "Failed to get secrets from Vault"_sb;
+            YT_TLOG_DEBUG(Message)
+                .With("CallId", callId)
+                .With(ex);
+            THROW_ERROR_EXCEPTION(Message)
+                .With(ex)
+                .With("call_id", callId);
         }
     }
 
@@ -324,13 +316,11 @@ private:
     {
         const auto callId = TGuid::Create();
 
-        YT_LOG_DEBUG(
-            "Retrieving delegation token from Vault "
-            "(SecretId: %v, Signature: %v, UserTicket: %v, CallId: %v)",
-            request.SecretId,
-            request.Signature, // signatures are not secret; tokens are
-            RemoveTicketSignature(request.UserTicket),
-            callId);
+        YT_TLOG_DEBUG("Retrieving delegation token from Vault")
+            .With("SecretId", request.SecretId)
+            .With("Signature", request.Signature) // signatures are not secret; tokens are
+            .With("UserTicket", RemoveTicketSignature(request.UserTicket))
+            .With("CallId", callId);
 
         CallCountCounter_.Increment();
 
@@ -357,21 +347,25 @@ private:
             }
             if (responseStatus == ESecretVaultResponseStatus::Warning) {
                 WarningSubrequestCountCounter_.Increment();
-                YT_LOG_WARNING("Received warning message from Vault: %v",
-                    GetWarningMessageFromResponse(response));
+                YT_TLOG_WARNING("Received warning message from Vault")
+                    .With("Message", GetWarningMessageFromResponse(response));
             }
 
             return TDelegationTokenResponse{
                 .Token = response->GetChildValueOrThrow<std::string>("token"),
-                .TvmId = tvmService->GetSelfTvmIdOrThrow(),
+                .TvmId = request.ConsumerTvmId
+                    ? *request.ConsumerTvmId
+                    : tvmService->GetSelfTvmIdOrThrow(),
             };
         } catch (const std::exception& ex) {
             FailedCallCountCounter_.Increment();
-            auto error = TError("Failed to get delegation token from Vault")
-                << ex
-                << TErrorAttribute("call_id", callId);
-            YT_LOG_DEBUG(error);
-            THROW_ERROR error;
+            static constexpr auto Message = "Failed to get delegation token from Vault"_sb;
+            YT_TLOG_DEBUG(Message)
+                .With("CallId", callId)
+                .With(ex);
+            THROW_ERROR_EXCEPTION(Message)
+                .With(ex)
+                .With("call_id", callId);
         }
     }
 
@@ -432,7 +426,9 @@ private:
         BuildYsonFluently(jsonWriter.get())
             .BeginMap()
                 .Item("signature").Value(request.Signature)
-                .Item("tvm_client_id").Value(request.TvmId.value_or(DefaultTvmIdForNewTokens_))
+                .Item("tvm_client_id").Value(
+                    request.ConsumerTvmId.value_or(
+                        request.TvmId.value_or(DefaultTvmIdForNewTokens_)))
                 .DoIf(!request.Comment.empty(),
                     [&] (auto fluent) {
                         fluent.Item("comment").Value(request.Comment);
@@ -496,7 +492,7 @@ private:
             ParseJson(&stream, builder.get(), jsonConfig);
             return builder->EndTree()->AsMap();
         } catch (const std::exception& ex) {
-            THROW_ERROR TError(ESecretVaultErrorCode::MalformedResponse,
+            THROW_ERROR_EXCEPTION(ESecretVaultErrorCode::MalformedResponse,
                 "Error parsing Vault response");
         }
     }
@@ -531,8 +527,8 @@ private:
                 ? messageNode->GetValue<std::string>()
                 : "Vault error",
             TError::DisableFormat)
-            << TErrorAttribute("status", statusString)
-            << TErrorAttribute("code", codeString);
+            .With("status", statusString)
+            .With("code", codeString);
     }
 
     static ESecretVaultErrorCode ParseErrorCode(TStringBuf codeString)
@@ -554,7 +550,7 @@ private:
         return TError(
             ESecretVaultErrorCode::UnexpectedStatus,
             "Received unexpected status from Vault")
-            << TErrorAttribute("status", statusString);
+            .With("status", statusString);
     }
 
     static std::string GetWarningMessageFromResponse(const IMapNodePtr& node)

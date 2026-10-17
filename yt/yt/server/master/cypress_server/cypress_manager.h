@@ -190,9 +190,10 @@ struct ICypressManager
         const TLockRequest& request,
         bool recursive = false) = 0;
 
-    virtual TError CheckLock(
+    virtual TError AcquirePrelock(
+        NTransactionServer::TTransaction* owningTransaction,
+        NTransactionServer::TTransaction* lockingTransaction,
         TCypressNode* trunkNode,
-        NTransactionServer::TTransaction* transaction,
         const TLockRequest& request) = 0;
 
     struct TCreateLockResult

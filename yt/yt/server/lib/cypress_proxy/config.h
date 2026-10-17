@@ -8,6 +8,8 @@
 
 #include <yt/yt/server/lib/misc/config.h>
 
+#include <yt/yt/server/lib/rpc_proxy/config.h>
+
 #include <yt/yt/ytlib/api/native/public.h>
 
 #include <yt/yt/ytlib/distributed_throttler/config.h>
@@ -51,6 +53,8 @@ struct TCypressProxyBootstrapConfig
     NDynamicConfig::TDynamicConfigManagerConfigPtr DynamicConfigManager;
 
     TDuration HeartbeatPeriod;
+
+    NRpcProxy::TApiServiceConfigPtr ApiService;
 
     TTestConfigPtr Testing;
 
@@ -164,6 +168,8 @@ struct TCypressProxyDynamicConfig
 
     TBanServiceDynamicConfigPtr BanService;
 
+    NRpcProxy::TApiServiceDynamicConfigPtr ApiService;
+
     int ThreadPoolSize;
 
     int DefaultGetResponseSizeLimit;
@@ -173,6 +179,8 @@ struct TCypressProxyDynamicConfig
     int DefaultVectorizedSubbatchSize;
 
     THashMap<ETreeScope, int> VectorizedSubbatchSizeOverrides;
+
+    bool EnableAccessLog;
 
     constexpr static int DefaultThreadPoolSize = 2;
 

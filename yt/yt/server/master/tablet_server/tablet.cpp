@@ -72,7 +72,7 @@ void TTableReplicaInfo::Populate(
     NTabletClient::NProto::TTableReplicaStatistics* statistics) const
 {
     statistics->set_committed_replication_row_index(GetCommittedReplicationRowIndex());
-    statistics->set_current_replication_timestamp(GetCurrentReplicationTimestamp());
+    statistics->set_current_replication_timestamp(ToProto(GetCurrentReplicationTimestamp()));
 }
 
 void TTableReplicaInfo::MergeFrom(
@@ -84,7 +84,7 @@ void TTableReplicaInfo::MergeFrom(
         statistics.committed_replication_row_index()));
     SetCurrentReplicationTimestamp(std::max(
         GetCurrentReplicationTimestamp(),
-        statistics.current_replication_timestamp()));
+        FromProto<NTransactionClient::TTimestamp>(statistics.current_replication_timestamp())));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -263,7 +263,7 @@ TTableReplicaInfo* TTablet::GetReplicaInfo(const TTableReplica* replica)
 
 TDuration TTablet::ComputeReplicationLagTime(TTimestamp latestTimestamp, const TTableReplicaInfo& replicaInfo) const
 {
-    auto lastWriteTimestamp = NodeStatistics_.last_write_timestamp();
+    auto lastWriteTimestamp = FromProto<NTransactionClient::TTimestamp>(NodeStatistics_.last_write_timestamp());
     if (lastWriteTimestamp == NullTimestamp) {
         return TDuration::Zero();
     }
@@ -387,9 +387,9 @@ void TTablet::ValidateUnmount()
     for (auto it : GetIteratorsSortedByKey(Replicas())) {
         const auto& [weakReplica, replicaInfo] = *it;
         if (!IsObjectAlive(weakReplica)) {
-            YT_LOG_ALERT("Found zombie replica during tablet unmount validation (TabletId: %v, ReplicaId: %v)",
-                GetId(),
-                weakReplica->GetId());
+            YT_TLOG_ALERT("Found zombie replica during tablet unmount validation")
+                .With("TabletId", GetId())
+                .With("ReplicaId", weakReplica->GetId());
             continue;
         }
         auto* replica = weakReplica.Get();

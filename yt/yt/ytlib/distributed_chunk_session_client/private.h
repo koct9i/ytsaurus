@@ -7,6 +7,8 @@
 #include <yt/yt/core/actions/callback.h>
 #include <yt/yt/core/actions/public.h>
 
+#include <limits>
+
 namespace NYT::NDistributedChunkSessionClient {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -18,6 +20,8 @@ struct TDistributedChunkSessionPoolTestingOptions
 {
     TCreateControllerCallback CreateController;
     TSendChunkSealRequestCallback SendChunkSealRequest;
+    IDistributedChunkSessionSealMonitorPtr SealMonitor;
+    int SlotCount = std::numeric_limits<int>::max();
 };
 
 IDistributedChunkSessionPoolPtr CreateDistributedChunkSessionPoolForTesting(
@@ -25,5 +29,7 @@ IDistributedChunkSessionPoolPtr CreateDistributedChunkSessionPoolForTesting(
     TDistributedChunkSessionPoolTestingOptions options,
     IInvokerPtr invoker,
     NLogging::TLogger logger = DistributedChunkSessionLogger());
+
+////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NDistributedChunkSessionClient

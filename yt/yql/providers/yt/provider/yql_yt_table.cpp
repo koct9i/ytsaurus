@@ -448,6 +448,8 @@ bool TYtTableMetaInfo::Validate(const TExprNode& node, TExprContext& ctx) {
         else
             VALIDATE_FIELD(IsDynamic)
         else
+            VALIDATE_FIELD(IsLink)
+        else
             VALIDATE_FIELD(HasRLS)
         else
             VALIDATE_FIELD(SqlView)
@@ -494,6 +496,8 @@ void TYtTableMetaInfo::Parse(TExprBase node) {
         else
             HANDLE_FIELD(IsDynamic)
         else
+            HANDLE_FIELD(IsLink)
+        else
             HANDLE_FIELD(HasRLS)
         else {
             YQL_ENSURE(false, "Unexpected option " << setting.Name().Value());
@@ -522,6 +526,7 @@ TExprBase TYtTableMetaInfo::ToExprNode(TExprContext& ctx, const TPositionHandle&
         ADD_BOOL_FIELD(YqlCompatibleScheme)
         ADD_BOOL_FIELD(InferredScheme)
         ADD_BOOL_FIELD(IsDynamic)
+        ADD_BOOL_FIELD(IsLink)
         ADD_BOOL_FIELD(HasRLS)
         ;
 
@@ -637,10 +642,10 @@ NYT::TNode TYtTableBaseInfo::GetCodecSpecNode(const NCommon::TStructMemberMapper
     return res;
 }
 
-NYT::TNode TYtTableBaseInfo::GetAttrSpecNode(ui64 nativeTypeCompatibility, bool rowSpecCompactForm) const {
+NYT::TNode TYtTableBaseInfo::GetAttrSpecNode(bool rowSpecCompactForm) const {
     NYT::TNode res = NYT::TNode::CreateMap();
     if (RowSpec) {
-        RowSpec->FillAttrNode(res[YqlRowSpecAttribute], nativeTypeCompatibility, rowSpecCompactForm);
+        RowSpec->FillAttrNode(res[YqlRowSpecAttribute], rowSpecCompactForm);
     }
     return res;
 }
@@ -917,9 +922,9 @@ bool TYtTableInfo::HasSubstAnonymousLabel(NNodes::TExprBase node) {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-TYtOutTableInfo::TYtOutTableInfo(const TStructExprType* type, ui64 nativeYtTypeFlags, const TMaybe<TColumnOrder>& columnOrder) {
+TYtOutTableInfo::TYtOutTableInfo(const TStructExprType* type, ui64 nativeTypeCompatibility, const TMaybe<TColumnOrder>& columnOrder) {
     RowSpec = MakeIntrusive<TYqlRowSpecInfo>();
-    RowSpec->SetType(type, nativeYtTypeFlags);
+    RowSpec->SetType(type, nativeTypeCompatibility);
     RowSpec->SetColumnOrder(columnOrder);
 
     Meta = MakeIntrusive<TYtTableMetaInfo>();

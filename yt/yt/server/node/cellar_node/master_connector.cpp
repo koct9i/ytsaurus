@@ -62,7 +62,7 @@ public:
             bootstrap,
             /*reportHeartbeatsToAllSecondaryMasters*/ true,
             ENodeHeartbeatType::Cellar,
-            CellarNodeLogger().WithTag("HeartbeatType: %v", ENodeHeartbeatType::Cellar))
+            CellarNodeLogger().WithTag("HeartbeatType", ENodeHeartbeatType::Cellar))
         , Bootstrap_(bootstrap)
         , Config_(bootstrap->GetConfig()->CellarNode->MasterConnector)
     {
@@ -233,7 +233,7 @@ private:
 
         Reconfigure(newNodeConfig->CellarNode->MasterConnector->HeartbeatExecutor.value_or(Config_->HeartbeatExecutor));
 
-        YT_LOG_INFO("Dynamic config changed");
+        YT_TLOG_INFO("Dynamic config changed");
     }
 
     TMasterConnectorDynamicConfigPtr GetDynamicConfig() const

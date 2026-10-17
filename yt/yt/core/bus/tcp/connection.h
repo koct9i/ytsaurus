@@ -17,7 +17,6 @@
 #include <yt/yt/core/net/address.h>
 
 #include <yt/yt/core/misc/mpsc_stack.h>
-#include <yt/yt/core/misc/ring_queue.h>
 #include <yt/yt/core/misc/atomic_ptr.h>
 
 #include <yt/yt/core/net/public.h>
@@ -26,9 +25,11 @@
 
 #include <yt/yt/core/misc/memory_usage_tracker.h>
 
+#include <library/cpp/yt/containers/ring_queue.h>
+
 #include <library/cpp/yt/memory/blob.h>
 
-#include <library/cpp/yt/threading/spin_lock.h>
+#include <library/cpp/yt/system/spin_lock.h>
 
 #include <util/network/init.h>
 
@@ -100,7 +101,7 @@ public:
     TBusNetworkStatistics GetBusStatistics() const;
 
     // IPollable implementation.
-    const std::string& GetLoggingTag() const override;
+    const NLogging::TLoggingTagList& GetLoggingTags() const override;
     void OnEvent(NConcurrency::EPollControl control) override;
     void OnShutdown() override;
 
@@ -199,7 +200,6 @@ private:
     const IMessageHandlerPtr Handler_;
     const NConcurrency::IPollerPtr Poller_;
 
-    const std::string LoggingTag_;
     const NLogging::TLogger Logger;
 
     const TPromise<void> ReadyPromise_ = NewPromise<void>();
@@ -222,7 +222,7 @@ private:
     // Actually stores NConcurrency::EPollControl.
     std::atomic<ui64> PendingControl_ = static_cast<ui64>(NConcurrency::EPollControl::Offline);
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, Lock_);
 
     SOCKET Socket_ = INVALID_SOCKET;
 
@@ -236,7 +236,7 @@ private:
 
     TSingleShotCallbackList<void(const TError&)> Terminated_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, QueuedMessagesDiscardLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, QueuedMessagesDiscardLock_);
     TMpscStack<TQueuedMessage> QueuedMessages_;
     std::atomic<size_t> PendingOutPayloadBytes_ = 0;
 
@@ -293,7 +293,7 @@ private:
     TCallback<void(const TError&)> LocalBypassTerminatedCallback_;
     std::atomic<bool> LocalBypassActive_ = false;
 
-    void Open(TGuard<NThreading::TSpinLock>& guard);
+    void Open(TGuard<TSpinLock>& guard);
     void Close();
     void CloseSslSession(ESslState newSslState);
 

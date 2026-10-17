@@ -5,9 +5,9 @@
 #include "private.h"
 #include "queue_export_manager.h"
 
+#include <yt/yt/ytlib/chunk_client/chunk_meta_extensions.h>
 #include <yt/yt/ytlib/chunk_client/chunk_spec_fetcher.h>
 #include <yt/yt/ytlib/chunk_client/chunk_teleporter.h>
-#include <yt/yt/ytlib/chunk_client/chunk_meta_extensions.h>
 #include <yt/yt/ytlib/chunk_client/input_chunk.h>
 
 #include <yt/yt/ytlib/cypress_client/rpc_helpers.h>
@@ -23,11 +23,11 @@
 #include <yt/yt/client/chunk_client/data_statistics.h>
 #include <yt/yt/client/chunk_client/helpers.h>
 
+#include <yt/yt/client/queue_client/config.h>
+
 #include <yt/yt/client/table_client/helpers.h>
 
 #include <yt/yt/client/transaction_client/helpers.h>
-
-#include <yt/yt/client/queue_client/config.h>
 
 #include <library/cpp/yt/containers/enum_indexed_array.h>
 
@@ -145,8 +145,8 @@ ui64 GetLastExportPeriod(ui64 exportUnixTs, const TQueueStaticExportConfigPtr ex
     auto exportUnixTsCivilSecond = NDatetime::Convert(TInstant::Seconds(exportUnixTs), UTCTimezone);
     if (cronExpression.CronPrev(cronExpression.CronNext(exportUnixTsCivilSecond)) != exportUnixTsCivilSecond) {
         THROW_ERROR_EXCEPTION("Value of exportUnixTs is not a valid export timestamp")
-            << TErrorAttribute("exportUnixTs", exportUnixTs)
-            << TErrorAttribute("cronExpression", *exportConfig->ExportCronSchedule);
+            .With("export_unix_ts", exportUnixTs)
+            .With("cron_expression", *exportConfig->ExportCronSchedule);
     }
     return exportUnixTs - NDatetime::Convert(cronExpression.CronPrev(exportUnixTsCivilSecond), UTCTimezone).Seconds();
 }
@@ -241,12 +241,11 @@ public:
         , ExportConfig_(std::move(exportConfig))
         , DynamicConfig_(std::move(dynamicConfig))
         , IsInitialInvocation_(isInitialInvocation)
-        , Logger(logger.WithTag(
-            "ExportDirectory: %v, ExportPeriod: %v, ExportCronSchedule: %v, IsInitialInvocation: %v",
-            ExportConfig_->ExportDirectory,
-            ExportConfig_->ExportPeriod,
-            ExportConfig_->ExportCronSchedule,
-            IsInitialInvocation_))
+        , Logger(logger
+            .WithTag("ExportDirectory", ExportConfig_->ExportDirectory)
+            .WithTag("ExportPeriod", ExportConfig_->ExportPeriod)
+            .WithTag("ExportCronSchedule", ExportConfig_->ExportCronSchedule)
+            .WithTag("IsInitialInvocation", IsInitialInvocation_))
     { }
 
     TFuture<void> Run()
@@ -344,7 +343,8 @@ private:
     //!   3) Fetches chunk specs, skipping dynamic stores, already exported chunks and chunks with timestamp larger than
     //!      the export unix timestamp upper bound.
     //!   4) Groups together chunk specs by export unix ts corresponding to their export unix ts.
-    //!   5) Creates exported table for each chunk spec group in nested transaction, stopping at the first failed, creating at most MaxExportedTableCountPerTask tables.
+    //!   5) For tables with hunk chunks drops groups starting with the first one that has a reference to an unsealed hunk chunk.
+    //!   6) Creates at most MaxExportedTableCountPerTask exported tables, stopping at the first failure.
     //!
     //! NB: We use the host's physical time to compute the unix ts of the next table to export.
     //! We rely on this time being mostly monotonous and not too different from the cluster time obtained via timestamp generation.
@@ -353,9 +353,9 @@ private:
     //! exported into later tables, which is perfectly fine.
     void DoRun()
     {
-        YT_LOG_INFO("Started export task");
+        YT_TLOG_INFO("Started export task");
         auto logFinally = Finally([&] {
-            YT_LOG_INFO("Finished export task");
+            YT_TLOG_INFO("Finished export task");
         });
 
         auto transaction = WaitFor(Client_->StartTransaction(ETransactionType::Master))
@@ -378,8 +378,8 @@ private:
 
         Options_.TransactionId = transactionId;
 
-        YT_LOG_INFO("Started export transaction and locked nodes (TransactionId: %v)",
-            transactionId);
+        YT_TLOG_INFO("Started export transaction and locked nodes")
+            .With("TransactionId", transactionId);
 
         TaskInstant_ = TInstant::Now();
         ExportUnixTsUpperBound_ = GetExportUnixTsUpperBound(TaskInstant_, ExportConfig_);
@@ -392,10 +392,9 @@ private:
         QueueExportProgress_ = currentExportProgress;
         if (currentExportProgress->LastExportUnixTs >= ExportUnixTsUpperBound_) {
             if (IsInitialInvocation_) {
-                YT_LOG_WARNING(
-                    "Rows corresponding to this export unix ts have already been exported according to the last export unix ts (ExportUnixTsUpperBound: %v, LastExportUnixTs: %v)",
-                    ExportUnixTsUpperBound_,
-                    currentExportProgress->LastExportUnixTs);
+                YT_TLOG_WARNING("Rows corresponding to this export unix ts have already been exported according to the last export unix ts")
+                    .With("ExportUnixTsUpperBound", ExportUnixTsUpperBound_)
+                    .With("LastExportUnixTs", currentExportProgress->LastExportUnixTs);
                 return;
             } else {
                 THROW_ERROR_EXCEPTION(
@@ -417,13 +416,14 @@ private:
             // NB(apachee): New export progress is taking into account if there are chunks
             // to export, meaning in this case only last successful export task instant would
             // be changed.
-            YT_LOG_DEBUG("No chunks to export, committing export transaction prematurely (TransactionId: %v)",
-                transactionId);
+            YT_TLOG_DEBUG("No chunks to export, committing export transaction prematurely")
+                .With("TransactionId", transactionId);
         } else {
             for (auto& taskPart : TaskParts_) {
                 auto taskPartError = RunTaskPart(taskPart, transaction);
                 if (!taskPartError.IsOK()) {
-                    YT_LOG_ERROR(taskPartError);
+                    YT_TLOG_ERROR("Queue export task part failed")
+                        .With(taskPartError);
                     ExportError_ = taskPartError;
                     break;
                 }
@@ -454,10 +454,10 @@ private:
 
         QueueExportProgress_ = newExportProgress;
 
-        YT_LOG_DEBUG("Finished creating exported tables (PreparedTableCount: %v, ExportedTableCount: %v, SkippedTableCount: %v)",
-            TaskParts_.size(),
-            exportedTableCount,
-            skippedTableCount);
+        YT_TLOG_DEBUG("Finished creating exported tables")
+            .With("PreparedTableCount", TaskParts_.size())
+            .With("ExportedTableCount", exportedTableCount)
+            .With("SkippedTableCount", skippedTableCount);
 
         ProfilingCounters_->ExportedRows.Increment(diff.RowCount);
         ProfilingCounters_->ExportedChunks.Increment(diff.ChunkCount);
@@ -489,10 +489,10 @@ private:
             ++preparedTableCount;
         }
 
-        YT_LOG_DEBUG("Prepared for creating exported tables (TableCount: %v, AvailableTableCount: %v, MaxExportedTableCountPerTask: %v)",
-            preparedTableCount,
-            ChunkSpecsToExportByUnixTs_.size(),
-            DynamicConfig_.MaxExportedTableCountPerTask);
+        YT_TLOG_DEBUG("Prepared for creating exported tables")
+            .With("TableCount", preparedTableCount)
+            .With("AvailableTableCount", ChunkSpecsToExportByUnixTs_.size())
+            .With("MaxExportedTableCountPerTask", DynamicConfig_.MaxExportedTableCountPerTask);
     }
 
     TError RunTaskPart(TTaskPart& taskPart, const ITransactionPtr& parentTransaction)
@@ -505,8 +505,8 @@ private:
             GuardedRunTaskPart(taskPart, parentTransaction);
         } catch (const std::exception& ex) {
             return TError("Queue export task part failed")
-                << ex
-                << TErrorAttribute("export_unix_ts", taskPart.ExportUnixTs);
+                .With(ex)
+                .With("export_unix_ts", taskPart.ExportUnixTs);
         }
         return TError();
     }
@@ -566,7 +566,7 @@ private:
     {
         const auto& Logger = logger;
 
-        YT_LOG_DEBUG("Started collecting basic attributes");
+        YT_TLOG_DEBUG("Started collecting basic attributes");
 
         auto proxy = CreateObjectServiceReadProxy(client, TMasterReadOptions().ReadFrom);
         auto req = TObjectYPathProxy::GetBasicAttributes(object.GetPath());
@@ -591,15 +591,14 @@ private:
                 FromProto<std::vector<TSecurityTag>>(rsp->security_tags().items());
         }
 
-        YT_LOG_DEBUG("Finished collecting basic attributes");
+        YT_TLOG_DEBUG("Finished collecting basic attributes");
     }
 
     IAttributeDictionaryPtr FetchNodeAttributes(const TYPath& path, const std::vector<TStringBuf>& attributeKeys) const
     {
-        YT_LOG_DEBUG(
-            "Started fetching attributes (Path: %v, PathRequestedAttributes: %v)",
-            path,
-            attributeKeys);
+        YT_TLOG_DEBUG("Started fetching attributes")
+            .With("Path", path)
+            .With("PathRequestedAttributes", attributeKeys);
 
         // TODO(achulkov2): Change to simple Client_->GetNode with attributes.
         auto proxy = CreateObjectServiceReadProxy(Client_, TMasterReadOptions().ReadFrom);
@@ -614,10 +613,9 @@ private:
             attributeKeys,
             path);
 
-        YT_LOG_DEBUG(
-            "Finished fetching attributes (Path: %v, PathRequestedAttributes: %v)",
-            path,
-            attributeKeys);
+        YT_TLOG_DEBUG("Finished fetching attributes")
+            .With("Path", path)
+            .With("PathRequestedAttributes", attributeKeys);
         return ConvertToAttributes(TYsonString(rspOrError.Value()->value()));
     }
 
@@ -684,6 +682,145 @@ private:
         return New<TQueueExportProgress>();
     }
 
+    THashSet<TChunkId> FetchUnsealedHunkChunkIds(const std::vector<TChunkId>& hunkChunkIds) const
+    {
+        for (auto hunkChunkId : hunkChunkIds) {
+            if (QueueObject_.ExternalCellTag != CellTagFromId(hunkChunkId)) {
+                THROW_ERROR_EXCEPTION("Encountered hunk chunk with unexpected cell tag")
+                    .With("actual_cell_tag", CellTagFromId(hunkChunkId))
+                    .With("expected_cell_tag", QueueObject_.ExternalCellTag);
+            }
+        }
+
+        auto proxy = CreateObjectServiceReadProxy(
+            Client_,
+            TMasterReadOptions().ReadFrom,
+            QueueObject_.ExternalCellTag);
+
+        THashSet<TChunkId> unsealedHunkChunkIds;
+        auto fetchChunkBatch = [&] (i64 lowerChunkIndex, i64 upperChunkIndex) {
+            YT_TLOG_DEBUG("Started fetching seal state for a batch of hunk chunks")
+                .With("LowerChunkIndex", lowerChunkIndex)
+                .With("UpperChunkIndex", upperChunkIndex);
+
+            auto batchReq = proxy.ExecuteBatch();
+
+            for (int chunkIndex = lowerChunkIndex; chunkIndex < upperChunkIndex; ++chunkIndex) {
+                auto hunkChunkId = hunkChunkIds[chunkIndex];
+                auto req = TYPathProxy::Get(FromObjectId(hunkChunkId) + "/@sealed");
+                batchReq->AddRequest(req);
+            }
+
+            auto batchRspOrError = WaitFor(batchReq->Invoke());
+            auto cumulativeError = GetCumulativeError(batchRspOrError);
+            THROW_ERROR_EXCEPTION_UNLESS(cumulativeError.IsOK(),
+                "Error fetching hunk chunk seal state from master cell")
+                    .With("master_cell_tag", QueueObject_.ExternalCellTag)
+                    .With(cumulativeError);
+
+            auto responses = batchRspOrError.Value()->GetResponses<TYPathProxy::TRspGet>();
+            THROW_ERROR_EXCEPTION_IF(std::ssize(responses) != upperChunkIndex - lowerChunkIndex,
+                "Master cell returned hunk chunk seal state response of unexpected size")
+                .With("master_cell_tag", QueueObject_.ExternalCellTag)
+                .With("actual_response_size", responses.size())
+                .With("expected_response_size", upperChunkIndex - lowerChunkIndex);
+
+            for (int responseIndex = 0; responseIndex < std::ssize(responses); ++responseIndex) {
+                auto maybeResponseValue = responses[responseIndex].ValueOrThrow();
+                THROW_ERROR_EXCEPTION_UNLESS(maybeResponseValue,
+                    "Upon fetching chunk seal states unexpectedely encountered null subresponse")
+                    .With("response_index", responseIndex)
+                    .With("total_response_size", responses.size())
+                    .With("chunk_id", hunkChunkIds[lowerChunkIndex + responseIndex]);
+
+                auto responseValue = maybeResponseValue->value();
+                auto sealed = ConvertTo<bool>(TYsonString(responseValue));
+                if (!sealed) {
+                    auto hunkChunkId = hunkChunkIds[lowerChunkIndex + responseIndex];
+                    unsealedHunkChunkIds.insert(hunkChunkId);
+                }
+            }
+        };
+
+        for (i64 lowerChunkIndexToFetch = 0;
+            lowerChunkIndexToFetch < std::ssize(hunkChunkIds);
+            lowerChunkIndexToFetch += DynamicConfig_.MaxHunkChunkCountPerFetch)
+        {
+            fetchChunkBatch(
+                lowerChunkIndexToFetch,
+                std::min(
+                    lowerChunkIndexToFetch + DynamicConfig_.MaxHunkChunkCountPerFetch,
+                    std::ssize(hunkChunkIds)));
+        }
+
+        YT_TLOG_DEBUG("Finished fetching hunk chunk seal state")
+            .With("HunkChunkCount", hunkChunkIds.size())
+            .With("UnsealedHunkChunkCount", unsealedHunkChunkIds.size());
+
+        return unsealedHunkChunkIds;
+    }
+
+    // For each time segment we find all its corresponding hunk chunks and filter out
+    // all the time segments starting from the one that contains unsealed hunk chunk (if present),
+    // because journal hunk chunks must be sealed before being exported.
+    void FilterChunkSpecsByHunkChunkSealState()
+    {
+        std::vector<TChunkId> allHunkChunkIds;
+        THashMap<ui64, std::vector<TChunkId>> hunkChunkIdsByUnixTs;
+
+        for (const auto& [exportUnixTs, chunkSpecs] : ChunkSpecsToExportByUnixTs_) {
+            auto& currentHunkChunkIds = hunkChunkIdsByUnixTs[exportUnixTs];
+            for (const auto* chunkSpec : chunkSpecs) {
+                if (auto hunkChunkRefsExt = FindProtoExtension<THunkChunkRefsExt>(chunkSpec->chunk_meta().extensions())) {
+                    for (const auto& ref : hunkChunkRefsExt->refs()) {
+                        currentHunkChunkIds.push_back(FromProto<TChunkId>(ref.chunk_id()));
+                    }
+                }
+            }
+
+            SortUnique(currentHunkChunkIds);
+            allHunkChunkIds.insert(allHunkChunkIds.end(), currentHunkChunkIds.begin(), currentHunkChunkIds.end());
+        }
+
+        SortUnique(allHunkChunkIds);
+
+        if (allHunkChunkIds.empty()) {
+            return;
+        }
+
+        auto unsealedHunkChunkIds = FetchUnsealedHunkChunkIds(allHunkChunkIds);
+
+        for (auto chunkSpecsIt = ChunkSpecsToExportByUnixTs_.begin();
+            chunkSpecsIt != ChunkSpecsToExportByUnixTs_.end();
+            ++chunkSpecsIt)
+        {
+            auto exportUnixTs = chunkSpecsIt->first;
+            auto& hunkChunkIds = GetOrCrash(hunkChunkIdsByUnixTs, exportUnixTs);
+
+            for (auto hunkChunkId : hunkChunkIds) {
+                if (unsealedHunkChunkIds.contains(hunkChunkId)) {
+                    auto skippedGroupCount = std::distance(chunkSpecsIt, ChunkSpecsToExportByUnixTs_.end());
+
+                    YT_TLOG_DEBUG("Stopped selecting chunks for export due to unsealed hunk chunks")
+                        .With("ExportUnixTs", exportUnixTs)
+                        .With("UnsealedHunkChunkId", hunkChunkId)
+                        .With("SkippedGroupCount", skippedGroupCount)
+                        .With("TotalGroupCount", ChunkSpecsToExportByUnixTs_.size());
+
+                    // TODO(akozhikhov): Consider erasing only the suffix of the chunk spec list that has a reference to
+                    // unsealed journal chunk. This can potentially speed up exporing of the data, however the degree of
+                    // such speed up is not obvious and shall be researched relying on actual use cases.
+                    ChunkSpecsToExportByUnixTs_.erase(chunkSpecsIt, ChunkSpecsToExportByUnixTs_.end());
+                    return;
+                }
+            }
+
+            if (!hunkChunkIds.empty()) {
+                EmplaceOrCrash(HunkChunkIdsToExportByUnixTs_, exportUnixTs, std::move(hunkChunkIds));
+            }
+        }
+    }
+
     void SelectChunkSpecsToExport(const TQueueExportProgressPtr& currentExportProgress)
     {
         std::map<i64, std::vector<const TChunkSpec*>> tabletToChunkSpecs;
@@ -710,12 +847,11 @@ private:
                 if (!rowCountMatches) {
                     ProfilingCounters_->RowCountMismatches.Increment();
                     if (DynamicConfig_.EnableRowCountCheck) {
-                        YT_LOG_ALERT_AND_THROW(
-                            "Mismatch between last chunk from tablet progress and row count from progress (TabletProgressLastChunk: %v, TabletProgressRowCount: %v, FoundChunkRowIndex: %v, FoundChunkRowCount: %v)",
-                            tabletProgress->LastChunk,
-                            tabletProgress->RowCount,
-                            chunkSpec->table_row_index(),
-                            miscExt.row_count());
+                        YT_TLOG_ALERT_AND_THROW("Mismatch between last chunk from tablet progress and row count from progress")
+                            .With("TabletProgressLastChunk", tabletProgress->LastChunk)
+                            .With("TabletProgressRowCount", tabletProgress->RowCount)
+                            .With("FoundChunkRowIndex", chunkSpec->table_row_index())
+                            .With("FoundChunkRowCount", miscExt.row_count());
                     }
                 }
             }
@@ -750,27 +886,14 @@ private:
         }
 
         if (QueueSchema_->HasHunkColumns()) {
-            for (const auto& [exportUnixTs, chunkSpecs] : ChunkSpecsToExportByUnixTs_) {
-                std::vector<TChunkId> hunkChunkIds;
-                for (const auto& chunkSpec : chunkSpecs) {
-                    if (auto hunkChunkRefsExt = FindProtoExtension<THunkChunkRefsExt>(chunkSpec->chunk_meta().extensions())) {
-                        for (const auto& ref : hunkChunkRefsExt->refs()) {
-                            hunkChunkIds.push_back(FromProto<TChunkId>(ref.chunk_id()));
-                        }
-                    }
-                }
-
-                if (!hunkChunkIds.empty()) {
-                    SortUnique(hunkChunkIds);
-                    EmplaceOrCrash(HunkChunkIdsToExportByUnixTs_, exportUnixTs, std::move(hunkChunkIds));
-                }
-            }
+            FilterChunkSpecsByHunkChunkSealState();
         }
     }
 
     void FetchChunkSpecs()
     {
-        YT_LOG_DEBUG("Started fetching chunk specs (Count: %v)", QueueObject_.ChunkCount);
+        YT_TLOG_DEBUG("Started fetching chunk specs")
+            .With("Count", QueueObject_.ChunkCount);
 
         auto prepareFetchRequest = [&] (const TChunkOwnerYPathProxy::TReqFetchPtr& request, int /*index*/) {
             request->add_extension_tags(TProtoExtensionTag<TMiscExt>::Value);
@@ -781,12 +904,13 @@ private:
 
         auto chunkSpecFetcher = New<TMasterChunkSpecFetcher>(
             Client_,
-            TMasterReadOptions{},
             Connection_->GetNodeDirectory(),
             Connection_->GetInvoker(),
-            Connection_->GetConfig()->MaxChunksPerFetch,
-            Connection_->GetConfig()->MaxChunksPerLocateRequest,
-            prepareFetchRequest,
+            TMasterChunkSpecFetcherOptions{
+                .MaxChunksPerFetch = Connection_->GetConfig()->MaxChunksPerFetch,
+                .MaxChunksPerLocateRequest = Connection_->GetConfig()->MaxChunksPerLocateRequest,
+                .FetchRequestInitializer = prepareFetchRequest,
+            },
             Logger);
 
         chunkSpecFetcher->Add(
@@ -799,7 +923,8 @@ private:
             .ThrowOnError();
 
         ChunkSpecs_ = chunkSpecFetcher->GetChunkSpecsOrderedNaturally();
-        YT_LOG_DEBUG("Finished fetching chunk specs (Count: %v)", ChunkSpecs_.size());
+        YT_TLOG_DEBUG("Finished fetching chunk specs")
+            .With("Count", ChunkSpecs_.size());
     }
 
     std::string GetOutputTableName(ui64 unixTs)
@@ -863,23 +988,22 @@ private:
                 THROW_ERROR_EXCEPTION(
                     "Generated output table name uniqueness invariant violated: output table name pattern should be unique for each export unix ts, "
                     "you may need to adjust (usually increase) export period or export cron schedule to match your output table name pattern")
-                    << TErrorAttribute("output_table_name_pattern", ExportConfig_->OutputTableNamePattern)
-                    << TErrorAttribute("export_period", ExportConfig_->ExportPeriod)
-                    << TErrorAttribute("export_cron_expression", ExportConfig_->ExportCronSchedule)
-                    << TErrorAttribute("export_unix_ts", taskPart.ExportUnixTs)
-                    << ex;
+                    .With("output_table_name_pattern", ExportConfig_->OutputTableNamePattern)
+                    .With("export_period", ExportConfig_->ExportPeriod)
+                    .With("export_cron_expression", ExportConfig_->ExportCronSchedule)
+                    .With("export_unix_ts", taskPart.ExportUnixTs)
+                    .With(ex);
             } else {
                 throw;
             }
         }
 
-        YT_LOG_DEBUG(
-            "Created output node for export (DestinationPath: %v, OutputTableNamePattern: %v, UseUpperBoundForTableNames: %v, ExportTtl: %v, ExportUnixTs: %v)",
-            taskPart.DestinationObject.GetPath(),
-            ExportConfig_->OutputTableNamePattern,
-            ExportConfig_->UseUpperBoundForTableNames,
-            ExportConfig_->ExportTtl,
-            taskPart.ExportUnixTs);
+        YT_TLOG_DEBUG("Created output node for export")
+            .With("DestinationPath", taskPart.DestinationObject.GetPath())
+            .With("OutputTableNamePattern", ExportConfig_->OutputTableNamePattern)
+            .With("UseUpperBoundForTableNames", ExportConfig_->UseUpperBoundForTableNames)
+            .With("ExportTtl", ExportConfig_->ExportTtl)
+            .With("ExportUnixTs", taskPart.ExportUnixTs);
 
         GetAndFillBasicAttributes(Logger, Client_, taskPart.DestinationObject, /*populateSecurityTags*/ false);
     }
@@ -929,10 +1053,10 @@ private:
             (cellTags.size() != 1 || cellTags[0] != taskPart.DestinationObject.ExternalCellTag))
         {
             THROW_ERROR_EXCEPTION("Cannot perform cross-cell export of a queue that contains hunks")
-                << TErrorAttribute("queue_object_cell_tag", QueueObject_.ExternalCellTag)
-                << TErrorAttribute("destination_object_cell_tag", destinationObjectCellTag)
-                << TErrorAttribute("destination_object_external_cell_tag", taskPart.DestinationObject.ExternalCellTag)
-                << TErrorAttribute("affected_cell_tags", ToString(cellTags));
+                .With("queue_object_cell_tag", QueueObject_.ExternalCellTag)
+                .With("destination_object_cell_tag", destinationObjectCellTag)
+                .With("destination_object_external_cell_tag", taskPart.DestinationObject.ExternalCellTag)
+                .With("affected_cell_tags", ToString(cellTags));
         }
 
         auto proxy = CreateObjectServiceWriteProxy(Client_, destinationObjectCellTag);
@@ -976,11 +1100,10 @@ private:
             uploadTransactionId,
             attachOptions);
 
-        YT_LOG_DEBUG(
-            "Started upload transaction for queue export (Destination: %v, UploadTransactionId: %v, OutputTableSchemaId: %v)",
-            taskPart.DestinationObject.GetPath(),
-            taskPart.UploadTransaction->GetId(),
-            QueueSchemaId_);
+        YT_TLOG_DEBUG("Started upload transaction for queue export")
+            .With("DestinationPath", taskPart.DestinationObject.GetPath())
+            .With("UploadTransactionId", taskPart.UploadTransaction->GetId())
+            .With("OutputTableSchemaId", QueueSchemaId_);
     }
 
     void TeleportChunkMeta(const TTaskPart& taskPart)
@@ -1027,8 +1150,8 @@ private:
             result[EChunkListContentType::Hunk] = FromProto<TChunkListId>(rsp->hunk_chunk_list_id());
         }
 
-        YT_LOG_DEBUG("Fetched chunk list ids (FetchResult: %v)",
-            result);
+        YT_TLOG_DEBUG("Fetched chunk list ids")
+            .With("FetchResult", result);
 
         return result;
     }
@@ -1037,61 +1160,59 @@ private:
     {
         YT_VERIFY(taskPart.UploadTransaction);
 
-        YT_LOG_DEBUG(
-            "Started chunk upload (Destination: %v, UploadTransactionId: %v, ChunkCount: %v)",
-            taskPart.DestinationObject.GetPath(),
-            taskPart.UploadTransaction->GetId(),
-            taskPart.ChunkSpecsToExport.size());
+        YT_TLOG_DEBUG("Started chunk upload")
+            .With("DestinationPath", taskPart.DestinationObject.GetPath())
+            .With("UploadTransactionId", taskPart.UploadTransaction->GetId())
+            .With("ChunkCount", taskPart.ChunkSpecsToExport.size());
 
         TChunkServiceProxy proxy(Client_->GetMasterChannelOrThrow(
             EMasterChannelKind::Leader,
             taskPart.DestinationObject.ExternalCellTag));
 
-        auto batchReq = proxy.ExecuteBatch();
-        GenerateMutationId(batchReq);
-        SetTransactionId(batchReq, taskPart.UploadTransaction->GetId());
-        SetSuppressUpstreamSync(&batchReq->Header(), true);
-
         auto chunkListIds = GetChunkListIds(taskPart);
 
-        auto mainReq = batchReq->add_attach_chunk_trees_subrequests();
+        auto mainReq = proxy.AttachChunkTrees();
+        GenerateMutationId(mainReq);
+        SetSuppressUpstreamSync(&mainReq->Header(), true);
+
         ToProto(mainReq->mutable_parent_id(), chunkListIds[EChunkListContentType::Main]);
         for (const auto* chunkSpec : taskPart.ChunkSpecsToExport) {
             *mainReq->add_child_ids() = chunkSpec->chunk_id();
         }
         mainReq->set_request_statistics(true);
 
+        std::vector<TFuture<TChunkServiceProxy::TRspAttachChunkTreesPtr>> reqFutures;
+        reqFutures.push_back(mainReq->Invoke());
+
         if (taskPart.ShouldExportHunkChunks()) {
-            auto hunkReq = batchReq->add_attach_chunk_trees_subrequests();
+            auto hunkReq = proxy.AttachChunkTrees();
+            GenerateMutationId(hunkReq);
+            SetSuppressUpstreamSync(&hunkReq->Header(), true);
 
             ToProto(hunkReq->mutable_parent_id(), chunkListIds[EChunkListContentType::Hunk]);
             for (auto hunkChunkId : *taskPart.HunkChunkIdsToExport) {
                 ToProto(hunkReq->add_child_ids(), hunkChunkId);
             }
             hunkReq->set_request_statistics(true);
+
+            reqFutures.push_back(hunkReq->Invoke());
         }
 
-        auto batchRspOrError = WaitFor(batchReq->Invoke());
+        auto responsesOrError = WaitFor(AllSucceeded(std::move(reqFutures)));
         THROW_ERROR_EXCEPTION_IF_FAILED(
-            GetCumulativeError(batchRspOrError),
+            responsesOrError,
             "Error attaching chunks to %v",
             taskPart.DestinationObject.GetPath());
 
-        const auto& batchRsp = batchRspOrError.Value();
-
-        const auto& mainRsp = batchRsp->attach_chunk_trees_subresponses(0);
-        taskPart.DataStatistics = mainRsp.statistics();
-        if (taskPart.ShouldExportHunkChunks()) {
-            YT_VERIFY(batchRsp->attach_chunk_trees_subresponses_size() == 2);
-            const auto& hunkRsp = batchRsp->attach_chunk_trees_subresponses(1);
-            taskPart.DataStatistics += hunkRsp.statistics();
+        taskPart.DataStatistics = {};
+        for (const auto& response : responsesOrError.Value()) {
+            taskPart.DataStatistics += response->statistics();
         }
 
-        YT_LOG_DEBUG(
-            "Finished chunk upload (Destination: %v, UploadTransactionId: %v, ChunkCount: %v)",
-            taskPart.DestinationObject.GetPath(),
-            taskPart.UploadTransaction->GetId(),
-            taskPart.ChunkSpecsToExport.size());
+        YT_TLOG_DEBUG("Finished chunk upload")
+            .With("DestinationPath", taskPart.DestinationObject.GetPath())
+            .With("UploadTransactionId", taskPart.UploadTransaction->GetId())
+            .With("ChunkCount", taskPart.ChunkSpecsToExport.size());
     }
 
     void EndUpload(const TTaskPart& taskPart)
@@ -1139,7 +1260,9 @@ private:
 
 
         TProgressDiff diff{currentExportProgress, newExportProgress};
-        YT_LOG_DEBUG("Updated export progress (ExportedRows: %v, ExportedChunks: %v)", diff.RowCount, diff.ChunkCount);
+        YT_TLOG_DEBUG("Updated export progress")
+            .With("ExportedRows", diff.RowCount)
+            .With("ExportedChunks", diff.ChunkCount);
         return diff;
     }
 
@@ -1200,16 +1323,16 @@ public:
                 &TQueueExporter::Pass,
                 MakeWeak(this)),
             DynamicConfig_.GetPeriodicExecutorOptions()))
-        , Logger(QueueExporterLogger().WithTag("%v, ExportName: %v",
-            logger.GetTag(),
-            ExportName_))
+        , Logger(QueueExporterLogger()
+            .WithTags(logger.GetTags())
+            .WithTag("ExportName", ExportName_))
     { }
 
     void Initialize() const
     {
         Executor_->Start();
 
-        YT_LOG_INFO("Queue exporter started");
+        YT_TLOG_INFO("Queue exporter started");
     }
 
     TQueueExportProgressPtr GetExportProgress() const override
@@ -1369,9 +1492,9 @@ private:
             retryIndex = RetryBackoff_.GetInvocationIndex();
         }
 
-        YT_LOG_INFO("Doing retry backoff (BackoffDuration: %v, RetryIndex: %v)",
-            backoffDuration,
-            retryIndex);
+        YT_TLOG_INFO("Doing retry backoff")
+            .With("BackoffDuration", backoffDuration)
+            .With("RetryIndex", retryIndex);
 
         // TODO(apachee): Think of a way to ignore misconfigured exports completely
         // instead of artificially increasing pass period using retry backoff.
@@ -1427,8 +1550,8 @@ private:
             }
             if (!exportTaskError.IsOK() || !exportTask->GetExportError().IsOK()) {
                 THROW_ERROR_EXCEPTION("Export task has errors")
-                    << TErrorAttribute("task_error", exportTaskError)
-                    << TErrorAttribute("export_error", exportTask->GetExportError());
+                    .With("task_error", exportTaskError)
+                    .With("export_error", exportTask->GetExportError());
             }
             if (!newExportProgressNonNull) {
                 THROW_ERROR_EXCEPTION("Export task result is missing new export progress without any errors");

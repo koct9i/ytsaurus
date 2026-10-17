@@ -41,6 +41,7 @@ import yt.yson as yson
 import pytest
 from flaky import flaky
 from collections import Counter
+from contextlib import contextmanager
 import time
 import random
 import string
@@ -710,25 +711,31 @@ class DynamicTablesSingleCellBase(DynamicTablesBase):
 
         table_profiling = self._get_table_profiling("//tmp/t")
 
-        def _check(expected_tag, expected_value, missing_tag=None, missing_value=None):
+        def _check(expected_tags, missing_tags=None):
             insert_rows("//tmp/t", [{"key": 0, "value": "0"}])
-            if not table_profiling.has_projections_with_tags("commit/row_count", {expected_tag: expected_value}):
+            if not table_profiling.has_projections_with_tags("commit/row_count", expected_tags):
                 return False
-            if missing_tag is not None and \
-                    table_profiling.has_projections_with_tags("commit/row_count", {missing_tag: missing_value}):
+            if missing_tags is not None and \
+                    table_profiling.has_projections_with_tags("commit/row_count", missing_tags):
                 return False
             return True
 
-        wait(lambda: _check("table_path", "//tmp/t"), sleep_backoff=0.1)
+        wait(lambda: _check({"table_path": "//tmp/t"}), sleep_backoff=0.1)
 
         set("//sys/@config/tablet_manager/dynamic_table_profiling_mode", "tag")
         set("//tmp/t/@profiling_tag", "custom_tag")
         remount_table("//tmp/t")
-        wait(lambda: _check("table_tag", "custom_tag", "table_path", "//tmp/t"), sleep_backoff=0.1)
+        wait(lambda: _check({"table_tag": "custom_tag"}, {"table_path": "//tmp/t"}), sleep_backoff=0.1)
+
+        update_nodes_dynamic_config({"profiling_tag_export_mode": "both"}, path="tablet_node")
+        wait(lambda: _check({"table_tag": "custom_tag", "table_path": "tag:custom_tag"}), sleep_backoff=0.1)
+
+        update_nodes_dynamic_config({"profiling_tag_export_mode": "table_path"}, path="tablet_node")
+        wait(lambda: _check({"table_path": "tag:custom_tag"}, {"table_tag": "custom_tag"}), sleep_backoff=0.1)
 
         set("//tmp/t/@profiling_mode", "path")
         remount_table("//tmp/t")
-        wait(lambda: _check("table_path", "//tmp/t", "table_tag", "custom_tag"), sleep_backoff=0.1)
+        wait(lambda: _check({"table_path": "//tmp/t"}, {"table_tag": "custom_tag"}), sleep_backoff=0.1)
 
     @authors("akozhikhov")
     def test_simple_profiling_mode_inheritance(self):
@@ -754,8 +761,10 @@ class DynamicTablesSingleCellBase(DynamicTablesBase):
         set("//tmp/t2/@profiling_mode", "tag")
         assert get("//tmp/t2/@profiling_mode") == "tag"
 
-    @authors("navasardianna")
+    @authors("ifsmirnov")
     def test_update_content_revision(self):
+        if self.USE_SEQUOIA:
+            pytest.skip("YT-29373: Sequoia content revision should be handled separately")
         set("//sys/@config/tablet_manager/update_table_content_revision_on_heartbeat", True)
 
         sync_create_cells(1)
@@ -768,17 +777,23 @@ class DynamicTablesSingleCellBase(DynamicTablesBase):
         driver = get_driver(1 if self.NUM_SECONDARY_MASTER_CELLS > 0 else 0)
         table_id = get("//tmp/t/@id")
 
+        for i in range(0, 3):
+            # Waiting for all content revision updates to reach the master.
+            time.sleep(2)
+            old_content_revision_native = get(f"#{table_id}/@content_revision")
+            old_content_revision_external = get(f"#{table_id}/@content_revision", driver=driver)
+            insert_rows("//tmp/t", [{"key": i, "value": "0"}])
+            wait(lambda: get(f"#{table_id}/@content_revision") != old_content_revision_native)
+            wait(lambda: get(f"#{table_id}/@content_revision", driver=driver) != old_content_revision_external)
+
         # Waiting for all content revision updates to reach the master.
         time.sleep(2)
 
-        for i in range(0, 3):
-            old_content_revision = get(f"#{table_id}/@content_revision", driver=driver)
-            insert_rows("//tmp/t", [{"key": i, "value": "0"}])
-            wait(lambda: get(f"#{table_id}/@content_revision", driver=driver) != old_content_revision)
-
-        content_revision = get(f"#{table_id}/@content_revision", driver=driver)
+        content_revision_native = get(f"#{table_id}/@content_revision")
+        content_revision_external = get(f"#{table_id}/@content_revision", driver=driver)
         time.sleep(3)
-        assert get(f"#{table_id}/@content_revision", driver=driver) == content_revision
+        assert get(f"#{table_id}/@content_revision") == content_revision_native
+        assert get(f"#{table_id}/@content_revision", driver=driver) == content_revision_external
 
     @authors("akozhikhov")
     def test_inherited_profiling_mode_without_tag(self):
@@ -1395,7 +1410,6 @@ class TestDynamicTablesSingleCell(DynamicTablesSingleCellBase):
         assert bundle_controller_config == get(config_path, authenticated_user="looser212")
 
     @authors("danilalexeev")
-    @not_implemented_in_sequoia
     def test_mount_permission_denied_by_ancestor(self):
         sync_create_cells(1)
         create("map_node", "//tmp/d")
@@ -4006,6 +4020,99 @@ class TestDynamicTablesSingleCell(DynamicTablesSingleCellBase):
         set("//sys/tablet_cell_bundles/default/@options/changelog_account", "foo")
         wait(_check)
 
+    HEALTH_HISTORY_MAX_SIZE_CONFIG_PATH = "//sys/@config/cell_manager/cell_health_history_max_size"
+    HEALTH_HISTORY_EXPIRATION_TIME_CONFIG_PATH = "//sys/@config/cell_manager/cell_health_history_expiration_time"
+
+    def _prepare_health_history_cell(self):
+        set(self.HEALTH_HISTORY_MAX_SIZE_CONFIG_PATH, 100)
+        set(self.HEALTH_HISTORY_EXPIRATION_TIME_CONFIG_PATH, 7 * 24 * 60 * 60 * 1000)
+        for node in ls("//sys/tablet_nodes")[:2]:
+            set(f"//sys/cluster_nodes/{node}/@user_tags", ["health_history"])
+        create_tablet_cell_bundle("health_history", attributes={
+            "options": {"peer_count": 2},
+            "node_tag_filter": "health_history",
+        })
+        cell_id = sync_create_cells(1, tablet_cell_bundle="health_history")[0]
+        cell_path = f"//sys/tablet_cells/{cell_id}"
+        wait(lambda: get(f"{cell_path}/@health") == "good")
+        set(self.HEALTH_HISTORY_MAX_SIZE_CONFIG_PATH, 0)
+        wait(lambda: get(f"{cell_path}/@health_history") == [])
+        set(self.HEALTH_HISTORY_MAX_SIZE_CONFIG_PATH, 100)
+        return cell_path
+
+    @contextmanager
+    def _tablet_cells_disabled_on_peer(self, cell_path, peer_id):
+        address = get(f"{cell_path}/@peers/{peer_id}/address")
+        disable_tablet_cells_on_node(address, "test cell health history")
+        try:
+            yield
+        finally:
+            enable_tablet_cells_on_node(address)
+
+    def _wait_for_health_history(self, cell_path, expected_healths):
+        def check():
+            history = get(f"{cell_path}/@health_history")
+            return [item["health"] for item in history][-len(expected_healths):] == expected_healths
+
+        wait(check)
+        return get(f"{cell_path}/@health_history")
+
+    def _wait_for_last_health_history_item(self, cell_path, expected_health):
+        def check():
+            history = get(f"{cell_path}/@health_history")
+            return history and history[-1]["health"] == expected_health
+
+        wait(check)
+
+    @authors("fomasha")
+    def test_cell_health_history_transitions(self):
+        cell_path = self._prepare_health_history_cell()
+        leading_peer_id = get(f"{cell_path}/@leading_peer_id")
+        following_peer_id = 1 - leading_peer_id
+
+        with self._tablet_cells_disabled_on_peer(cell_path, following_peer_id):
+            wait(lambda: get(f"{cell_path}/@health") == "degraded")
+            self._wait_for_health_history(cell_path, ["degraded"])
+
+            with self._tablet_cells_disabled_on_peer(cell_path, leading_peer_id):
+                wait(lambda: get(f"{cell_path}/@health") == "failed")
+                self._wait_for_health_history(cell_path, ["degraded", "failed"])
+
+        wait(lambda: get(f"{cell_path}/@health") == "good")
+        wait(lambda: get(f"{cell_path}/@health_history")[-1]["health"] == "good")
+        history = get(f"{cell_path}/@health_history")
+        healths = [item["health"] for item in history]
+        assert any(
+            healths[index:index + 2] == ["degraded", "failed"]
+            for index in range(len(healths) - 1)
+        )
+        assert healths[-1] == "good"
+        assert all(lhs["time"] < rhs["time"] for lhs, rhs in zip(history, history[1:]))
+
+    @authors("fomasha")
+    def test_cell_health_history_limits(self):
+        cell_path = self._prepare_health_history_cell()
+        set(self.HEALTH_HISTORY_MAX_SIZE_CONFIG_PATH, 2)
+
+        with self._tablet_cells_disabled_on_peer(cell_path, get(f"{cell_path}/@leading_peer_id")):
+            wait(lambda: get(f"{cell_path}/@health") == "failed")
+            self._wait_for_last_health_history_item(cell_path, "failed")
+        wait(lambda: get(f"{cell_path}/@health") == "good")
+        self._wait_for_last_health_history_item(cell_path, "good")
+
+        with self._tablet_cells_disabled_on_peer(cell_path, get(f"{cell_path}/@leading_peer_id")):
+            wait(lambda: get(f"{cell_path}/@health") == "failed")
+            self._wait_for_last_health_history_item(cell_path, "failed")
+            history = get(f"{cell_path}/@health_history")
+            assert len(history) == 2
+
+            set(self.HEALTH_HISTORY_EXPIRATION_TIME_CONFIG_PATH, 0)
+            oldest_item_time = history[0]["time"]
+            wait(lambda: all(
+                item["time"] != oldest_item_time
+                for item in get(f"{cell_path}/@health_history")
+            ))
+
 
 ##################################################################
 
@@ -4071,7 +4178,6 @@ class TestDynamicTablesAvailability(DynamicTablesBase):
         with self.CellsDisabled(clusters=["primary"], tablet_bundles=[bundle_name]):
             with raises_yt_error("Tablet cell bundle health subrequest failed"):
                 check_cluster_liveness(check_tablet_cell_bundle=bundle_name)
-
 
 ##################################################################
 
@@ -4299,6 +4405,58 @@ class TestDynamicTablesSequoia(TestDynamicTablesShardedTx):
     }
 
 
+class TestDynamicTablesSequoiaAndMasterJournalReplicas(TestDynamicTablesMulticell):
+    ENABLE_MULTIDAEMON = False  # There are component restarts.
+    USE_SEQUOIA = True
+
+    DELTA_DYNAMIC_MASTER_CONFIG = {
+        "chunk_manager": {
+            "replica_approve_timeout": 5000,
+            "sequoia_chunk_replicas": {
+                "enable": True,
+                "enable_sequoia_chunk_refresh": True,
+                "schedule_chunk_seal_in_sequoia_refresh": True,
+                "sequoia_chunk_refresh_period": 100,
+                "batch_chunk_confirmation": True,
+                "journal_chunk_replicas": {
+                    "store_in_sequoia": True,
+                    "replicas_percentage": 100,
+                    "fetch_replicas_from_sequoia": True,
+                    "store_sequoia_replicas_on_master": True,
+                    "store_sequoia_replicas_on_master_percentage": 100,
+                    "validate_sequoia_replicas_fetch": True,
+                    "allow_extra_master_replicas_during_validation": False,
+                },
+            },
+        },
+    }
+
+
+class TestDynamicTablesOnlySequoiaJournalReplicas(TestDynamicTablesSequoiaAndMasterJournalReplicas):
+    ENABLE_MULTIDAEMON = False  # There are component restarts.
+
+    DELTA_DYNAMIC_MASTER_CONFIG = {
+        "chunk_manager": {
+            "replica_approve_timeout": 5000,
+            "sequoia_chunk_replicas": {
+                "enable": True,
+                "enable_sequoia_chunk_refresh": True,
+                "schedule_chunk_seal_in_sequoia_refresh": True,
+                "sequoia_chunk_refresh_period": 100,
+                "batch_chunk_confirmation": True,
+                "journal_chunk_replicas": {
+                    "store_in_sequoia": True,
+                    "replicas_percentage": 100,
+                    "fetch_replicas_from_sequoia": True,
+                    "store_sequoia_replicas_on_master": False,
+                    "process_removed_sequoia_replicas_on_master": False,
+                    "validate_sequoia_replicas_fetch": False,
+                },
+            },
+        },
+    }
+
+
 ##################################################################
 
 
@@ -4439,11 +4597,17 @@ class TestTabletOrchid(DynamicTablesBase):
         actual = lookup_rows("//tmp/t", [{"key": i} for i in range(100, 200, 2)], use_lookup_cache=True)
         assert_items_equal(actual, expected)
 
-        def check_zero_passive():
+        # NB: @chunk_ids appears at the master before the node adds the chunk store and its backing
+        # store; passive memory is already zero in that window, so it alone is not a valid barrier.
+        def check_flush_applied_at_node():
             memory_stats = get_stats()
-            return memory_stats["total"]["tablet_dynamic"]["passive"] == 0
+            total = memory_stats["total"]
+            return (
+                total["tablet_dynamic"]["passive"] == 0 and
+                total["tablet_dynamic"]["backing"] > 0 and
+                total["tablet_static"]["usage"] > 0)
 
-        wait(check_zero_passive)
+        wait(check_flush_applied_at_node)
 
         memory_stats = get_stats()
         total = memory_stats["total"]
@@ -4568,3 +4732,98 @@ class TestDynamicTablesHydraPersistenceMigrationPortal(TestDynamicTablesMulticel
 
         # Should not fail.
         sync_remove_tablet_cells([cell_id])
+
+
+##################################################################
+
+
+class TestTwoPhaseTableAlter(DynamicTablesBase):
+    ENABLE_MULTIDAEMON = True
+
+    DELTA_DRIVER_CONFIG = {"use_two_phase_dynamicity_alter": True}
+
+    @authors("ifsmirnov")
+    @pytest.mark.parametrize("is_sorted", [True, False])
+    def test_alter_dynamicity(self, is_sorted):
+        key_schema = {"name": "key", "type": "int64"}
+        if is_sorted:
+            key_schema["sort_order"] = "ascending"
+
+        schema = make_schema(
+            [
+                key_schema,
+                {"name": "value", "type": "string"},
+            ],
+            strict=True,
+            unique_keys=is_sorted,
+        )
+        create("table", "//tmp/t", attributes={"schema": schema})
+
+        if self.USE_SEQUOIA:
+            with raises_yt_error("is not supported for Sequoia table"):
+                alter_table("//tmp/t", dynamic=True)
+            return
+
+        transaction_id = start_transaction()
+        with raises_yt_error("Cannot alter table dynamicity in transaction"):
+            alter_table("//tmp/t", dynamic=True, tx=transaction_id)
+        abort_transaction(transaction_id)
+
+        with raises_yt_error("Only .*dynamic.* can be specified for two-phase table alter"):
+            alter_table("//tmp/t", dynamic=True, schema=schema)
+
+        with raises_yt_error("Only .*dynamic.* can be specified for two-phase table alter"):
+            alter_table("//tmp/t", dynamic=True, upstream_replica_id="1-2-3-4")
+
+        alter_table("//tmp/t", dynamic=True)
+        assert get("//tmp/t/@dynamic")
+
+        sync_create_cells(1)
+        sync_mount_table("//tmp/t")
+        assert get("//tmp/t/@tablet_state") == "mounted"
+
+        if not is_sorted:
+            sync_unmount_table("//tmp/t")
+            alter_table("//tmp/t", dynamic=False)
+            assert not get("//tmp/t/@dynamic")
+
+
+class TestTwoPhaseTableAlterMulticell(TestTwoPhaseTableAlter):
+    NUM_SECONDARY_MASTER_CELLS = 2
+
+    MASTER_CELL_DESCRIPTORS = {
+        "11": {"roles": ["chunk_host"]},
+        "12": {"roles": ["chunk_host"]},
+    }
+
+
+class TestTwoPhaseTableAlterRpcProxy(TestTwoPhaseTableAlter):
+    DRIVER_BACKEND = "rpc"
+    ENABLE_RPC_PROXY = True
+
+    DELTA_RPC_PROXY_CONFIG = {
+        "cluster_connection": {
+            "use_two_phase_dynamicity_alter": True,
+        },
+    }
+
+
+class TestTwoPhaseTableAlterPortal(TestTwoPhaseTableAlterMulticell):
+    ENABLE_TMP_PORTAL = True
+
+    MASTER_CELL_DESCRIPTORS = {
+        "11": {"roles": ["chunk_host", "cypress_node_host"]},
+        "12": {"roles": ["chunk_host"]},
+    }
+
+
+class TestTwoPhaseTableAlterSequoia(TestTwoPhaseTableAlterMulticell):
+    USE_SEQUOIA = True
+    ENABLE_CYPRESS_TRANSACTIONS_IN_SEQUOIA = True
+    ENABLE_TMP_ROOTSTOCK = True
+
+    MASTER_CELL_DESCRIPTORS = {
+        "10": {"roles": ["cypress_node_host", "sequoia_node_host"]},
+        "11": {"roles": ["chunk_host"]},
+        "12": {"roles": ["chunk_host", "sequoia_node_host"]},
+    }

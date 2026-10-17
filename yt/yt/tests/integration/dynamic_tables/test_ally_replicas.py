@@ -114,8 +114,8 @@ class TestAllyReplicas(YTEnvSetup):
             set_node_banned(node, False)
 
     @authors("ifsmirnov")
+    @pytest.mark.skip(reason="YT-15097")
     def test_ally_replicas_disabled(self):
-        pytest.skip("YT-15097")
         self._create_table("//tmp/t")
         rows = [{"a": "b"}]
         write_table("//tmp/t", rows)
@@ -182,20 +182,6 @@ class TestAllyReplicas(YTEnvSetup):
         _unban_any_node(chunk_id)
 
         assert not banned_nodes
-
-
-# COMPAT(danilalexeev): YT-23781.
-class TestAllyReplicasOldHeartbeats(TestAllyReplicas):
-    ENABLE_MULTIDAEMON = True
-    DELTA_DYNAMIC_MASTER_CONFIG = {
-        "chunk_manager": {
-            "data_node_tracker": {
-                "enable_per_location_full_heartbeats": False,
-                "enable_validation_full_heartbeats": False,
-            },
-        }
-    }
-
 
 ##################################################################
 

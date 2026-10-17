@@ -6,6 +6,7 @@
 
 #include <yt/yt/core/ytree/public.h>
 
+#include <yt/yt/core/yson/forwarding_consumer.h>
 #include <yt/yt/core/yson/protobuf_interop.h>
 
 #include <google/protobuf/port.h>
@@ -15,6 +16,15 @@ namespace NYT::NOrm::NAttributes {
 ////////////////////////////////////////////////////////////////////////////////
 
 std::string RandomString(int length, TStringBuf charset);
+
+////////////////////////////////////////////////////////////////////////////////
+
+bool IsYsonStringField(const NProtoBuf::FieldDescriptor* fieldDescriptor);
+void ValidateYsonString(TStringBuf value);
+
+const NProtoBuf::FieldDescriptor* FindYsonStringFieldDescriptor(
+    const NYson::TProtobufElement& rootElement,
+    NYPath::TYPathBuf path);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -35,9 +45,18 @@ NYTree::INodePtr ConvertProtobufToNode(
     TStringBuf payload,
     const NYson::TProtobufParserOptions& options = {});
 
-// Like ConvertProtobufToNode but works with any TProtobufElement, not just message/attribute dictionary elements.
-// Repeated, map, and any elements are not supported.
+// Converts arbitrary protobuf elements; map elements are not supported.
+// Any and repeated-of-any require yson_string semantics.
 NYTree::INodePtr ConvertProtobufElementToNode(
+    const NYson::TProtobufElement& element,
+    const TWireString& wireStringPayload,
+    const NYson::TProtobufParserOptions& options = {});
+NYTree::INodePtr ConvertProtobufElementToNode(
+    const NYson::TProtobufElement& element,
+    const TWireString& wireStringPayload,
+    const NProtoBuf::FieldDescriptor* fieldDescriptor,
+    const NYson::TProtobufParserOptions& options = {});
+NYTree::INodePtr ConvertYsonStringProtobufElementToNode(
     const NYson::TProtobufElement& element,
     const TWireString& wireStringPayload,
     const NYson::TProtobufParserOptions& options = {});
@@ -58,6 +77,30 @@ std::unique_ptr<NYson::IYsonConsumer> CreateAttributesDetectingConsumer(std::fun
 std::unique_ptr<NYson::IYsonConsumer> CreateAttributesRemovingConsumer(
     NYson::IYsonConsumer* underlying,
     std::function<void()> reporter = {});
+
+////////////////////////////////////////////////////////////////////////////////
+
+class TIntEnumToStringYsonConsumer
+    : public NYson::TForwardingYsonConsumer
+{
+public:
+    TIntEnumToStringYsonConsumer(
+        NYson::IYsonConsumer* underlying,
+        const NYson::TProtobufEnumType* enumType);
+    TIntEnumToStringYsonConsumer(
+        NYson::IYsonConsumer* underlying,
+        const NYson::TProtobufElement& enumElement);
+
+private:
+    NYson::IYsonConsumer* const Underlying_;
+    const NYson::TProtobufEnumType* const EnumType_;
+
+    void OnMyInt64Scalar(i64 value) override;
+    void OnMyEntity() override;
+    void OnMyBeginList() override;
+    void OnMyListItem() override;
+    void OnMyEndList() override;
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 

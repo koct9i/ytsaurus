@@ -6,6 +6,7 @@
 #include "job_prober_service.h"
 #include "job_tracker_service.h"
 #include "private.h"
+#include "push_based_shuffle_service.h"
 
 #include <yt/yt/server/lib/admin/admin_service.h>
 
@@ -139,7 +140,7 @@ void TBootstrap::DoRun()
 
 void TBootstrap::DoInitialize()
 {
-    YT_LOG_INFO("Starting controller agent");
+    YT_TLOG_INFO("Starting controller agent");
 
     NNative::TConnectionOptions connectionOptions;
     connectionOptions.ConnectionInvoker = GetConnectionInvoker();
@@ -215,18 +216,25 @@ void TBootstrap::DoInitialize()
     RpcServer_->RegisterService(CreateControllerAgentService(this));
     RpcServer_->RegisterService(CreateJobProberService(this));
     RpcServer_->RegisterService(CreateJobTrackerService(this));
+    RpcServer_->RegisterService(CreatePushBasedShuffleService(
+        ControllerAgent_->GetPushBasedShuffleRegistry(),
+        ControllerAgent_->GetPushBasedShuffleInvoker(),
+        NativeAuthenticator_));
 }
 
 void TBootstrap::DoStart()
 {
-    YT_LOG_INFO("Listening for HTTP requests (Port: %v)", Config_->MonitoringPort);
+    YT_TLOG_INFO("Listening for HTTP requests")
+        .With("Port", Config_->MonitoringPort);
     HttpServer_->Start();
     if (HttpsServer_) {
-        YT_LOG_INFO("Listening for HTTPS requests (Port: %v)", HttpsServer_->GetAddress().GetPort());
+        YT_TLOG_INFO("Listening for HTTPS requests")
+            .With("Port", HttpsServer_->GetAddress().GetPort());
         HttpsServer_->Start();
     }
 
-    YT_LOG_INFO("Listening for RPC requests (Port: %v)", Config_->RpcPort);
+    YT_TLOG_INFO("Listening for RPC requests")
+        .With("Port", Config_->RpcPort);
     RpcServer_->Configure(Config_->RpcServer);
     RpcServer_->Start();
 }

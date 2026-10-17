@@ -57,11 +57,12 @@ type TransactionOptions struct {
 	SuppressUpstreamSync               bool `http:"suppress_upstream_sync"`
 }
 
-// AccessTrackingOptions suppresses update of "modification_time", "access_time" and
-// "access_counter" cypress attributes.
+// AccessTrackingOptions suppresses update of "modification_time", "access_time",
+// "access_counter" cypress attributes and renewal of node's "expiration_timeout".
 type AccessTrackingOptions struct {
-	SuppressAccessTracking       bool `http:"suppress_access_tracking"`
-	SuppressModificationTracking bool `http:"suppress_modification_tracking"`
+	SuppressAccessTracking           bool `http:"suppress_access_tracking"`
+	SuppressModificationTracking     bool `http:"suppress_modification_tracking"`
+	SuppressExpirationTimeoutRenewal bool `http:"suppress_expiration_timeout_renewal"`
 }
 
 // MutatingOptions enable safe retries of cypress commands in the presence of network errors.
@@ -124,6 +125,8 @@ type CreateNodeOptions struct {
 	Recursive      bool `http:"recursive"`
 	IgnoreExisting bool `http:"ignore_existing"`
 	Force          bool `http:"force"`
+	// Requires IgnoreExisting.
+	IgnoreTypeMismatch bool `http:"ignore_type_mismatch"`
 
 	Attributes map[string]any `http:"attributes,omitnil"`
 
@@ -547,6 +550,52 @@ type ReadTableOptions struct {
 	*AccessTrackingOptions
 }
 
+type PartitionTablesOptions struct {
+	DataWeightPerPartition int64          `http:"data_weight_per_partition"`
+	MaxPartitionCount      *int           `http:"max_partition_count,omitnil"`
+	PartitionMode          *PartitionMode `http:"partition_mode,omitnil"`
+	EnableCookies          *bool          `http:"enable_cookies,omitnil"`
+
+	*TransactionOptions
+	*AccessTrackingOptions
+}
+
+type PartitionStatistics struct {
+	ChunkCount         int64 `yson:"chunk_count"`
+	DataWeight         int64 `yson:"data_weight"`
+	RowCount           int64 `yson:"row_count"`
+	ValueCount         int64 `yson:"value_count"`
+	CompressedDataSize int64 `yson:"compressed_data_size"`
+}
+
+type TablePartition struct {
+	TableRanges         []ypath.Rich        `yson:"table_ranges"`
+	Cookie              []byte              `yson:"cookie,omitempty"`
+	AggregateStatistics PartitionStatistics `yson:"aggregate_statistics"`
+}
+
+type MultiTablePartitions struct {
+	Partitions []TablePartition `yson:"partitions"`
+}
+
+type ReadTablePartitionOptions struct {
+	// Format is YSON-serializable output format. If not specified "yson" will be used.
+	Format any `http:"output_format,omitnil"`
+
+	// TableSchema is used by the client-side Skiff decoder for strongly typed
+	// complex values. It is not sent to the server.
+	TableSchema *schema.Schema
+
+	*TransactionOptions
+	*AccessTrackingOptions
+}
+
+// TablePartitionReader is interface for reading a table partition.
+// It embeds TableReader for future extensibility.
+type TablePartitionReader interface {
+	TableReader
+}
+
 type TableClient interface {
 	// WriteTable opens low-level table writer. Use yt.WriteTable() function instead of calling this method directly.
 	//
@@ -569,6 +618,26 @@ type TableClient interface {
 		path ypath.YPath,
 		options *ReadTableOptions,
 	) (r TableReader, err error)
+
+	// PartitionTables splits a set of tables into partitions for distributed reading.
+	//
+	// http:verb:"partition_tables"
+	// http:params:"paths"
+	PartitionTables(
+		ctx context.Context,
+		paths []ypath.YPath,
+		options *PartitionTablesOptions,
+	) (partitions MultiTablePartitions, err error)
+
+	// ReadTablePartition reads a table partition by cookie obtained from PartitionTables.
+	//
+	// http:verb:"read_table_partition"
+	// http:params:"cookie"
+	ReadTablePartition(
+		ctx context.Context,
+		cookie []byte,
+		options *ReadTablePartitionOptions,
+	) (r TablePartitionReader, err error)
 }
 
 type StartOperationOptions struct {
@@ -1770,6 +1839,7 @@ type StartQueryOptions struct {
 	Secrets []Secret `http:"secrets,omitnil"`
 
 	*QueryTrackerOptions
+	*MutatingOptions
 }
 
 type AbortQueryOptions struct {
@@ -1953,6 +2023,7 @@ type Client interface {
 	FileClient
 	TableClient
 	DistributedWriteClient
+	DistributedWriteFileClient
 
 	// BeginTx creates new tx.
 	//
@@ -2080,6 +2151,12 @@ type FinishDistributedWriteSessionOptions struct{}
 type TableFragmentWriterOptions struct {
 	TableWriter any `http:"table_writer"`
 
+	// Format is YSON-serializable input format. If not specified "yson" will be used.
+	//
+	// Possible values:
+	//   - skiff.Format with a single *skiff.Schema (see skiff.FromTableSchema).
+	Format any `http:"input_format,omitnil"`
+
 	MaxRowBufferSize *int64 `http:"max_row_buffer_size,omitnil"`
 }
 
@@ -2129,4 +2206,100 @@ type DistributedWriteClient interface {
 		cookie WriteFragmentCookie,
 		options *TableFragmentWriterOptions,
 	) (w TableFragmentWriter, err error)
+}
+
+// Distributed file write session API.
+//
+// Works like the distributed table write API; FinishDistributedWriteFileSession concatenates
+// the fragments in the order of the passed results. See
+// https://ytsaurus.tech/docs/en/api/commands#start_distributed_write_file_session
+
+// DistributedWriteFileSession is an opaque signed descriptor of a distributed file write session.
+type DistributedWriteFileSession struct {
+	Header    string `yson:"header"`
+	Signature []byte `yson:"signature"`
+	Payload   []byte `yson:"payload"`
+}
+
+// WriteFileFragmentCookie is an opaque signed token that authorizes a participant to
+// write file fragments within a session. One cookie may be used for several fragments.
+type WriteFileFragmentCookie struct {
+	Header    string `yson:"header"`
+	Signature []byte `yson:"signature"`
+	Payload   []byte `yson:"payload"`
+}
+
+// WriteFileFragmentResult is an opaque signed result of a single WriteFileFragment call.
+type WriteFileFragmentResult struct {
+	Header    string `yson:"header"`
+	Signature []byte `yson:"signature"`
+	Payload   []byte `yson:"payload"`
+}
+
+// DistributedWriteFileSessionWithCookies is the result of StartDistributedWriteFileSession.
+type DistributedWriteFileSessionWithCookies struct {
+	Session DistributedWriteFileSession `yson:"session"`
+	Cookies []WriteFileFragmentCookie   `yson:"cookies"`
+}
+
+type StartDistributedWriteFileSessionOptions struct {
+	// CookieCount is the number of participant cookies to generate.
+	CookieCount *int `http:"cookie_count,omitnil"`
+	// SessionTimeout is how long the session lives without a ping (akin to a transaction timeout).
+	SessionTimeout *yson.Duration `http:"session_timeout,omitnil"`
+
+	*TransactionOptions
+}
+
+type PingDistributedWriteFileSessionOptions struct{}
+
+type FinishDistributedWriteFileSessionOptions struct{}
+
+type FileFragmentWriterOptions struct{}
+
+// FileFragmentWriter writes a single file fragment within a distributed write session.
+//
+// After a successful Close, Result returns the signed fragment result that must be
+// handed back to the coordinator for FinishDistributedWriteFileSession.
+type FileFragmentWriter interface {
+	io.WriteCloser
+
+	// Result returns the signed write fragment result. It is valid only after Close returns successfully.
+	Result() WriteFileFragmentResult
+}
+
+// DistributedWriteFileClient provides the distributed file write API.
+type DistributedWriteFileClient interface {
+	// http:verb:"start_distributed_write_file_session"
+	// http:params:"path"
+	StartDistributedWriteFileSession(
+		ctx context.Context,
+		path ypath.YPath,
+		options *StartDistributedWriteFileSessionOptions,
+	) (result DistributedWriteFileSessionWithCookies, err error)
+
+	// http:verb:"ping_distributed_write_file_session"
+	// http:params:"session"
+	PingDistributedWriteFileSession(
+		ctx context.Context,
+		session DistributedWriteFileSession,
+		options *PingDistributedWriteFileSessionOptions,
+	) (err error)
+
+	// http:verb:"finish_distributed_write_file_session"
+	// http:params:"session","results"
+	FinishDistributedWriteFileSession(
+		ctx context.Context,
+		session DistributedWriteFileSession,
+		results []WriteFileFragmentResult,
+		options *FinishDistributedWriteFileSessionOptions,
+	) (err error)
+
+	// http:verb:"write_file_fragment"
+	// http:params:"cookie"
+	WriteFileFragment(
+		ctx context.Context,
+		cookie WriteFileFragmentCookie,
+		options *FileFragmentWriterOptions,
+	) (w FileFragmentWriter, err error)
 }

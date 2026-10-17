@@ -4,10 +4,10 @@ from yt.common import YtError, wait
 
 from yt_commands import (
     create, create_secondary_index, create_table_replica, create_table_collocation, create_user,
-    authors, make_ace, set, get, exists, remove, copy, get_driver, alter_table,
+    authors, make_ace, set, get, exists, remove, copy, move, get_driver, alter_table,
     sync_create_cells, sync_mount_table, sync_unmount_table, sync_enable_table_replica,
     select_rows, explain_query, insert_rows, delete_rows,
-    commit_transaction, start_transaction,
+    commit_transaction, start_transaction, abort_transaction,
     alter_replication_card, migrate_replication_cards,
     sorted_dicts, raises_yt_error,
 )
@@ -99,6 +99,12 @@ def prepend_hash(schema):
 
     return [hash_column] + schema
 
+
+class TAny:
+    def __eq__(self, other):
+        return True
+
+
 ##################################################################
 
 
@@ -110,6 +116,42 @@ class TestSecondaryIndexBase(DynamicTablesBase):
     MASTER_CELL_DESCRIPTORS = {
         "11": {"roles": ["chunk_host"]},
         "12": {"roles": ["chunk_host"]},
+    }
+
+    DELTA_NODE_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_MASTER_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_RPC_PROXY_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_HTTP_PROXY_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_DRIVER_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_CYPRESS_PROXY_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
     }
 
     def setup_method(self, method):
@@ -223,6 +265,42 @@ class TestSecondaryIndexReplicatedBase(TestSecondaryIndexBase):
         "20": {"roles": ["transaction_coordinator"]},
         "21": {"roles": ["chunk_host", "cypress_node_host"]},
         "22": {"roles": ["chunk_host", "cypress_node_host"]},
+    }
+
+    DELTA_NODE_CONFIG_REMOTE_0 = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_MASTER_CONFIG_REMOTE_0 = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_RPC_PROXY_CONFIG_REMOTE_0 = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_HTTP_PROXY_CONFIG_REMOTE_0 = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_DRIVER_CONFIG_REMOTE_0 = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
+
+    DELTA_CYPRESS_PROXY_CONFIG_REMOTE_0 = {
+        "solomon_exporter": {
+            "enable": False
+        }
     }
 
     def setup_method(self, method):
@@ -485,6 +563,40 @@ class TestSecondaryIndexMaster(TestSecondaryIndexBase):
         assert not exists("//tmp/table_copy/@secondary_indices")
         copy("//tmp/secondary", "//tmp/secondary_copy", allow_secondary_index_abandonment=True)
         assert not exists("//tmp/secondary_copy/@index_to")
+
+    @authors("sabdenovch")
+    def test_move_within_cypress_cell(self):
+        if self.NUM_REMOTE_CLUSTERS:
+            pytest.skip("Replicated tables are not movable")
+        self._create_map_node("//tmp/folder")
+        self._create_map_node("//tmp/to")
+        _, _, index_id, _ = self._create_basic_tables(
+            table_path="//tmp/folder/table",
+            index_path="//tmp/folder/index")
+
+        set(f"#{index_id}/@labubu", 67)
+
+        def check_invariants_and_get_new_index_id(old_index_id, table_path, index_path):
+            assert not exists(f"#{old_index_id}")
+            moved_secondary_indices = get(f"{table_path}/@secondary_indices")
+            assert len(moved_secondary_indices) == 1
+            index_id = next(iter(moved_secondary_indices))
+            assert index_id == get(f"{index_path}/@index_to/index_id")
+            return index_id
+
+        move("//tmp/folder", "//tmp/to/folder")
+        index_id = check_invariants_and_get_new_index_id(index_id, "//tmp/to/folder/table", "//tmp/to/folder/index")
+        move("//tmp/to/folder/table", "//tmp/table")
+        index_id = check_invariants_and_get_new_index_id(index_id, "//tmp/table", "//tmp/to/folder/index")
+        move("//tmp/to/folder/index", "//tmp/index")
+        index_id = check_invariants_and_get_new_index_id(index_id, "//tmp/table", "//tmp/index")
+
+        assert get(f"#{index_id}/@labubu") == 67
+
+        tx = start_transaction()
+        with raises_yt_error("Cannot move table"):
+            move("//tmp/table", "//tmp/fable", tx=tx)
+        abort_transaction(tx)
 
     @authors("sabdenovch")
     def test_evaluated(self):
@@ -833,6 +945,12 @@ class TestSecondaryIndexSelect(TestSecondaryIndexBase):
 class TestSecondaryIndexModifications(TestSecondaryIndexBase):
     ENABLE_MULTIDAEMON = True
     NUM_TEST_PARTITIONS = 2
+
+    DELTA_NODE_CONFIG = {
+        "solomon_exporter": {
+            "enable": True
+        }
+    }
 
     def _insert_rows(self, rows, table="//tmp/table", **kwargs):
         insert_rows(table, rows, **kwargs)
@@ -1532,26 +1650,6 @@ class TestSecondaryIndexReplicatedSelect(TestSecondaryIndexReplicatedBase, TestS
             sorted_dicts([{"keyA": i, "keyB": f"key{i}", "valueA": i, "valueB": i % 2 == 0} for i in range(5)])
         )
 
-    @authors("sabdenovch")
-    def test_postpone_index_resolve(self):
-        self._create_table("//tmp/table", PRIMARY_SCHEMA)
-
-        create("table", "//tmp/index_table", driver=self.REPLICA_DRIVER, attributes={
-            "dynamic": True,
-            "schema": INDEX_ON_VALUE_SCHEMA,
-        })
-
-        self._sync_create_cells()
-        self._mount("//tmp/table")
-        sync_mount_table("//tmp/index_table", driver=self.REPLICA_DRIVER)
-
-        select_rows("* from [//tmp/table] with index [//tmp/index_table] I")
-
-        remove("//tmp/index_table", driver=self.REPLICA_DRIVER)
-
-        with raises_yt_error(code=yt_error_codes.ResolveErrorCode):
-            select_rows("* from [//tmp/table] with index [//tmp/index_table] I")
-
 
 ##################################################################
 
@@ -1575,6 +1673,12 @@ class TestSecondaryIndexModificationsOverRpc(TestSecondaryIndexModifications):
 @pytest.mark.enabled_multidaemon
 class TestSecondaryIndexChaosBase(ChaosTestBase, TestSecondaryIndexReplicatedBase):
     BUNDLE_NAME = "chaos_bundle"
+
+    DELTA_CHAOS_NODE_CONFIG = {
+        "solomon_exporter": {
+            "enable": False
+        }
+    }
 
     def setup_method(self, method):
         super(TestSecondaryIndexChaosBase, self).setup_method(method)
@@ -1693,25 +1797,31 @@ class TestChaosMetadata(TestSecondaryIndexChaosBase):
             "type": "replication",
             "table_paths": [table_path, index_path]
         })
-        alter_replication_card(self.table_to_replication_card[table_path], create_secondary_index=attributes)
 
-        assert self._get_replication_card(table_path)["secondary_indices"] == {
+        alter_replication_card(self.table_to_replication_card[table_path], create_secondary_index=attributes)
+        wait(lambda: self._get_replication_card(table_path)["state"] == "normal")
+
+        rc = self._get_replication_card(table_path)
+        assert rc["secondary_indices"] == {
             self.table_to_replication_card[index_path] : {
                 "kind": "full_sync",
                 "correspondence": "bijective",
                 "index_object_id": self.table_to_replication_card[index_path],
+                "backfill_timestamp": TAny()
             }
         }
+        assert "secondary_index_pending_transition" not in rc
 
-        with raises_yt_error("Cannot update replication card collocation, because replication card has secondary indices"):
+        with raises_yt_error("Cannot update replication card collocation, because replication card has present or pending secondary indices"):
             alter_replication_card(self.table_to_replication_card[table_path], replication_card_collocation_id="0-0-0-0")
 
-        with raises_yt_error("Cannot update replication card collocation, because replication card has secondary indices"):
+        with raises_yt_error("Cannot update replication card collocation, because replication card has present or pending secondary indices"):
             alter_replication_card(self.table_to_replication_card[index_path], replication_card_collocation_id="0-0-0-0")
 
         alter_replication_card(
             self.table_to_replication_card[table_path],
             destroy_secondary_index=self.table_to_replication_card[index_path])
+        wait(lambda: self._get_replication_card(table_path)["state"] == "normal")
 
         assert "secondary_indices" not in self._get_replication_card(table_path)
 
@@ -1759,4 +1869,5 @@ class TestChaosMetadata(TestSecondaryIndexChaosBase):
         # Alter might fail due to encountered migrating collocation or chaos channel misdirection.
         assert err[0].contains_text("Migrated before alter") or \
             err[0].contains_text("migrating") or \
-            err[0].contains_text("Replication card is not in \"normal\" state")
+            err[0].contains_text("Replication card is not in \"normal\" state") or \
+            err[0].contains_text("Replication card has been migrated")

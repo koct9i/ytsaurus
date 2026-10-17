@@ -12,7 +12,7 @@ To request access to a pool:
 2. Select the `ACL` tab.
 3. Click `Request permissions`, fill in the form, and click **Confirm**.
 
-![](../../../../images/pool-request-permissions.jpg){ .center }
+![](../../../../_images/pool-request-permissions.jpg){ .center }
 
 ### List of allowed pool actions { #allowed_pool_actions }
 
@@ -22,6 +22,19 @@ To request access to a pool:
 - To change user-defined pool attributes, you need the `write` permission on the pool (granted together with **Use** access on the parent pool).
 - To change all other pool attributes, you need the `administer` permission (only for {{product-name}} cluster administrators).
 - To manage operations in this pool and its descendants, you need the `manage` permission (managing operations means you can perform `suspend`, `resume`, and `update_operation_parameters` operations without being the operation's author).
+
+{% note warning "Limitation" %}
+
+The `manage` permission on a pool lets you change only the following parameters using the `update_operation_parameters` command:
+
+- `weight`;
+- `weight` and `resource_limits` in `scheduling_options_per_pool_tree`;
+- `scheduling_tag_filter`;
+- `controller_agent_tag`.
+
+To change other parameters, you need the `manage` permission on the operation itself; some parameters may require additional permissions. Specifically, the `manage` permission on a pool doesn't let you change the `pool` parameter and move an operation to another pool.
+
+{% endnote %}
 
 As an example, consider the `project-root` pool in the `{{pool-tree}}` pool tree.
 The required set of permissions for managing sub-pools is shown in the listing:
@@ -65,17 +78,17 @@ To create a sub-pool, navigate to the parent pool by clicking its name. Then cli
 
 An example of the pool creation form is shown in the figure.
 
-![](../../../../images/manage_pool_01.png)
+![](../../../../_images/manage_pool_01.png)
 
 To edit pool settings, click the pencil icon in the row with the pool name on the right side of the screen, as shown in the figure.
 
-![](../../../../images/manage_pool_04.png)
+![](../../../../_images/manage_pool_04.png)
 
 Editable pool settings are divided into groups. The figures show examples of general settings and guaranteed resources, respectively.
 
-![](../../../../images/manage_pool_02.png)
+![](../../../../_images/manage_pool_02.png)
 
-![](../../../../images/manage_pool_03.png)
+![](../../../../_images/manage_pool_03.png)
 
 In the `Resource Limits` section, you can set an upper limit for the pool, for example, to prevent the pool from using more than 100 CPU cores. By default, pools have no upper limit; the resources available to a pool are limited by the cluster's capacity.
 

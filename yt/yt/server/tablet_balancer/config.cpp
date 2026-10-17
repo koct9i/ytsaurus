@@ -2,7 +2,7 @@
 #include "private.h"
 
 #include <yt/yt/server/lib/tablet_balancer/config.h>
-#include <yt/yt/server/lib/tablet_balancer/parameterized_balancing_helpers.h>
+#include <yt/yt/server/lib/tablet_balancer/metrics_calculator.h>
 
 #include <yt/yt/ytlib/api/native/config.h>
 
@@ -83,11 +83,11 @@ void TTabletBalancerDynamicConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("fetch_tablet_cells_from_secondary_masters", &TThis::FetchTabletCellsFromSecondaryMasters)
         .Default(false);
+    registrar.Parameter("enable_parameterized_size_reshard", &TThis::EnableParameterizedSizeReshard)
+        .Default(false);
     registrar.Parameter("enable_parameterized_reshard_by_default", &TThis::EnableParameterizedReshardByDefault)
         .Default(false);
     registrar.Parameter("pick_reshard_pivot_keys", &TThis::PickReshardPivotKeys)
-        .Default(true);
-    registrar.Parameter("cancel_action_if_pick_pivot_keys_fails", &TThis::CancelActionIfPickPivotKeysFails)
         .Default(true);
     registrar.Parameter("enable_reshard_verbose_logging", &TThis::EnableReshardVerboseLogging)
         .Default(false);
@@ -205,6 +205,8 @@ void TBundleStateProviderConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("fetch_tablet_cells_from_secondary_masters", &TThis::FetchTabletCellsFromSecondaryMasters)
         .Default(false);
+    registrar.Parameter("use_internal_api", &TThis::UseInternalApi)
+        .Default(false);
     registrar.Parameter("use_statistics_reporter", &TThis::UseStatisticsReporter)
         .Default(false);
     registrar.Parameter("statistics_table_path", &TThis::StatisticsTablePath)
@@ -229,7 +231,7 @@ void TBundleStateProviderConfig::Register(TRegistrar registrar)
     registrar.Parameter("performance_counters_fetch_period", &TThis::PerformanceCountersFetchPeriod)
         .Default();
 
-    registrar.Parameter("chunk_invariants", &TThis::CheckInvariants)
+    registrar.Parameter("check_invariants", &TThis::CheckInvariants)
         .Default(true);
 }
 

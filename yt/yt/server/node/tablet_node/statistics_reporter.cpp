@@ -133,7 +133,7 @@ public:
     DEFINE_BYREF_RO_PROPERTY(TCounter, FailedTabletCount);
 
     DEFINE_BYREF_RO_PROPERTY(std::string, TracingSpan);
-    DEFINE_BYREF_RO_PROPERTY(std::string, LoggingTag);
+    DEFINE_BYREF_RO_PROPERTY(TLoggingTagList, LoggingTags);
 
     TStatisticsReporterContext(TStringBuf profilingPrefix, std::string loggingTag)
         : Profiler_(TabletNodeProfiler().WithPrefix(profilingPrefix))
@@ -143,7 +143,7 @@ public:
         , ProcessedTabletCount_(Profiler_.Counter("/processed_tablet_count"))
         , FailedTabletCount_(Profiler_.Counter("/failed_tablet_count"))
         , TracingSpan_(StatisticsReporterTag + "::" + loggingTag)
-        , LoggingTag_(std::move(loggingTag))
+        , LoggingTags_(TLoggingTagList().With("Stage", loggingTag))
     { }
 };
 
@@ -159,7 +159,7 @@ class TStatisticsReporter
 public:
     explicit TStatisticsReporter(IBootstrap* const bootstrap)
         : Bootstrap_(bootstrap)
-        , Logger(TabletNodeLogger().WithRawTag(StatisticsReporterTag))
+        , Logger(TabletNodeLogger().WithTag("Component", StatisticsReporterTag))
         , LoadContext_("/statistics_reporter/load", "Load")
         , ReportContext_("/statistics_reporter/report", "Report")
         , Config_(bootstrap->GetTabletNodeDynamicConfig()->StatisticsReporter)
@@ -167,7 +167,7 @@ public:
 
     void Start() override
     {
-        YT_LOG_DEBUG("Starting tablet statistics reporter");
+        YT_TLOG_DEBUG("Starting tablet statistics reporter");
 
         auto config = Config_.Acquire();
 
@@ -183,7 +183,7 @@ public:
 
     void Reconfigure(const TTabletNodeDynamicConfigPtr& config) override
     {
-        YT_LOG_DEBUG("Reconfiguring tablet statistics reporter");
+        YT_TLOG_DEBUG("Reconfiguring tablet statistics reporter");
 
         const auto& statisticsReporterConfig = config->StatisticsReporter;
 
@@ -228,7 +228,7 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG("Processing tablet statistics");
+        YT_TLOG_DEBUG("Processing tablet statistics");
 
         auto tablets = Bootstrap_->GetTabletSnapshotStore()->GetLatestTabletSnapshots();
 
@@ -254,14 +254,14 @@ private:
         }
 
         if (!iterationSuccessful) {
-            YT_LOG_DEBUG("Failed processing tablet statistics, will wait for duration (Duration: %v)",
-                config->ReportBackoffTime);
+            YT_TLOG_DEBUG("Failed processing tablet statistics, will wait for duration")
+                .With("Duration", config->ReportBackoffTime);
             TDelayedExecutor::WaitForDuration(config->ReportBackoffTime);
 
             return;
         }
 
-        YT_LOG_DEBUG("Finished processing tablet statistics");
+        YT_TLOG_DEBUG("Finished processing tablet statistics");
     }
 
     bool RunContextedIteration(
@@ -289,17 +289,16 @@ private:
             context.ProcessedTabletCount().Increment(processedTabletCount);
             context.FailedIterationCount().Increment(failedTabletCount);
 
-            YT_LOG_DEBUG("Finished tablet statistics processing iteration "
-                "(%v, ElapsedTime: %v, ProcessedTabletCount: %v, FailedTabletCount: %v)",
-                context.LoggingTag(),
-                elapsedTime,
-                processedTabletCount,
-                failedTabletCount);
+            YT_TLOG_DEBUG("Finished tablet statistics processing iteration")
+                .With(context.LoggingTags())
+                .With("ElapsedTime", elapsedTime)
+                .With("ProcessedTabletCount", processedTabletCount)
+                .With("FailedTabletCount", failedTabletCount);
         });
 
         try {
-            YT_LOG_DEBUG("Starting tablet statistics processing iteration (%v)",
-                context.LoggingTag());
+            YT_TLOG_DEBUG("Starting tablet statistics processing iteration")
+                .With(context.LoggingTags());
 
             for (int batchStartIndex = 0; batchStartIndex < ssize(tablets); batchStartIndex += config->MaxTabletsPerTransaction) {
                 int batchSize = std::min<int>(config->MaxTabletsPerTransaction, ssize(tablets) - batchStartIndex);
@@ -312,8 +311,9 @@ private:
 
             return true;
         } catch (const std::exception& ex) {
-            YT_LOG_ERROR(ex, "Tablet statistics processing iteration failed (%v)",
-                context.LoggingTag());
+            YT_TLOG_ERROR("Tablet statistics processing iteration failed")
+                .With(context.LoggingTags())
+                .With(ex);
             return false;
         }
     }
@@ -322,8 +322,8 @@ private:
         const TStatisticsReporterConfigPtr& config,
         TRange<TTabletSnapshotPtr> tablets)
     {
-        YT_LOG_DEBUG("Started reporting tablet statistics batch (TabletCount: %v)",
-            tablets.Size());
+        YT_TLOG_DEBUG("Started reporting tablet statistics batch")
+            .With("TabletCount", tablets.Size());
 
         auto rowBuffer = New<TRowBuffer>(TStatisticsReporterRowsBufferTag());
         auto* rows = rowBuffer->GetPool()->AllocateUninitialized<TUnversionedRow>(tablets.Size());
@@ -343,8 +343,8 @@ private:
         WaitFor(transaction->Commit())
             .ThrowOnError();
 
-        YT_LOG_DEBUG("Finished reporting tablet statistics batch (TabletCount: %v)",
-            tablets.Size());
+        YT_TLOG_DEBUG("Finished reporting tablet statistics batch")
+            .With("TabletCount", tablets.Size());
     }
 
     IUnversionedRowsetPtr LookupStatisticsRowset(
@@ -395,7 +395,7 @@ private:
         }
 
         auto timestampColumnIndex = schema->GetColumnIndexOrThrow(TimestampColumnPrefix + name);
-        auto measuringTime = TimestampToInstant(row[timestampColumnIndex].Data.Uint64).first;
+        auto measuringTime = TimestampToInstant(NTransactionClient::TTimestamp(row[timestampColumnIndex].Data.Uint64)).first;
 
         auto valueColumnIndex = schema->GetColumnIndexOrThrow(name);
 
@@ -403,9 +403,9 @@ private:
         if (valueNode->GetType() != ENodeType::List) {
             // It is expected behaviour after performance counters table reshard.
             if (valueNode->GetType() == ENodeType::Entity) {
-                YT_LOG_DEBUG("Table %Qv column %Qv is empty",
-                    config->TablePath,
-                    name);
+                YT_TLOG_DEBUG("Table column is empty")
+                    .With("TablePath", config->TablePath)
+                    .With("ColumnName", name);
 
                 return TEmaCounter<i64>(windowDurations);
             }
@@ -478,8 +478,8 @@ private:
         const TStatisticsReporterConfigPtr& config,
         TRange<TTabletSnapshotPtr> tablets)
     {
-        YT_LOG_DEBUG("Started loading tablet statistics batch (TabletCount: %v)",
-            tablets.size());
+        YT_TLOG_DEBUG("Started loading tablet statistics batch")
+            .With("TabletCount", tablets.size());
 
         auto rowset = LookupStatisticsRowset(config, tablets);
         auto rows = rowset->GetRows();
@@ -521,8 +521,8 @@ private:
             rowIndex += 1 + tablet->OriginatorTablets.size();
         }
 
-        YT_LOG_DEBUG("Finished loading tablet statistics batch (TabletCount: %v)",
-            tablets.size());
+        YT_TLOG_DEBUG("Finished loading tablet statistics batch")
+            .With("TabletCount", tablets.size());
     }
 };
 

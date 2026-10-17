@@ -51,7 +51,7 @@ void RunHydraTest(const std::string& configFile)
         config = New<TConfig>();
         config->Load(configNode);
     } catch (const std::exception& ex) {
-        THROW_ERROR_EXCEPTION("Error reading configuration") << ex;
+        THROW_ERROR_EXCEPTION("Error reading configuration").With(ex);
     }
 
     if (config->Logging) {
@@ -65,7 +65,9 @@ void RunHydraTest(const std::string& configFile)
     auto cellConfig = New<TCellConfig>();
     for (int i = 0; i < config->PeerCount; ++i) {
         bool voting = peerIndices[i] < config->VotingPeerCount;
-        YT_LOG_INFO("Peer created (PeerId: %v, Voting: %v)", i, voting);
+        YT_TLOG_INFO("Peer created")
+            .With("PeerId", i)
+            .With("Voting", voting);
         auto peerConfig = New<TCellPeerConfig>();
         peerConfig->Address = GetPeerAddress(i);
         peerConfig->Voting = voting;

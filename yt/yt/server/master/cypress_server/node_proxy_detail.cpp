@@ -46,6 +46,7 @@
 #include <yt/yt/ytlib/transaction_client/helpers.h>
 
 #include <yt/yt/ytlib/object_client/helpers.h>
+#include <yt/yt/ytlib/object_client/object_service_proxy.h>
 
 #include <yt/yt/ytlib/chunk_client/helpers.h>
 
@@ -98,25 +99,6 @@ namespace {
 constinit const auto Logger = CypressServerLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
-
-bool IsAccessLoggedMethod(const std::string& method)
-{
-    static const THashSet<std::string> methodsForAccessLog = {
-        "Lock",
-        "Unlock",
-        "GetKey",
-        "Get",
-        "Set",
-        "Remove",
-        "List",
-        "Exists",
-        "GetBasicAttributes",
-        "CheckPermission",
-        "LockCopyDestination",
-        "LockCopySource",
-    };
-    return methodsForAccessLog.contains(method);
-}
 
 bool HasTrivialAcd(const TCypressNode* node)
 {
@@ -340,7 +322,7 @@ TFuture<TYsonString> TNontemplateCypressNodeProxyBase::GetBuiltinAttributeAsync(
             }
 
             THROW_ERROR_EXCEPTION("Error reading the attribute")
-                << TErrorAttribute("attribute_key", EInternedAttributeKey::WrongDoorAsync);
+                .With("attribute_key", EInternedAttributeKey::WrongDoorAsync);
         }
 
         default:
@@ -407,7 +389,7 @@ TFuture<TYsonString> TNontemplateCypressNodeProxyBase::GetExternalBuiltinAttribu
                 key,
                 GetVersionedId(),
                 externalCellTag)
-                << error;
+                .With(error);
         }
 
         const auto& batchRsp = batchRspOrError.Value();
@@ -596,9 +578,15 @@ void TNontemplateCypressNodeProxyBase::LogAcdUpdate(TInternedAttributeKey key, c
     TObjectProxyBase::LogAcdUpdate(key, value);
 
     const auto* impl = GetThisImpl();
-    // TODO(h0pless): this is not quite correct since multiple changes may get
-    // encapsulated into a single Hive mutation.
-    if (impl->GetRevision() != NHydra::GetCurrentHydraContext()->GetVersion().ToRevision()) {
+
+    bool isBeingCreated = [&] {
+        if (impl->IsSequoia() && impl->MutableSequoiaProperties()) {
+            return impl->MutableSequoiaProperties()->BeingCreated;
+        } else {
+            return impl->GetRevision() == NHydra::GetCurrentHydraContext()->GetVersion().ToRevision();
+        }
+    }();
+    if (!isBeingCreated) {
         NSecurityServer::LogAcdUpdate(key.Unintern(), GetPath(), value);
     }
 }
@@ -678,6 +666,10 @@ void TNontemplateCypressNodeProxyBase::ListSystemAttributes(std::vector<TAttribu
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ExpirationTimeoutUser)
         .SetPresent(node->GetExpirationTimeoutUser().value_or(nullptr) != nullptr)
         .SetWritable(true));
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ExpirationTimeArmingTime)
+        .SetPresent(node->GetExpirationTime().has_value()));
+    descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ExpirationTimeoutArmingTime)
+        .SetPresent(node->GetExpirationTimeout().has_value()));
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ExpirationTimeLastResetTime)
         .SetPresent(node->GetExpirationTimeLastResetTime().has_value()));
     descriptors->push_back(TAttributeDescriptor(EInternedAttributeKey::ExpirationTimeoutLastResetTime)
@@ -940,18 +932,13 @@ bool TNontemplateCypressNodeProxyBase::GetBuiltinAttribute(
         }
 
         case EInternedAttributeKey::ImmediateAnnotation: {
-            if (auto annotation = node->TryGetAnnotation()) {
-                BuildYsonFluently(consumer)
-                    .Value(*annotation);
-            } else {
-                BuildYsonFluently(consumer)
-                    .Entity();
-            }
+            BuildYsonFluently(consumer)
+                .Value(node->TryGetAnnotation());
             return true;
         }
 
         case EInternedAttributeKey::TouchTime:
-            if (!node->GetTouchTime()) {
+            if (!node->IsTrunk() || !node->GetTouchTime()) {
                 break;
             }
 
@@ -959,7 +946,7 @@ bool TNontemplateCypressNodeProxyBase::GetBuiltinAttribute(
                 .Value(node->GetTouchTime());
             return true;
 
-        case EInternedAttributeKey::ExpirationTimeUser : {
+        case EInternedAttributeKey::ExpirationTimeUser: {
             auto optionalExpirationTimeUser = node->GetExpirationTimeUser();
             if (!optionalExpirationTimeUser) {
                 break;
@@ -988,6 +975,26 @@ bool TNontemplateCypressNodeProxyBase::GetBuiltinAttribute(
 
             BuildYsonFluently(consumer)
                 .Value(expirationTimeoutUser->GetName());
+            return true;
+        }
+
+        case EInternedAttributeKey::ExpirationTimeArmingTime: {
+            auto optionalExpirationTimeArmingTime = node->GetExpirationTimeArmingTime();
+            if (!optionalExpirationTimeArmingTime) {
+                break;
+            }
+            BuildYsonFluently(consumer)
+                .Value(*optionalExpirationTimeArmingTime);
+            return true;
+        }
+
+        case EInternedAttributeKey::ExpirationTimeoutArmingTime: {
+            auto optionalExpirationTimeoutArmingTime = node->GetExpirationTimeoutArmingTime();
+            if (!optionalExpirationTimeoutArmingTime) {
+                break;
+            }
+            BuildYsonFluently(consumer)
+                .Value(*optionalExpirationTimeoutArmingTime);
             return true;
         }
 
@@ -1036,7 +1043,7 @@ bool TNontemplateCypressNodeProxyBase::GetBuiltinAttribute(
             }
 
             THROW_ERROR_EXCEPTION("Error reading the attribute")
-                << TErrorAttribute("attribute_key", EInternedAttributeKey::WrongDoorSync);
+                .With("attribute_key", EInternedAttributeKey::WrongDoorSync);
         }
 
         default:
@@ -1075,18 +1082,15 @@ void TNontemplateCypressNodeProxyBase::ValidateMethodWhitelistedForTransaction(c
     auto transactionType = TypeFromId(Transaction_->GetId());
     auto it = typeToWhitelist.find(transactionType);
     if (it != typeToWhitelist.end() && !it->second.contains(method)) {
-        YT_LOG_ALERT_IF(
-            transactionManagerConfig->AlertTransactionIsNotCompatibleWithMethod,
-            "Attempted to call a method not supported by type "
-            "(Method: %v, Type: %v, TransactionId: %v)",
-            method,
-            transactionType,
-            TypeFromId(Transaction_->GetId()));
+        YT_TLOG_ALERT_IF(transactionManagerConfig->AlertTransactionIsNotCompatibleWithMethod, "Attempted to call a method not supported by type")
+            .With("Method", method)
+            .With("Type", transactionType)
+            .With("TransactionId", TypeFromId(Transaction_->GetId()));
 
         THROW_ERROR_EXCEPTION("Method %Qv is not supported for type %Qlv",
             method,
             transactionType)
-            << TErrorAttribute("transaction_id", Transaction_->GetId());
+            .With("transaction_id", Transaction_->GetId());
     }
 }
 
@@ -1270,11 +1274,9 @@ void TNontemplateCypressNodeProxyBase::GetSelf(
         ? std::make_optional(request->limit())
         : std::nullopt;
 
-    context->SetRequestInfo("AttributeFilter: %v, Limit: %v",
-        MakeShrunkFormattableView(
-            attributeFilter,
-            GetDynamicCypressManagerConfig()->MaxAttributeFilterSizeToLog),
-        limit);
+    context->AnnotateRequest()
+        .With("AttributeFilter", MakeShrunkFormattableView( attributeFilter, GetDynamicCypressManagerConfig()->MaxAttributeFilterSizeToLog))
+        .With("Limit", limit);
 
     ValidatePermission(EPermissionCheckScope::This, EPermission::Read);
 
@@ -1350,10 +1352,8 @@ void TNontemplateCypressNodeProxyBase::GetAttribute(
         ? FromProto<TAttributeFilter>(request->attributes())
         : TAttributeFilter();
 
-    context->SetIncrementalRequestInfo("AttributeFilter: %v",
-        MakeShrunkFormattableView(
-            attributeFilter,
-            GetDynamicCypressManagerConfig()->MaxAttributeFilterSizeToLog));
+    context->AnnotateRequest(/*flush*/ false)
+        .With("AttributeFilter", MakeShrunkFormattableView( attributeFilter, GetDynamicCypressManagerConfig()->MaxAttributeFilterSizeToLog));
 
     SuppressAccessTracking();
     TObjectProxyBase::GetAttribute(path, request, response, context);
@@ -1448,9 +1448,8 @@ TPermissionCheckResponse TNontemplateCypressNodeProxyBase::DoCheckPermission(
     const auto& securityManager = Bootstrap_->GetSecurityManager();
     if (Object_->IsSequoia()) {
         if (!SequoiaNodeEffectiveAcl_) {
-            YT_LOG_ALERT(
-                "Missing effective ACL on permission validation for Sequoia node (NodeId: %v)",
-                TrunkNode_->GetId());
+            YT_TLOG_ALERT("Missing effective ACL on permission validation for Sequoia node")
+                .With("NodeId", TrunkNode_->GetId());
             THROW_ERROR_EXCEPTION(
                 "Permission validation through this API is not supported for Sequoia nodes");
         }
@@ -1466,11 +1465,9 @@ TPermissionCheckResponse TNontemplateCypressNodeProxyBase::DoCheckPermission(
                 /*ignorePendingRemovalSubjects*/ false);
             SequoiaNodeDeserializedEffectiveAcl_ = std::move(result.Acl);
 
-            YT_LOG_DEBUG_IF(!result.MissingSubjects.empty(),
-                "Missing subjects mentioned in effective ACL for Sequoia node "
-                "(NodeId: %v, MissingSubjects: %v)",
-                TrunkNode_->GetId(),
-                result.MissingSubjects);
+            YT_TLOG_DEBUG_IF(!result.MissingSubjects.empty(), "Missing subjects mentioned in effective ACL for Sequoia node")
+                .With("NodeId", TrunkNode_->GetId())
+                .With("MissingSubjects", result.MissingSubjects);
         }
 
         if (permission == EPermission::FullRead) {
@@ -1478,7 +1475,7 @@ TPermissionCheckResponse TNontemplateCypressNodeProxyBase::DoCheckPermission(
                 THROW_ERROR_EXCEPTION(
                     "Cannot specify columns for %Qlv permission check",
                     permission)
-                    << TErrorAttribute("columns", options.Columns);
+                    .With("columns", options.Columns);
             }
             const auto& objectManager = Bootstrap_->GetObjectManager();
             const auto& handler = objectManager->GetHandler(Object_);
@@ -1598,6 +1595,25 @@ void TNontemplateCypressNodeProxyBase::ValidateMediaChange(
 
     const auto& chunkManager = Bootstrap_->GetChunkManager();
 
+    auto checkOffshore = [&] (const TChunkReplication& replication) {
+        for (const auto& entry : replication) {
+            auto* medium = chunkManager->FindMediumByIndex(entry.GetMediumIndex());
+            if (!IsObjectAlive(medium)) {
+                YT_TLOG_ALERT("Non-alive medium found in replication")
+                    .With("MediumIndex", entry.GetMediumIndex());
+                continue;
+            }
+
+            if (medium->IsOffshore()) {
+                THROW_ERROR_EXCEPTION("Cannot change media if offshore media is involved");
+            }
+        }
+    };
+    if (oldReplication) {
+        checkOffshore(*oldReplication);
+    }
+    checkOffshore(newReplication);
+
     for (const auto& entry : newReplication) {
         if (entry.Policy()) {
             auto* medium = chunkManager->GetMediumByIndex(entry.GetMediumIndex());
@@ -1623,6 +1639,17 @@ bool TNontemplateCypressNodeProxyBase::ValidatePrimaryMediumChange(
     YT_VERIFY(newReplication);
 
     ValidateNoTransaction();
+
+    if (newPrimaryMedium.IsOffshore()) {
+        THROW_ERROR_EXCEPTION("Cannot change media to offshore");
+    }
+
+    if (oldPrimaryMediumIndex) {
+        const auto* oldPrimaryMedium = Bootstrap_->GetChunkManager()->FindMediumByIndex(*oldPrimaryMediumIndex);
+        if (IsObjectAlive(oldPrimaryMedium) && oldPrimaryMedium->IsOffshore()) {
+            THROW_ERROR_EXCEPTION("Cannot change media if offshore media is involved");
+        }
+    }
 
     auto tweakReplicationOnPrimaryMediumChange = [] (
         int newPrimaryMediumIndex,
@@ -1798,7 +1825,7 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Lock)
     auto mode = FromProto<ELockMode>(request->mode());
     auto childKey = YT_OPTIONAL_FROM_PROTO(*request, child_key);
     auto attributeKey = YT_OPTIONAL_FROM_PROTO(*request, attribute_key);
-    auto timestamp = request->timestamp();
+    auto timestamp = FromProto<NTransactionClient::TTimestamp>(request->timestamp());
     bool waitable = request->waitable();
 
     CheckLockRequest(mode, childKey, attributeKey)
@@ -1806,10 +1833,10 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Lock)
 
     auto lockRequest = CreateLockRequest(mode, childKey, attributeKey, timestamp);
 
-    context->SetRequestInfo("Mode: %v, Key: %v, Waitable: %v",
-        mode,
-        lockRequest.Key,
-        waitable);
+    context->AnnotateRequest()
+        .With("Mode", mode)
+        .With("Key", lockRequest.Key)
+        .With("Waitable", waitable);
 
     auto [lockResult, externalTransactionId] = DoLock(lockRequest, waitable, /*hintLockId*/ {});
 
@@ -1826,11 +1853,11 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Lock)
     response->set_external_cell_tag(ToProto(externalCellTag));
     response->set_revision(ToProto(revision));
 
-    context->SetResponseInfo("LockId: %v, ExternalCellTag: %v, ExternalTransactionId: %v, Revision: %x",
-        lockId,
-        externalCellTag,
-        externalTransactionId,
-        revision);
+    context->AnnotateResponse()
+        .With("LockId", lockId)
+        .With("ExternalCellTag", externalCellTag)
+        .With("ExternalTransactionId", externalTransactionId)
+        .WithFormat("Revision", "%x", revision);
 
     context->Reply();
 }
@@ -1848,11 +1875,11 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Unlock)
 {
     DeclareMutating();
 
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     Unlock();
 
-    context->SetResponseInfo();
+    context->AnnotateResponse();
 
     context->Reply();
 }
@@ -1873,27 +1900,16 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Create)
         explicitAttributes = FromProto(request->node_attributes());
     }
 
-    context->SetRequestInfo(
-        "Type: %v, IgnoreExisting: %v, LockExisting: %v, Recursive: %v, "
-        "Force: %v, IgnoreTypeMismatch: %v, HintId: %v, ExplicitAttributeCount: %v, ExplicitInternedAttributeKeys: %v",
-        type,
-        ignoreExisting,
-        lockExisting,
-        recursive,
-        force,
-        ignoreTypeMismatch,
-        hintId,
-        request->node_attributes().attributes_size(),
-        [&] {
-            std::vector<std::string> explicitInternedAttributeKeys;
-            if (explicitAttributes) {
-                explicitInternedAttributeKeys = explicitAttributes->ListKeys();
-                std::erase_if(explicitInternedAttributeKeys, [] (const std::string& key) {
-                    return TInternedAttributeKey::Lookup(key) == InvalidInternedAttribute;
-                });
-            }
-            return explicitInternedAttributeKeys;
-        }());
+    context->AnnotateRequest()
+        .With("Type", type)
+        .With("IgnoreExisting", ignoreExisting)
+        .With("LockExisting", lockExisting)
+        .With("Recursive", recursive)
+        .With("Force", force)
+        .With("IgnoreTypeMismatch", ignoreTypeMismatch)
+        .With("HintId", hintId)
+        .With("ExplicitAttributeCount", request->node_attributes().attributes_size())
+        .With("ExplicitInternedAttributeKeys", [&] { std::vector<std::string> explicitInternedAttributeKeys; if (explicitAttributes) { explicitInternedAttributeKeys = explicitAttributes->ListKeys(); std::erase_if(explicitInternedAttributeKeys, [] (const std::string& key) { return TInternedAttributeKey::Lookup(key) == InvalidInternedAttribute; }); } return explicitInternedAttributeKeys; }());
 
     if (ignoreExisting && force) {
         THROW_ERROR_EXCEPTION("Cannot specify both \"ignore_existing\" and \"force\" options simultaneously");
@@ -1914,15 +1930,14 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Create)
             IsSystemTransactionType(TypeFromId(transactionId)) &&
             type != EObjectType::ChaosReplicatedTable)
         {
-            YT_LOG_ALERT_IF(
+            YT_TLOG_ALERT_IF(
                 transactionManagerConfig->AlertTransactionIsNotCompatibleWithMethod,
-                "Attempted to create an object of type not supported by type "
-                "(ObjectType: %v, Type: %v, TransactionId: %v)",
-                type,
-                TypeFromId(transactionId),
-                transactionId);
+                "Attempted to create an object of type not supported by type")
+                .With("ObjectType", type)
+                .With("Type", TypeFromId(transactionId))
+                .With("TransactionId", transactionId);
             THROW_ERROR_EXCEPTION("Cannot create type %Qlv using system transaction", type)
-                << TErrorAttribute("transaction_id", transactionId);
+                .With("transaction_id", transactionId);
         }
     }
 
@@ -1952,8 +1967,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Create)
         response->set_cell_tag(ToProto(impl->GetExternalCellTag() == NotReplicatedCellTagSentinel
             ? Bootstrap_->GetMulticellManager()->GetCellTag()
             : impl->GetExternalCellTag()));
-        context->SetResponseInfo("ExistingNodeId: %v",
-            impl->GetId());
+        context->AnnotateResponse()
+            .With("ExistingNodeId", impl->GetId());
         context->Reply();
 
         YT_LOG_ACCESS_IF(
@@ -2053,10 +2068,10 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Create)
     ToProto(response->mutable_node_id(), newNode->GetId());
     response->set_cell_tag(ToProto(newNodeCellTag));
 
-    context->SetResponseInfo("NodeId: %v, CellTag: %v, Account: %v",
-        newNodeId,
-        newNodeCellTag,
-        newNode->Account()->GetName());
+    context->AnnotateResponse()
+        .With("NodeId", newNodeId)
+        .With("CellTag", newNodeCellTag)
+        .With("Account", newNode->Account()->GetName());
 
     context->Reply();
 }
@@ -2083,9 +2098,9 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, Copy)
         THROW_ERROR_EXCEPTION("Cannot specify \"ignore_existing\" for move operation");
     }
 
-    context->SetIncrementalRequestInfo("SourcePath: %v, Mode: %v",
-        sourcePath,
-        mode);
+    context->AnnotateRequest(/*flush*/ false)
+        .With("SourcePath", sourcePath)
+        .With("Mode", mode);
 
     const auto& cypressManager = Bootstrap_->GetCypressManager();
     auto sourceProxy = cypressManager->TryResolvePathToNodeProxy(sourcePath, context->GetMethod(), context->GetService(), Transaction_);
@@ -2167,17 +2182,15 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, LockCopyDestinatio
     const auto& targetPath = GetRequestTargetYPath(context->RequestHeader());
     bool replace = targetPath.empty();
 
-    context->SetRequestInfo(
-        "Force: %v, IgnoreExisting: %v, LockExisting: %v, Replace: %v, "
-        "Inplace: %v, PreserveAcl: %v, Recursive: %v, TransactionId: %v",
-        force,
-        ignoreExisting,
-        lockExisting,
-        replace,
-        inplace,
-        preserveAcl,
-        recursive,
-        Transaction_->GetId());
+    context->AnnotateRequest()
+        .With("Force", force)
+        .With("IgnoreExisting", ignoreExisting)
+        .With("LockExisting", lockExisting)
+        .With("Replace", replace)
+        .With("Inplace", inplace)
+        .With("PreserveAcl", preserveAcl)
+        .With("Recursive", recursive)
+        .With("TransactionId", Transaction_->GetId());
 
     if (ignoreExisting && force) {
         THROW_ERROR_EXCEPTION("Cannot specify both \"ignore_existing\" and \"force\" options simultaneously");
@@ -2193,8 +2206,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, LockCopyDestinatio
         }
 
         ToProto(response->mutable_existing_node_id(), TrunkNode_->GetId());
-        context->SetResponseInfo("ExistingNodeId: %v",
-            TrunkNode_->GetId());
+        context->AnnotateResponse()
+            .With("ExistingNodeId", TrunkNode_->GetId());
         context->Reply();
         return;
     }
@@ -2262,11 +2275,9 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, LockCopyDestinatio
 
     auto effectiveInheritableAttributes = New<TInheritedAttributeDictionary>(Bootstrap_);
     if (!inplace) {
-        YT_LOG_ALERT_AND_THROW_UNLESS(
-            IsCompositeNodeType(parentNode->GetType()),
-            "Attempt to copy to a non-composite node was made (ParentNodeId: %v, ParentNodeType: %v)",
-            parentNode->GetVersionedId(),
-            parentNode->GetType());
+        YT_TLOG_ALERT_AND_THROW_UNLESS(IsCompositeNodeType(parentNode->GetType()), "Attempt to copy to a non-composite node was made")
+            .With("ParentNodeId", parentNode->GetVersionedId())
+            .With("ParentNodeType", parentNode->GetType());
 
         // All attributes CAN be recalculated upon copy now, but this doesn't mean that we HAVE TO.
         GatherInheritableAttributes(
@@ -2280,10 +2291,10 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, LockCopyDestinatio
     // Unfortunately inplace makes this code less generic than desired.
 
     auto nativeCellTag = node->GetNativeCellTag().Underlying();
-    context->SetResponseInfo("NativeCellTag: %v, AccountId: %v, EffectiveInheritedAttributes: %v",
-        nativeCellTag,
-        account->GetId(),
-        effectiveInheritableAttributes->ListPairs());
+    context->AnnotateResponse()
+        .With("NativeCellTag", nativeCellTag)
+        .With("AccountId", account->GetId())
+        .With("EffectiveInheritedAttributes", effectiveInheritableAttributes->ListPairs());
 
     response->set_native_cell_tag(nativeCellTag);
     ToProto(response->mutable_account_id(), account->GetId());
@@ -2300,9 +2311,9 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, LockCopySource)
 
     auto mode = FromProto<ENodeCloneMode>(request->mode());
 
-    context->SetRequestInfo("Mode: %v, Transaction: %v",
-        mode,
-        Transaction_->GetId());
+    context->AnnotateRequest()
+        .With("Mode", mode)
+        .With("Transaction", Transaction_->GetId());
 
     auto* node = GetThisImpl();
 
@@ -2352,16 +2363,16 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, LockCopySource)
 
         if (++subtreeSize >= maxSubtreeSize) {
             THROW_ERROR_EXCEPTION("Subtree is too large for cross-cell copy")
-                << TErrorAttribute("subtree_size", subtreeSize)
-                << TErrorAttribute("max_subtree_size", maxSubtreeSize);
+                .With("subtree_size", subtreeSize)
+                .With("max_subtree_size", maxSubtreeSize);
         }
     }
 
     response->set_version(GetCurrentReign());
     ToProto(response->mutable_root_node_id(), node->GetId());
 
-    context->SetResponseInfo("NodeCount: %v",
-        response->node_id_to_children_size());
+    context->AnnotateResponse()
+        .With("NodeCount", response->node_id_to_children_size());
 
     context->Reply();
 }
@@ -2372,9 +2383,9 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, SerializeNode)
     ValidateTransaction();
 
     auto mode = FromProto<ENodeCloneMode>(request->mode());
-    context->SetRequestInfo("NodeId: %v, Mode: %v",
-        GetVersionedId(),
-        mode);
+    context->AnnotateRequest()
+        .With("NodeId", GetVersionedId())
+        .With("Mode", mode);
 
     auto* node = GetThisImpl();
     ValidatePermission(node, EPermissionCheckScope::This, EPermission::FullRead);
@@ -2400,8 +2411,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, SerializeNode)
     }
 
     ToProto(resultingEntry->mutable_node_id(), node->GetId());
-    context->SetResponseInfo("SerializedNodeDataSize: %v",
-        mergedData.size());
+    context->AnnotateResponse()
+        .With("SerializedNodeDataSize", mergedData.size());
     context->Reply();
 }
 
@@ -2412,8 +2423,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, CalculateInherited
 
     auto dstInheritedAttributes = FromProto(request->dst_attributes());
 
-    context->SetRequestInfo("DestinationInheritedAttributes: %v",
-        dstInheritedAttributes->ListPairs());
+    context->AnnotateRequest()
+        .With("DestinationInheritedAttributes", dstInheritedAttributes->ListPairs());
 
     const auto& cypressManager = Bootstrap_->GetCypressManager();
 
@@ -2421,10 +2432,9 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, CalculateInherited
     // the node has been locked under current transaction in LockCopySource.
     auto* node = GetThisImpl();
 
-    YT_LOG_ALERT_AND_THROW_UNLESS(node->GetTransaction() == Transaction_,
-        "Inconsistent locking during copy detected (NodeId: %v, ExpectedTransactionId: %v)",
-        node->GetVersionedId(),
-        GetObjectId(Transaction_));
+    YT_TLOG_ALERT_AND_THROW_UNLESS(node->GetTransaction() == Transaction_, "Inconsistent locking during copy detected")
+        .With("NodeId", node->GetVersionedId())
+        .With("ExpectedTransactionId", GetObjectId(Transaction_));
 
     auto iterateOverAttributeDeltaDuringInheritance = [] (
         const TConstInheritedAttributeDictionaryPtr& inheritedAttributes,
@@ -2500,8 +2510,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, CalculateInherited
         }
     }
 
-    context->SetResponseInfo("NodeToAttributeDeltasSize: %v",
-        response->node_to_attribute_deltas_size());
+    context->AnnotateResponse()
+        .With("NodeToAttributeDeltasSize", response->node_to_attribute_deltas_size());
 
     context->Reply();
 }
@@ -2520,7 +2530,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, AssembleTreeCopy)
 
     bool inplace = request->inplace();
     // Other fields are logged in CopyCore.
-    context->SetIncrementalRequestInfo("Inplace: %v", inplace);
+    context->AnnotateRequest(/*flush*/ false)
+        .With("Inplace", inplace);
 
     bool preserveModificationTime = request->preserve_modification_time();
     bool preserveAcl = request->preserve_acl();
@@ -2606,8 +2617,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, AssembleTreeCopy)
 
 DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, BeginCopy)
 {
-    context->SetRequestInfo("Mode: %v",
-        FromProto<ENodeCloneMode>(request->mode()));
+    context->AnnotateRequest()
+        .With("Mode", FromProto<ENodeCloneMode>(request->mode()));
 
     THROW_ERROR_EXCEPTION(
         NObjectClient::EErrorCode::BeginCopyDeprecated,
@@ -2616,8 +2627,8 @@ DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, BeginCopy)
 
 DEFINE_YPATH_SERVICE_METHOD(TNontemplateCypressNodeProxyBase, EndCopy)
 {
-    YT_LOG_ALERT("Received EndCopy request (Version: %v)",
-        request->version());
+    YT_TLOG_ALERT("Received EndCopy request")
+        .With("Version", request->version());
 
     THROW_ERROR_EXCEPTION("EndCopy verb is deprecated");
 }
@@ -2629,11 +2640,10 @@ TNodeFactoryOptions TNontemplateCypressNodeProxyBase::GetFactoryOptionsAndLog(co
     auto pessimisticQuotaCheck = request->pessimistic_quota_check();
     bool preserveAcl = request->preserve_acl();
 
-    context->SetIncrementalRequestInfo(
-        "PreserveModificationTime: %v, PreserveAcl: %v, PessimisticQuotaCheck: %v",
-        preserveModificationTime,
-        preserveAcl,
-        pessimisticQuotaCheck);
+    context->AnnotateRequest(/*flush*/ false)
+        .With("PreserveModificationTime", preserveModificationTime)
+        .With("PreserveAcl", preserveAcl)
+        .With("PessimisticQuotaCheck", pessimisticQuotaCheck);
 
     return TNodeFactoryOptions{
         .PreserveAccount = /*preserveAccount*/ false,
@@ -2661,19 +2671,16 @@ TNodeFactoryOptions TNontemplateCypressNodeProxyBase::GetFactoryOptionsAndLog(co
     auto preserveAcl = request->preserve_acl();
     auto allowSecondaryIndexAbandonment = request->allow_secondary_index_abandonment();
 
-    context->SetIncrementalRequestInfo(
-        "PreserveAccount: %v, PreserveCreationTime: %v, PreserveModificationTime: %v, PreserveExpirationTime: %v, "
-        "PreserveExpirationTimeout: %v, PreserveOwner: %v, PreserveAcl: %v, PessimisticQuotaCheck: %v, "
-        "AllowSecondaryIndexAbandonment: %v",
-        preserveAccount,
-        preserveCreationTime,
-        preserveModificationTime,
-        preserveExpirationTime,
-        preserveExpirationTimeout,
-        preserveOwner,
-        preserveAcl,
-        pessimisticQuotaCheck,
-        allowSecondaryIndexAbandonment);
+    context->AnnotateRequest(/*flush*/ false)
+        .With("PreserveAccount", preserveAccount)
+        .With("PreserveCreationTime", preserveCreationTime)
+        .With("PreserveModificationTime", preserveModificationTime)
+        .With("PreserveExpirationTime", preserveExpirationTime)
+        .With("PreserveExpirationTimeout", preserveExpirationTimeout)
+        .With("PreserveOwner", preserveOwner)
+        .With("PreserveAcl", preserveAcl)
+        .With("PessimisticQuotaCheck", pessimisticQuotaCheck)
+        .With("AllowSecondaryIndexAbandonment", allowSecondaryIndexAbandonment);
 
     return TNodeFactoryOptions{
         .PreserveAccount = preserveAccount,
@@ -2706,18 +2713,17 @@ void TNontemplateCypressNodeProxyBase::CopyCore(
 
     auto nodeFactoryOptions = GetFactoryOptionsAndLog(context);
 
-    context->SetRequestInfo(
-        "TransactionId: %v, Recursive: %v, IgnoreExisting: %v, LockExisting: %v, Force: %v",
-        NObjectServer::GetObjectId(Transaction_),
-        recursive,
-        ignoreExisting,
-        lockExisting,
-        force);
+    context->AnnotateRequest()
+        .With("TransactionId", NObjectServer::GetObjectId(Transaction_))
+        .With("Recursive", recursive)
+        .With("IgnoreExisting", ignoreExisting)
+        .With("LockExisting", lockExisting)
+        .With("Force", force);
 
     if (inplace && TrunkNode_->GetType() != EObjectType::PortalExit) {
         THROW_ERROR_EXCEPTION("Cannot load inplace any node except portal exit")
-            << TErrorAttribute("node_id", TrunkNode_->GetId())
-            << TErrorAttribute("transaction_id", Transaction_->GetId());
+            .With("node_id", TrunkNode_->GetId())
+            .With("transaction_id", Transaction_->GetId());
     }
 
     if (ignoreExisting && force) {
@@ -2740,8 +2746,8 @@ void TNontemplateCypressNodeProxyBase::CopyCore(
         }
 
         ToProto(response->mutable_node_id(), TrunkNode_->GetId());
-        context->SetResponseInfo("ExistingNodeId: %v",
-            TrunkNode_->GetId());
+        context->AnnotateResponse()
+            .With("ExistingNodeId", TrunkNode_->GetId());
         return;
     }
 
@@ -2773,11 +2779,9 @@ void TNontemplateCypressNodeProxyBase::CopyCore(
 
     auto inheritedAttributes = New<TInheritedAttributeDictionary>(Bootstrap_);
     if (!inplace) {
-        YT_LOG_ALERT_AND_THROW_UNLESS(
-            IsCompositeNodeType(parentNode->GetType()),
-            "Attempt to copy to a non-composite node was made (ParentNodeId: %v, ParentNodeType: %v)",
-            parentNode->GetVersionedId(),
-            parentNode->GetType());
+        YT_TLOG_ALERT_AND_THROW_UNLESS(IsCompositeNodeType(parentNode->GetType()), "Attempt to copy to a non-composite node was made")
+            .With("ParentNodeId", parentNode->GetVersionedId())
+            .With("ParentNodeType", parentNode->GetType());
 
         GatherInheritableAttributes(
             parentNode,
@@ -2806,15 +2810,18 @@ void TNontemplateCypressNodeProxyBase::CopyCore(
         const auto& cypressManager = Bootstrap_->GetCypressManager();
         cypressManager->SetReachableSubtreeNodes(clonedTrunkNode, /*transaction*/ nullptr, /*includeRoot*/ false);
     } else {
-        YT_LOG_WARNING("Copy inplace target node is unreachable (NodeId: %v)",
-            clonedTrunkNode->GetVersionedId());
+        YT_TLOG_WARNING("Copy inplace target node is unreachable")
+            .With("NodeId", clonedTrunkNode->GetVersionedId());
     }
+
+    factory->ValidateCloneIndices();
 
     factory->Commit();
 
     ToProto(response->mutable_node_id(), clonedTrunkNode->GetId());
 
-    context->SetResponseInfo("NodeId: %v", clonedTrunkNode->GetId());
+    context->AnnotateResponse()
+        .With("NodeId", clonedTrunkNode->GetId());
 }
 
 void TNontemplateCypressNodeProxyBase::ValidateAccessTransaction()
@@ -3368,7 +3375,7 @@ void TCypressMapNodeProxy::SetRecursive(
     TRspSet* response,
     const TCtxSetPtr& context)
 {
-    context->SetRequestInfo();
+    context->AnnotateRequest();
     TMapNodeMixin::SetRecursive(path, request, response, context);
 }
 
@@ -3659,11 +3666,9 @@ void TCypressMapNodeProxy::ListSelf(
         ? std::make_optional(request->limit())
         : std::nullopt;
 
-    context->SetRequestInfo("AttributeFilter: %v, Limit: %v",
-        MakeShrunkFormattableView(
-            attributeFilter,
-            GetDynamicCypressManagerConfig()->MaxAttributeFilterSizeToLog),
-        limit);
+    context->AnnotateRequest()
+        .With("AttributeFilter", MakeShrunkFormattableView( attributeFilter, GetDynamicCypressManagerConfig()->MaxAttributeFilterSizeToLog))
+        .With("Limit", limit);
 
     TLimitedAsyncYsonWriter writer(context->GetReadRequestComplexityLimiter());
 
@@ -3743,8 +3748,8 @@ bool TSequoiaMapNodeProxy::GetBuiltinAttribute(
                     .Value(mapNode->ImmutableSequoiaProperties()->Path);
                 return true;
             }
-            YT_LOG_ALERT("Sequoia node is lacking required attribute \"path\" (NodeId: %v)",
-                mapNode->GetId());
+            YT_TLOG_ALERT("Sequoia node is lacking required attribute \"path\"")
+                .With("NodeId", mapNode->GetId());
             return false;
         case EInternedAttributeKey::Key:
             if (mapNode->ImmutableSequoiaProperties()) {
@@ -3752,8 +3757,8 @@ bool TSequoiaMapNodeProxy::GetBuiltinAttribute(
                     .Value(mapNode->ImmutableSequoiaProperties()->Key);
                 return true;
             }
-            YT_LOG_ALERT("Sequoia node is lacking required attribute \"key\" (NodeId: %v)",
-                mapNode->GetId());
+            YT_TLOG_ALERT("Sequoia node is lacking required attribute \"key\"")
+                .With("NodeId", mapNode->GetId());
             return false;
         case EInternedAttributeKey::Children: {
             if (!Bootstrap_->GetConfig()->ExposeTestingFacilities) {
@@ -3775,7 +3780,7 @@ void TSequoiaMapNodeProxy::GetSelf(
     TRspGet* /*response*/,
     const TCtxGetPtr& context)
 {
-    context->SetRequestInfo();
+    context->AnnotateRequest();
     context->Reply();
 }
 
@@ -3784,7 +3789,7 @@ void TSequoiaMapNodeProxy::ListSelf(
     TRspList* /*response*/,
     const TCtxListPtr& context)
 {
-    context->SetRequestInfo();
+    context->AnnotateRequest();
     context->Reply();
 }
 

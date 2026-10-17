@@ -29,8 +29,11 @@ TLoggingContext GetLoggingContext()
         .ThreadName = GetCurrentThreadName(),
         .FiberId = NConcurrency::GetCurrentFiberId(),
         .TraceId = traceContext ? traceContext->GetTraceId() : TTraceId{},
+        .SpanId = traceContext ? traceContext->GetSpanId() : NTracing::InvalidSpanId,
         .RequestId = traceContext ? traceContext->GetRequestId() : NTracing::TRequestId(),
-        .TraceLoggingTag = traceContext ? traceContext->GetLoggingTag() : TStringBuf(),
+        .TraceLoggingTags = traceContext
+            ? NLogging::AsView(traceContext->GetLoggingTags().GetPayload())
+            : NLogging::TLoggingTagListPayloadView(),
     };
 }
 

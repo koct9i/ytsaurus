@@ -105,7 +105,7 @@ private:
     const TAdaptiveHedgingManagerConfigPtr HunkChunkConfig_;
     const TProfiler Profiler_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SpinLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SpinLock_);
     THashMap<THedgingUnit, THedgingManagerWithSensors> HedgingUnitToHedgingManagerWithSensors_;
 
 
@@ -177,6 +177,7 @@ public:
             .TableId = tableId,
             .StoreChunkConfig = ConvertToYsonString(storeChunkConfig),
             .HunkChunkConfig = ConvertToYsonString(hunkChunkConfig),
+            .ProfilerTags = profiler.GetTags().Tags(),
         };
 
         {
@@ -217,17 +218,19 @@ private:
         TTableId TableId;
         TYsonString StoreChunkConfig;
         TYsonString HunkChunkConfig;
+        TTagList ProfilerTags;
 
         operator size_t() const
         {
             return MultiHash(
                 TableId,
                 StoreChunkConfig,
-                HunkChunkConfig);
+                HunkChunkConfig,
+                ProfilerTags);
         }
     };
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SpinLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SpinLock_);
     THashMap<THedgingManagerRegistryKey, TWeakPtr<ITabletHedgingManagerRegistry>> KeyToRegistry_;
 
 

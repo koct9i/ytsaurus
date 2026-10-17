@@ -5,8 +5,10 @@
 
 #include <util/stream/output.h>
 #include <util/stream/str.h>
+#include <util/string/escape.h>
 #include <util/system/file.h>
 
+#include <cstring>
 #include <stdexcept>
 
 using namespace NYT;
@@ -15,6 +17,17 @@ using namespace NYT::NLogSlice;
 int main(int argc, char** argv)
 {
     try {
+        // Split off the delimiter before NLastGetopt permutes free arguments.
+        int optionArgc = argc;
+        std::vector<std::string> trailingGrepArgs;
+        for (int index = 1; index < argc; ++index) {
+            if (std::strcmp(argv[index], "--") == 0) {
+                optionArgc = index;
+                trailingGrepArgs.assign(argv + index + 1, argv + argc);
+                break;
+            }
+        }
+
         std::string startString;
         std::string endString;
         std::string codecString;
@@ -43,19 +56,28 @@ int main(int argc, char** argv)
         opts.AddLongOption('g', "grep", "grep arguments as a single string, split into tokens (quotes group multi-word patterns)")
             .RequiredArgument("ARGS")
             .StoreResult(&grepLine);
-        // The first free argument is the log file; any further free arguments
-        // (typically passed after "--") are forwarded to grep verbatim.
+        // The first free argument is the log file. Further non-option arguments
+        // are grep arguments; option-looking grep arguments belong after "--".
         opts.SetFreeArgsMin(1);
         opts.SetFreeArgTitle(0, "log_file", "log file (.zst, .gz or plain .log) [-- GREP_ARGS...]");
         opts.AddHelpOption();
 
-        NLastGetopt::TOptsParseResult parsed(&opts, argc, argv);
+        NLastGetopt::TOptsParseResult parsed(&opts, optionArgc, argv);
         const auto& freeArgs = parsed.GetFreeArgs();
         TString logFileName = TString(freeArgs[0]);
-        std::vector<std::string> grepArgs(freeArgs.begin() + 1, freeArgs.end());
+        std::vector<std::string> grepArgs;
         if (parsed.Has('g')) {
-            auto extra = SplitCommandLine(grepLine);
-            grepArgs.insert(grepArgs.end(), extra.begin(), extra.end());
+            grepArgs = SplitCommandLine(grepLine);
+        }
+        grepArgs.insert(grepArgs.end(), freeArgs.begin() + 1, freeArgs.end());
+        grepArgs.insert(grepArgs.end(), trailingGrepArgs.begin(), trailingGrepArgs.end());
+
+        if (parsed.Has('g') && !trailingGrepArgs.empty()) {
+            Cerr << "Combining -g/--grep with arguments after --; grep argv:";
+            for (const auto& arg : grepArgs) {
+                Cerr << " \"" << EscapeC(TStringBuf(arg.data(), arg.size())) << "\"";
+            }
+            Cerr << Endl;
         }
 
         bool hasStart = parsed.Has('t');

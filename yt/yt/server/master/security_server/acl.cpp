@@ -2,6 +2,7 @@
 #include "private.h"
 #include "security_manager.h"
 #include "subject.h"
+#include "user.h"
 
 #include <yt/yt/server/master/cell_master/serialize.h>
 
@@ -225,9 +226,8 @@ static void DoDeserializeAclOrThrow(
         if (pendingRemovalSubjects) {
             *pendingRemovalSubjects = std::move(gatheredPendingRemovalSubjects);
         } else {
-            YT_LOG_ALERT(
-                "Some subjects mentioned in ACL are pending removal (PendingRemovalSubjects: %v)",
-                gatheredPendingRemovalSubjects);
+            YT_TLOG_ALERT("Some subjects mentioned in ACL are pending removal")
+                .With("PendingRemovalSubjects", gatheredPendingRemovalSubjects);
         }
     }
 
@@ -280,7 +280,8 @@ TAccessControlList DeserializeAclOrAlert(
             /*missingSubjects*/ nullptr,
             /*pendingRemovalSubjects*/ nullptr);
     } catch (const std::exception& error) {
-        YT_LOG_ALERT(error, "Error deserializing ACL");
+        YT_TLOG_ALERT("Error deserializing ACL")
+            .With(error);
     }
 
     return result;

@@ -224,6 +224,8 @@ struct TDynamicMulticellManagerConfig
 
     TDuration SyncHiveClocksPeriod;
 
+    int MaxMasterCellGroupCount;
+
     // NB: Section for testing purposes.
     TTestConfigPtr Testing;
 
@@ -397,6 +399,8 @@ struct TDynamicClusterConfig
     bool EnableSafeMode;
     bool EnableDescendingSortOrder;
     bool EnableDescendingSortOrderDynamic;
+
+    bool EnableAggregateStateType;
 
     // Column renaming and removal.
     bool EnableTableColumnRenaming;

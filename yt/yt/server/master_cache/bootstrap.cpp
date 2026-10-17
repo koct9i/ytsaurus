@@ -178,6 +178,7 @@ private:
     {
         BusServer_ = NBus::NTcp::CreateBusServer(Config_->BusServer);
         RpcServer_ = NRpc::NBus::CreateBusServer(BusServer_);
+        RpcServer_->Configure(Config_->RpcServer);
         HttpServer_ = NHttp::CreateServer(Config_->CreateMonitoringHttpServerConfig());
         if (auto httpsConfig = Config_->CreateMonitoringHttpsServerConfig()) {
             HttpsServer_ = NHttps::CreateServer(httpsConfig, /*pollerThreadCount*/ 1);
@@ -263,14 +264,17 @@ private:
     {
         DynamicConfigManager_->Start();
 
-        YT_LOG_INFO("Listening for HTTP requests (Port: %v)", Config_->MonitoringPort);
+        YT_TLOG_INFO("Listening for HTTP requests")
+            .With("Port", Config_->MonitoringPort);
         HttpServer_->Start();
         if (HttpsServer_) {
-            YT_LOG_INFO("Listening for HTTPS requests (Port: %v)", HttpsServer_->GetAddress().GetPort());
+            YT_TLOG_INFO("Listening for HTTPS requests")
+                .With("Port", HttpsServer_->GetAddress().GetPort());
             HttpsServer_->Start();
         }
 
-        YT_LOG_INFO("Listening for RPC requests (Port: %v)", Config_->RpcPort);
+        YT_TLOG_INFO("Listening for RPC requests")
+            .With("Port", Config_->RpcPort);
         RpcServer_->Start();
 
         CypressRegistrar_->Start({});
@@ -281,6 +285,8 @@ private:
         const TMasterCacheDynamicConfigPtr& newConfig)
     {
         TSingletonManager::Reconfigure(newConfig);
+
+        RpcServer_->OnDynamicConfigChanged(newConfig->RpcServer);
 
         Connection_->GetMasterCellDirectorySynchronizer()->ApplyDynamicConfigOverride(newConfig->MasterCellDirectorySynchronizer);
     }

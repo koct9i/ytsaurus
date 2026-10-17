@@ -19,10 +19,10 @@
 
 #include <yt/yt/ytlib/security_client/acl.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <yt/yt/core/ytree/system_attribute_provider.h>
 #include <yt/yt/core/ytree/ypath_detail.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NObjectServer {
 
@@ -66,7 +66,7 @@ protected:
     // NB: the only cases of using the same object proxy from different threads
     // is master object proxy. This flag is meaningless for it but we have to
     // use atomic here to make TSAN happy.
-    std::atomic_flag ModificationTrackingSuppressed_ = {};
+    std::atomic_flag ModificationTrackingSuppressed_;
     NYTree::IAttributeDictionary* CustomAttributes_ = nullptr;
 
     struct TGetBasicAttributesContext
@@ -199,6 +199,7 @@ protected:
     bool IsLeader() const;
     bool IsFollower() const;
     void RequireLeader() const;
+    TError RequireLeaderAsync() const;
 
     bool IsPrimaryMaster() const;
     bool IsSecondaryMaster() const;
@@ -256,6 +257,11 @@ protected:
 
     TCustomAttributeDictionaryPtr CustomAttributesImpl_;
 
+    TFuture<NYson::TYsonString> FetchFromShepherd(const NYPath::TYPath& path);
+
+    std::vector<TFuture<NYson::TYsonString>> FetchYsonFromSwarm(
+        NYTree::TInternedAttributeKey key);
+
     bool DoInvoke(const NYTree::IYPathServiceContextPtr& context) override;
 
     void GetSelf(TReqGet* request, TRspGet* response, const TCtxGetPtr& context) override;
@@ -288,8 +294,6 @@ protected:
     {
         return Object_->As<TActualImpl>();
     }
-
-    TFuture<NYson::TYsonString> FetchFromShepherd(const NYPath::TYPath& path);
 
     template <class T>
     TFuture<std::vector<T>> FetchFromSwarm(NYTree::TInternedAttributeKey key);

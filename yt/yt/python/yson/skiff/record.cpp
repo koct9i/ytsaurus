@@ -7,6 +7,8 @@
 
 namespace NYT::NPython {
 
+using namespace NSkiffExt;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 TSkiffRecord::TSkiffRecord(TSkiffSchema* schema)
@@ -122,8 +124,8 @@ YT_PREVENT_TLS_CACHING void CheckFieldType(const Py::Object& value, NSkiff::EWir
                     PyObject_RichCompareBool(valueAsLongLong.ptr(), UnsignedInt64Max, Py_LT) != 1))
             {
                 THROW_ERROR_EXCEPTION("Invalid value passed to SkiffRecord, it must be in range [0, 2^64 - 1]")
-                    << TErrorAttribute("expected_type", "uint64")
-                    << TErrorAttribute("value", ConvertStringObjectToString(valueAsLongLong.str()));
+                    .With("expected_type", "uint64")
+                    .With("value", ConvertStringObjectToString(valueAsLongLong.str()));
             }
             if (wireType == NSkiff::EWireType::Int64 &&
                 (
@@ -131,16 +133,16 @@ YT_PREVENT_TLS_CACHING void CheckFieldType(const Py::Object& value, NSkiff::EWir
                     PyObject_RichCompareBool(valueAsLongLong.ptr(), SignedInt64Max, Py_LE) != 1))
             {
                 THROW_ERROR_EXCEPTION("Invalid value passed to SkiffRecord, it must be in range [0, 2^64 - 1]")
-                    << TErrorAttribute("expected_type", "int64")
-                    << TErrorAttribute("value", ConvertStringObjectToString(valueAsLongLong.str()));
+                    .With("expected_type", "int64")
+                    .With("value", ConvertStringObjectToString(valueAsLongLong.str()));
             }
             break;
         }
         case NSkiff::EWireType::Boolean: {
             if (!value.isBoolean()) {
                 THROW_ERROR_EXCEPTION("Invalid value passed to SkiffRecord")
-                    << TErrorAttribute("expected_type", "boolean")
-                    << TErrorAttribute("value", TString(value.as_string()));
+                    .With("expected_type", "boolean")
+                    .With("value", TString(value.as_string()));
             }
             break;
         }
@@ -151,8 +153,8 @@ YT_PREVENT_TLS_CACHING void CheckFieldType(const Py::Object& value, NSkiff::EWir
         case NSkiff::EWireType::String32: {
             if (!(PyBytes_Check(value.ptr()) || PyUnicode_Check(value.ptr()))) {
                 THROW_ERROR_EXCEPTION("Invalid value passed to SkiffRecord")
-                    << TErrorAttribute("expected_type", "string")
-                    << TErrorAttribute("value", TString(value.as_string()));
+                    .With("expected_type", "string")
+                    .With("value", TString(value.as_string()));
             }
             break;
         }
@@ -172,7 +174,8 @@ void TSkiffRecord::SetDenceField(ui16 index, const Py::Object& value)
         newFieldValue = Py::None();
     }
     auto fieldDescription = Schema_->GetDenseField(index);
-    CheckFieldType(newFieldValue, fieldDescription.ValidatedGetDeoptionalizeType(/*simplify*/ true), fieldDescription.IsRequired());
+    auto [strippedSchema, optionalKind] = StripOptional(fieldDescription.Schema());
+    CheckFieldType(newFieldValue, GetSupportedWireTypeOrThrow(strippedSchema), optionalKind == EOptionalKind::None);
     DenseFields_[index] = newFieldValue;
 }
 
@@ -183,7 +186,7 @@ void TSkiffRecord::SetSparseField(ui16 index, const Py::Object& value)
         return;
     }
     auto fieldDescription = Schema_->GetSparseField(index - Schema_->GetDenseFieldsCount());
-    CheckFieldType(value, fieldDescription.ValidatedGetDeoptionalizeType(/*simplify*/ true), false);
+    CheckFieldType(value, GetSupportedWireTypeOrThrow(fieldDescription.Schema()), false);
     SparseFields_[index] = value;
 }
 

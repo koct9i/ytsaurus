@@ -20,9 +20,12 @@ public:
         : ChangelogId_(changelogId)
         , FutureChangelog_(futureChangelog)
         , BacklogAppendPromise_(NewPromise<void>())
+    { }
+
+    void InitializeRefCounted()
     {
         FutureChangelog_.Subscribe(
-            BIND(&TLazyChangelog::OnUnderlyingChangelogReady, MakeWeak(this)));
+            BIND(&TLazyChangelog::OnUnderlyingChangelogReady, MakeStrong(this)));
     }
 
     int GetId() const override
@@ -144,7 +147,7 @@ private:
     const int ChangelogId_;
     const TFuture<IChangelogPtr> FutureChangelog_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, SpinLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, SpinLock_);
 
     //! If non-OK then the underlying changelog could not open.
     TError UnderlyingError_;

@@ -36,6 +36,27 @@ static constexpr i64 MinReliableRowCount = 100;
 
 namespace {
 
+struct TRowCacheControllerCounters
+{
+    TRowCacheControllerCounters() = default;
+
+    explicit TRowCacheControllerCounters(const NProfiling::TProfiler& profiler)
+        : TotalMemoryLimit(profiler.Gauge("/total_memory_limit"))
+        , TotalGarbageAmount(profiler.Gauge("/total_garbage_amount"))
+        , MemoryLimitWithoutGarbage(profiler.Gauge("/memory_limit_without_garbage"))
+        , NewTotalCacheSize(profiler.Gauge("/new_total_cache_size"))
+        , RawScaleFactor(profiler.Gauge("/raw_scale_factor"))
+        , CategoryMemoryLimitScaleFactor(profiler.Gauge("/category_memory_limit_scale_factor"))
+    { }
+
+    NProfiling::TGauge TotalMemoryLimit;
+    NProfiling::TGauge TotalGarbageAmount;
+    NProfiling::TGauge MemoryLimitWithoutGarbage;
+    NProfiling::TGauge NewTotalCacheSize;
+    NProfiling::TGauge RawScaleFactor;
+    NProfiling::TGauge CategoryMemoryLimitScaleFactor;
+};
+
 struct TRowCacheBriefStatistics
 {
     i64 DataWeight = 0;
@@ -205,18 +226,15 @@ void RunRotations(
         }
     }
 
-    YT_LOG_DEBUG("Rotated row caches scaled to memory limit "
-        "(CategoryMemoryLimitScaleFactor: %v, TotalAliveBytesRotationThreshold: %v, "
-        "FirstPassTotalAliveBytes: %v, FirstPassRotatedTabletCount: %v, FirstPassElapsedTime: %v, "
-        "SecondPassTotalAliveBytes: %v, SecondPassRotatedTabletCount: %v, SecondPassElapsedTime: %v)",
-        categoryMemoryLimitScaleFactor,
-        totalAliveBytesRotationThreshold,
-        firstPassTotalAliveBytes,
-        firstPassRotated,
-        firstPassElapsed,
-        secondPassTotalAliveBytes,
-        secondPassRotated,
-        secondPassElapsed);
+    YT_TLOG_DEBUG("Rotated row caches scaled to memory limit")
+        .With("CategoryMemoryLimitScaleFactor", categoryMemoryLimitScaleFactor)
+        .With("TotalAliveBytesRotationThreshold", totalAliveBytesRotationThreshold)
+        .With("FirstPassTotalAliveBytes", firstPassTotalAliveBytes)
+        .With("FirstPassRotatedTabletCount", firstPassRotated)
+        .With("FirstPassElapsedTime", firstPassElapsed)
+        .With("SecondPassTotalAliveBytes", secondPassTotalAliveBytes)
+        .With("SecondPassRotatedTabletCount", secondPassRotated)
+        .With("SecondPassElapsedTime", secondPassElapsed);
 }
 
 } // namespace
@@ -229,6 +247,7 @@ class TScaleToMemoryLimitStrategy
 public:
     explicit TScaleToMemoryLimitStrategy(TRowCacheControllerDynamicConfigPtr config)
         : Config_(std::move(config))
+        , Counters_(TabletNodeProfiler().WithPrefix("/row_cache_controller"))
     { }
 
     TRowCacheControllerDecision Run(const TRowCacheControllerContext& context, IInvokerPtr invokerToPerformRotation) override
@@ -244,8 +263,8 @@ public:
             decision = DoRun(context, invokerToPerformRotation);
         }
 
-        YT_LOG_DEBUG("Finished row controller iteration via TScaleToMemoryLimitStrategy (ElapsedTime: %v)",
-            elapsedTime);
+        YT_TLOG_DEBUG("Finished row controller iteration via TScaleToMemoryLimitStrategy")
+            .With("ElapsedTime", elapsedTime);
 
         return decision;
     }
@@ -264,17 +283,24 @@ private:
             statistics.TotalGarbageAmount);
 
         double rawScaleFactor = static_cast<double>(memoryLimitWithoutGarbage) / statistics.NewTotalCacheSize;
-        double categoryMemoryLimitScaleFactor = std::clamp(rawScaleFactor, 0.0, 1.0);
+        double categoryMemoryLimitScaleFactor = Config_->AllowFillingAvailableMemory
+            ? std::max(rawScaleFactor, 0.0)
+            : std::clamp(rawScaleFactor, 0.0, 1.0);
 
-        YT_LOG_DEBUG("Computed row cache memory scale factor "
-            "(TotalMemoryLimit: %v, TotalGarbageAmount: %v, MemoryLimitWithoutGarbage: %v, NewTotalCacheSize: %v, "
-            "RawScaleFactor: %v, CategoryMemoryLimitScaleFactor: %v)",
-            *context.TotalMemoryLimit,
-            statistics.TotalGarbageAmount,
-            memoryLimitWithoutGarbage,
-            statistics.NewTotalCacheSize,
-            rawScaleFactor,
-            categoryMemoryLimitScaleFactor);
+        YT_TLOG_DEBUG("Computed row cache memory scale factor")
+            .With("TotalMemoryLimit", *context.TotalMemoryLimit)
+            .With("TotalGarbageAmount", statistics.TotalGarbageAmount)
+            .With("MemoryLimitWithoutGarbage", memoryLimitWithoutGarbage)
+            .With("NewTotalCacheSize", statistics.NewTotalCacheSize)
+            .With("RawScaleFactor", rawScaleFactor)
+            .With("CategoryMemoryLimitScaleFactor", categoryMemoryLimitScaleFactor);
+
+        Counters_.TotalMemoryLimit.Update(*context.TotalMemoryLimit);
+        Counters_.TotalGarbageAmount.Update(statistics.TotalGarbageAmount);
+        Counters_.MemoryLimitWithoutGarbage.Update(memoryLimitWithoutGarbage);
+        Counters_.NewTotalCacheSize.Update(statistics.NewTotalCacheSize);
+        Counters_.RawScaleFactor.Update(rawScaleFactor);
+        Counters_.CategoryMemoryLimitScaleFactor.Update(categoryMemoryLimitScaleFactor);
 
         i64 totalAliveBytesRotationThreshold = static_cast<i64>(
             *context.TotalMemoryLimit * Config_->RotationMemoryThreshold);
@@ -292,6 +318,7 @@ private:
     }
 
     TRowCacheControllerDynamicConfigPtr Config_;
+    const TRowCacheControllerCounters Counters_;
 };
 
 DEFINE_REFCOUNTED_TYPE(TScaleToMemoryLimitStrategy)
@@ -382,7 +409,8 @@ void TRowCacheController::Adjust()
         LastCategoryMemoryLimitScaleFactor_ = decision.CategoryMemoryLimitScaleFactor;
     }
 
-    YT_LOG_DEBUG("Finished RowCacheControllerUpdate (TimeSpent: %v)", elapsedTime);
+    YT_TLOG_DEBUG("Finished RowCacheControllerUpdate")
+        .With("TimeSpent", elapsedTime);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

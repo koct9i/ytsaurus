@@ -56,6 +56,8 @@ const (
 	maintenanceRequestsAttr    = "maintenance_requests"
 	cmsMaintenanceRequestsAttr = "cms_maintenance_requests"
 
+	bundleControllerAnnotationsAttr = "bundle_controller_annotations"
+
 	userTagsAttr = "user_tags"
 
 	disableSchedulerJobsAttr = "disable_scheduler_jobs"
@@ -110,6 +112,15 @@ type TabletCellBundles map[string]*TabletCellBundle
 type Client struct {
 	yc yt.Client
 	l  log.Structured
+}
+
+// DataNodeDiskInfo describes a YT-mounted disk reported by data node's disk manager.
+type DataNodeDiskInfo struct {
+	DiskID     string `yson:"disk_id" json:"disk_id"`
+	DeviceName string `yson:"device_name" json:"device_name"`
+	State      string `yson:"state" json:"state"`
+	Absent     string `yson:"absent" json:"absent"`
+	Error      string `yson:"error" json:"error"`
 }
 
 // NewClient creates new client.
@@ -309,6 +320,17 @@ func (c *Client) GetDiskIDsMismatched(ctx context.Context, node *Node) (*bool, e
 	return diskIDsMismatched, nil
 }
 
+func (c *Client) GetDataNodeDiskInfos(ctx context.Context, node *Node) ([]DataNodeDiskInfo, error) {
+	path := node.GetCypressPath().Child("orchid/data_node/location_manager/disk_infos")
+
+	var diskInfos []DataNodeDiskInfo
+	if err := c.yc.GetNode(ctx, path, &diskInfos, nil); err != nil {
+		return nil, err
+	}
+
+	return diskInfos, nil
+}
+
 func (c *Client) GetNodeStartTime(ctx context.Context, node *Node) (*yson.Time, error) {
 	path := node.GetCypressPath().Child("orchid/service/start_time")
 
@@ -407,9 +429,9 @@ func (c *Client) GetNodes(ctx context.Context) (NodeMap, error) {
 			"id", nodeAnnotationsAttr, "rack",
 			bannedAttr, banMessageAttr, decommissionedAttr, decommissionMessageAttr,
 			maintenanceAttr, maintenanceMessageAttr, maintenanceRequestsAttr,
-			cmsMaintenanceRequestsAttr,
+			cmsMaintenanceRequestsAttr, bundleControllerAnnotationsAttr,
 			"disable_scheduler_jobs", "disable_write_sessions",
-			"state", "last_seen_time", "version", "statistics",
+			"state", "last_seen_time", "register_time", "version", "statistics",
 			"tags", "flavors", "tablet_slots", "resource_limits", "resource_limits_overrides",
 			"resource_usage",
 		},
@@ -498,7 +520,7 @@ func (c *Client) GetRPCProxies(ctx context.Context) (RPCProxyMap, error) {
 			"id", "path", "annotations", "role",
 			bannedAttr, banMessageAttr,
 			maintenanceAttr, maintenanceMessageAttr, maintenanceRequestsAttr,
-			cmsMaintenanceRequestsAttr,
+			cmsMaintenanceRequestsAttr, bundleControllerAnnotationsAttr,
 		},
 		MaxSize: ptr.Int64(listResultMaxSize),
 		TransactionOptions: &yt.TransactionOptions{

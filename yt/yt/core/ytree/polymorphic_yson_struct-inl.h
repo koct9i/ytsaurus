@@ -17,7 +17,7 @@ namespace NDetail {
 ////////////////////////////////////////////////////////////////////////////////
 
 template <class TEnum, std::same_as<TEnum>... TArgs>
-consteval bool AllDifferentValues(TArgs... args)
+consteval bool AreAllValuesDifferent(TArgs... args)
 {
     TEnumIndexedArray<TEnum, bool> array;
     ((array[args] = true), ...);
@@ -151,6 +151,14 @@ void TPolymorphicYsonStruct<TMapping>::Load(
 }
 
 template <CPolymorphicEnumMapping TMapping>
+void TPolymorphicYsonStruct<TMapping>::Postprocess(const std::function<NYPath::TYPath()>& pathGetter)
+{
+    if (Storage_) {
+        Storage_->Postprocess(pathGetter);
+    }
+}
+
+template <CPolymorphicEnumMapping TMapping>
 void TPolymorphicYsonStruct<TMapping>::Save(NYson::IYsonConsumer* consumer) const
 {
     consumer->OnBeginMap();
@@ -183,7 +191,25 @@ TIntrusivePtr<typename TMapping::template TDerivedToEnum<Value>> TPolymorphicYso
 }
 
 template <CPolymorphicEnumMapping TMapping>
-typename TPolymorphicYsonStruct<TMapping>::TKey TPolymorphicYsonStruct<TMapping>::GetCurrentType() const
+template <std::derived_from<typename TMapping::TBaseClass> TConcrete>
+TIntrusivePtr<TConcrete> TPolymorphicYsonStruct<TMapping>::GetConcrete() const
+{
+    auto result = TryGetConcrete<TConcrete>();
+    YT_VERIFY(result);
+    return result;
+}
+
+template <CPolymorphicEnumMapping TMapping>
+template <typename TMapping::TKey Value>
+TIntrusivePtr<typename TMapping::template TDerivedToEnum<Value>> TPolymorphicYsonStruct<TMapping>::GetConcrete() const
+{
+    auto result = TryGetConcrete<Value>();
+    YT_VERIFY(result);
+    return result;
+}
+
+template <CPolymorphicEnumMapping TMapping>
+typename TPolymorphicYsonStruct<TMapping>::TKey TPolymorphicYsonStruct<TMapping>::GetType() const
 {
     return HeldType_;
 }
@@ -201,6 +227,18 @@ const typename TPolymorphicYsonStruct<TMapping>::TBase* TPolymorphicYsonStruct<T
 }
 
 template <CPolymorphicEnumMapping TMapping>
+typename TPolymorphicYsonStruct<TMapping>::TBase* TPolymorphicYsonStruct<TMapping>::GetBase()
+{
+    return Storage_.Get();
+}
+
+template <CPolymorphicEnumMapping TMapping>
+const typename TPolymorphicYsonStruct<TMapping>::TBase* TPolymorphicYsonStruct<TMapping>::GetBase() const
+{
+    return Storage_.Get();
+}
+
+template <CPolymorphicEnumMapping TMapping>
 void TPolymorphicYsonStruct<TMapping>::MergeWith(const TPolymorphicYsonStruct& other)
 {
     if (!Storage_) {
@@ -209,10 +247,10 @@ void TPolymorphicYsonStruct<TMapping>::MergeWith(const TPolymorphicYsonStruct& o
     }
 
     THROW_ERROR_EXCEPTION_UNLESS(
-        GetCurrentType() == other.GetCurrentType(),
-        "Can't merge polymorphic yson structs with different types stored (ThisType: %v, OtherType: %v)",
-        GetCurrentType(),
-        other.GetCurrentType());
+        GetType() == other.GetType(),
+        "Cannot merge polymorphic YSON structs with different stored types: %Qlv vs %Qlv",
+        GetType(),
+        other.GetType());
 
     SerializedStorage_ = PatchNode(SerializedStorage_, other.SerializedStorage_);
 
@@ -238,7 +276,8 @@ template <class T>
     requires NMpl::IsSpecialization<T, NYT::NYTree::TPolymorphicYsonStruct>
 void TraverseYsonStruct(const TYsonStructParameterVisitor& visitor, const NYPath::TYPath& path)
 {
-    static constexpr auto enumValues = TEnumTraits<typename T::TKey>::GetDomainValues();
+    static constexpr auto enumValues =
+        TEnumTraits<typename T::TKey>::template GetDomainValues</*AllowAmbiguousValues*/ true>();
     [&]<auto... Is> (std::index_sequence<Is...>) {
         (TraverseYsonStruct<typename T::template TEnumToDerived<enumValues[Is]>>(visitor, path + "/" + FormatEnum(enumValues[Is])), ...);
     } (std::make_index_sequence<std::size(enumValues)>());
@@ -270,6 +309,24 @@ template <CPolymorphicEnumMapping TMapping, CYsonStructSource TSource>
 void Deserialize(TPolymorphicYsonStruct<TMapping>& value, TSource source)
 {
     value.Load(std::move(source));
+}
+
+template <CPolymorphicEnumMapping TMapping>
+bool operator==(const TPolymorphicYsonStruct<TMapping>& lhs, const TPolymorphicYsonStruct<TMapping>& rhs)
+{
+    if (static_cast<bool>(lhs) != static_cast<bool>(rhs)) {
+        return false;
+    }
+
+    if (!lhs) {
+        return true;
+    }
+
+    if (lhs.GetType() != rhs.GetType()) {
+        return false;
+    }
+
+    return lhs->IsEqual(*rhs.GetBase());
 }
 
 ////////////////////////////////////////////////////////////////////////////////

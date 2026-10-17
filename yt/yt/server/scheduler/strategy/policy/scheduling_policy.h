@@ -92,10 +92,12 @@ struct ISchedulingPolicy
     //! Thread affinity: Control.
     virtual void RegisterNode(NNodeTrackerClient::TNodeId nodeId, const std::string& nodeAddress) = 0;
     virtual void UnregisterNode(NNodeTrackerClient::TNodeId nodeId) = 0;
+    //! Returns descriptors of nodes that have sent a scheduling heartbeat.
+    virtual std::vector<TExecNodeDescriptorPtr> GetNodeDescriptors() const = 0;
 
     //! Scheduling.
     //! Thread affinity: Any.
-    virtual void ProcessSchedulingHeartbeat(
+    virtual TFuture<void> ProcessSchedulingHeartbeat(
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
         const TPoolTreeSnapshotPtr& treeSnapshot,
         bool skipScheduleAllocations) = 0;
@@ -121,8 +123,9 @@ struct ISchedulingPolicy
     //! Processes a batch of allocation updates that all belong to this tree. The returned future is set to
     //! a result per update, index-aligned with |allocationUpdates|. The classic policy applies the batch
     //! synchronously and returns an already-set future; the GPU policy dispatches it to the control invoker
-    //! and returns a pending future. Per-allocation update ordering is guaranteed by the caller draining
-    //! each batch before submitting the next one (see TStrategy::ProcessAllocationUpdates).
+    //! and returns a pending future. Batches are applied in dispatch order, but the caller does not drain
+    //! one before submitting the next: under the GPU policy several batches can be in flight at once
+    //! (see TStrategy::ProcessAllocationUpdates).
     //! Thread affinity: Any.
     virtual TFuture<std::vector<TProcessAllocationUpdateResult>> ProcessAllocationUpdates(
         const TPoolTreeSnapshotPtr& treeSnapshot,
@@ -130,25 +133,26 @@ struct ISchedulingPolicy
 
     //! Diagnostics.
     //! Thread affinity: Any.
-    virtual void BuildSchedulingAttributesStringForNode(
+    virtual NLogging::TLoggingTagList BuildSchedulingAttributeTagsForNode(
+        const TPoolTreeSnapshotPtr& treeSnapshot,
         const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext,
+        NNodeTrackerClient::TNodeId nodeId) const = 0;
+    virtual void BuildSchedulingAttributesForNode(
+        const TPoolTreeSnapshotPtr& treeSnapshot,
         NNodeTrackerClient::TNodeId nodeId,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const = 0;
-    virtual void BuildSchedulingAttributesForNode(NNodeTrackerClient::TNodeId nodeId, NYTree::TFluentMap fluent) const = 0;
-    virtual void BuildSchedulingAttributesStringForOngoingAllocations(
+        NYTree::TFluentMap fluent) const = 0;
+    virtual NLogging::TLoggingTagList BuildSchedulingAttributeTagsForOngoingAllocations(
         const TPoolTreeSnapshotPtr& treeSnapshot,
         const std::vector<TAllocationPtr>& allocations,
-        TInstant now,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const = 0;
+        TInstant now) const = 0;
 
     //! Thread affinity: Any.
-    virtual void BuildElementLoggingStringAttributes(
+    virtual NLogging::TLoggingTagList BuildElementLoggingTags(
         const TPoolTreeSnapshotPtr& treeSnapshot,
-        const TPoolTreeElement* element,
-        TDelimitedStringBuilderWrapper& delimitedBuilder) const = 0;
+        const TPoolTreeElement* element) const = 0;
 
     //! Thread affinity: Control.
-    virtual void PopulateOrchidService(const NYTree::TCompositeMapServicePtr& orchidService) const = 0;
+    virtual void PopulateOrchidService(const NYTree::ICompositeMapServicePtr& orchidService) const = 0;
 
     //! Thread affinity: Profiler thread.
     virtual void ProfileOperation(

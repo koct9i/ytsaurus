@@ -4,10 +4,12 @@
 #include "volume_helpers.h"
 #include "private.h"
 
-#include <yt/yt/server/lib/nbd/config.h>
 #include <yt/yt/server/lib/nbd/public.h>
+#include <yt/yt/server/lib/nbd/image/public.h>
 
 #include <yt/yt/ytlib/exec_node/public.h>
+
+#include <yt/yt/library/nbd/config.h>
 
 #include <yt/yt/core/actions/callback.h>
 
@@ -15,15 +17,17 @@
 
 #include <util/system/types.h>
 
+#include <variant>
+
 namespace NYT::NExecNode {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-struct TVirtualSandboxData
+struct TVirtualSandboxOptions
 {
     std::string NbdDeviceId;
     TArtifactKey ArtifactKey;
-    NNbd::IImageReaderPtr Reader;
+    NNbd::NImage::IImageReaderPtr Reader;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -31,42 +35,8 @@ struct TVirtualSandboxData
 struct TOverlayLayerPreparationOptions
 {
     TArtifactKey ArtifactKey;
-    NNbd::IImageReaderPtr ImageReader;
+    NNbd::NImage::IImageReaderPtr ImageReader;
 };
-
-////////////////////////////////////////////////////////////////////////////////
-
-//! Data necessary to create NBD root volume.
-struct TSandboxNbdRootVolumeData
-{
-    //! Identifier of NBD disk within NBD server.
-    std::string DeviceId;
-
-    //! Volume params.
-    i64 Size = 0;
-    int MediumIndex = 0;
-    NNbd::EFilesystemType FsType = NNbd::EFilesystemType::Ext4;
-
-    //! Params to connect to chosen data nodes.
-    TDuration DataNodeRpcTimeout;
-    std::optional<std::string> DataNodeAddress;
-
-    //! Params for NBD requests to data nodes.
-    TDuration DataNodeNbdServiceRpcTimeout;
-    TDuration DataNodeNbdServiceMakeTimeout;
-
-    //! Params to get suitable data nodes from master.
-    TDuration MasterRpcTimeout;
-    int MinDataNodeCount;
-    int MaxDataNodeCount;
-
-    //! Number of TCP connections to use for NBD RPC requests.
-    int MultiplexingParallelism = DefaultNbdMultiplexingParallelism;
-
-    bool operator==(const TSandboxNbdRootVolumeData&) const = default;
-};
-
-void FormatValue(TStringBuilderBase* builder, const TSandboxNbdRootVolumeData& data, TStringBuf spec);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -76,12 +46,13 @@ void FormatValue(TStringBuilderBase* builder, const TSandboxNbdRootVolumeData& d
 struct TUserSandboxOptions
 {
     std::vector<TVolumeMountPtr> JobVolumeMounts;
+    TBaseVolumeParamsPtr RootVolumeParams;
     std::optional<i64> InodeLimit;
     std::optional<i64> DiskSpaceLimit;
-    bool EnableRootVolumeDiskQuota = false;
+    bool DisableRbindRootVolume = false;
     bool EnableDiskQuota = true;
     int UserId = 0;
-    std::optional<TVirtualSandboxData> VirtualSandboxData;
+    std::optional<TVirtualSandboxOptions> VirtualSandboxOptions;
     std::string SlotPath;
 
     TCallback<void(const TError&)> DiskOverdraftCallback;
@@ -94,7 +65,6 @@ struct TVolumePreparationOptions
     TJobId JobId;
     TUserSandboxOptions UserSandboxOptions;
     TArtifactDownloadOptions ArtifactDownloadOptions;
-    std::optional<TSandboxNbdRootVolumeData> SandboxNbdRootVolumeData;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

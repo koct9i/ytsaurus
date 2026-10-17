@@ -48,7 +48,7 @@ public:
         , Options_(options)
         , FirstRowIndex_(firstRowIndex)
         , ReadRowCount_(readRowCount)
-        , Logger(Reader_->Logger().WithTag("ErasurePartsReaderSessionId: %v", TGuid::Create()))
+        , Logger(Reader_->Logger().WithTag("ErasurePartsReaderSessionId", TGuid::Create()))
     { }
 
     TFuture<std::vector<std::vector<TSharedRef>>> Run()
@@ -57,10 +57,10 @@ public:
             return MakeFuture(std::vector<std::vector<TSharedRef>>(Reader_->PartIndices_.size()));
         }
 
-        YT_LOG_DEBUG("Erasure rows read session started (FirstRowIndex: %v, RowCount: %v, PartIndices: %v)",
-            FirstRowIndex_,
-            ReadRowCount_,
-            Reader_->PartIndices_);
+        YT_TLOG_DEBUG("Erasure rows read session started")
+            .With("FirstRowIndex", FirstRowIndex_)
+            .With("RowCount", ReadRowCount_)
+            .With("PartIndices", Reader_->PartIndices_);
 
         const auto& chunkReaders = Reader_->ChunkReaders_;
         for (const auto& reader : chunkReaders) {
@@ -74,9 +74,9 @@ public:
         }
 
         for (auto& [partIndex, partSession] : PartSessions_) {
-            YT_LOG_DEBUG("Requesting part meta (PartIndex: %v, ReplicaCount: %v)",
-                partIndex,
-                partSession.ReplicaSessions.size());
+            YT_TLOG_DEBUG("Requesting part meta")
+                .With("PartIndex", partIndex)
+                .With("ReplicaCount", partSession.ReplicaSessions.size());
 
             for (auto& replicaSession : partSession.ReplicaSessions) {
                 replicaSession.MetaFuture = replicaSession.Reader->GetMeta(IChunkReader::TGetMetaOptions{
@@ -211,10 +211,10 @@ private:
 
     std::unordered_map<int, TPartReadingSession> PartSessions_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, Lock_);
 
 
-    void TryScheduleNextRead(TGuard<NThreading::TSpinLock>&& guard, int partIndex)
+    void TryScheduleNextRead(TGuard<TSpinLock>&& guard, int partIndex)
     {
         const auto& partSession = GetOrCrash(PartSessions_, partIndex);
         if (partSession.IsFinished()) {
@@ -256,9 +256,10 @@ private:
         replicaSession.GotMetaResponse = true;
 
         if (!metaOrError.IsOK()) {
-            YT_LOG_WARNING(metaOrError, "Error requesting replica meta (PartIndex: %v, ReplicaIndex: %v)",
-                partIndex,
-                replicaIndex);
+            YT_TLOG_WARNING("Error requesting replica meta")
+                .With("PartIndex", partIndex)
+                .With("ReplicaIndex", replicaIndex)
+                .With(metaOrError);
             return;
         }
 
@@ -270,26 +271,25 @@ private:
         replicaSession.DataSize = miscExt.uncompressed_data_size();
         replicaSession.ReplicaReadRowCount = std::min(ReadRowCount_, replicaSession.RowCount - FirstRowIndex_);
 
-        YT_LOG_DEBUG("Got replica meta "
-            "(PartIndex: %v, ReplicaIndex: %v, RowCount: %v, DataSize: %v, ReplicaReadRowCount: %v, Sealed: %v)",
-            partIndex,
-            replicaIndex,
-            replicaSession.RowCount,
-            replicaSession.DataSize,
-            replicaSession.ReplicaReadRowCount,
-            replicaSession.Sealed);
+        YT_TLOG_DEBUG("Got replica meta")
+            .With("PartIndex", partIndex)
+            .With("ReplicaIndex", replicaIndex)
+            .With("RowCount", replicaSession.RowCount)
+            .With("DataSize", replicaSession.DataSize)
+            .With("ReplicaReadRowCount", replicaSession.ReplicaReadRowCount)
+            .With("Sealed", replicaSession.Sealed);
 
         if (replicaSession.ReplicaReadRowCount <= 0) {
-            YT_LOG_DEBUG("Replica has no relevant rows (PartIndex: %v, ReplicaIndex: %v)",
-                partIndex,
-                replicaIndex);
+            YT_TLOG_DEBUG("Replica has no relevant rows")
+                .With("PartIndex", partIndex)
+                .With("ReplicaIndex", replicaIndex);
             return;
         }
 
         if (!replicaSession.Sealed) {
-            YT_LOG_DEBUG("Replica has not been sealed yet (PartIndex: %v, ReplicaIndex: %v)",
-                partIndex,
-                replicaIndex);
+            YT_TLOG_DEBUG("Replica has not been sealed yet")
+                .With("PartIndex", partIndex)
+                .With("ReplicaIndex", replicaIndex);
             return;
         }
     }
@@ -306,13 +306,12 @@ private:
         i64 estimatedReplicaReadSize = static_cast<i64>(
             replicaSession.ReplicaReadRowCount * replicaSession.DataSize / replicaSession.RowCount + 1);
 
-        YT_LOG_DEBUG("Requesting data from replica "
-            "(PartIndex: %v, ReplicaIndex: %v, FirstRowIndex: %v, ReadRowCount: %v, EstimatedReadSize: %v)",
-            partIndex,
-            replicaIndex,
-            FirstRowIndex_,
-            replicaSession.ReplicaReadRowCount,
-            estimatedReplicaReadSize);
+        YT_TLOG_DEBUG("Requesting data from replica")
+            .With("PartIndex", partIndex)
+            .With("ReplicaIndex", replicaIndex)
+            .With("FirstRowIndex", FirstRowIndex_)
+            .With("ReadRowCount", replicaSession.ReplicaReadRowCount)
+            .With("EstimatedReadSize", estimatedReplicaReadSize);
 
         YT_VERIFY(!std::exchange(partSession.HasPendingDataRequest, true));
 
@@ -359,19 +358,20 @@ private:
         YT_VERIFY(std::exchange(partSession.HasPendingDataRequest, false));
 
         if (!dataOrError.IsOK()) {
-            YT_LOG_WARNING(dataOrError, "Error requesting replica data (PartIndex: %v, ReplicaIndex: %v)",
-                partIndex,
-                replicaIndex);
+            YT_TLOG_WARNING("Error requesting replica data")
+                .With("PartIndex", partIndex)
+                .With("ReplicaIndex", replicaIndex)
+                .With(dataOrError);
             return;
         }
 
         auto data = dataOrError.Value();
         int readRowCount = data.size();
 
-        YT_LOG_DEBUG("Got replica data (PartIndex: %v, ReplicaIndex: %v, ReadRowCount: %v)",
-            partIndex,
-            replicaIndex,
-            readRowCount);
+        YT_TLOG_DEBUG("Got replica data")
+            .With("PartIndex", partIndex)
+            .With("ReplicaIndex", replicaIndex)
+            .With("ReadRowCount", readRowCount);
 
         YT_VERIFY(!partSession.Data);
         YT_VERIFY(readRowCount > 0);
@@ -379,7 +379,7 @@ private:
         partSession.Data = std::move(data);
     }
 
-    void OnPartSessionFinished(int partIndex, TGuard<NThreading::TSpinLock>&& guard)
+    void OnPartSessionFinished(int partIndex, TGuard<TSpinLock>&& guard)
     {
         YT_ASSERT_SPINLOCK_AFFINITY(Lock_);
 
@@ -447,15 +447,15 @@ private:
         return result;
     }
 
-    void Complete(TGuard<NThreading::TSpinLock>&& guard, i64 rowCount)
+    void Complete(TGuard<TSpinLock>&& guard, i64 rowCount)
     {
         YT_ASSERT_SPINLOCK_AFFINITY(Lock_);
 
         YT_VERIFY(!std::exchange(Finished_, true));
 
-        YT_LOG_DEBUG("Erasure rows read session will complete (ReadRowCount: %v, RequestedRowCount: %v)",
-            rowCount,
-            ReadRowCount_);
+        YT_TLOG_DEBUG("Erasure rows read session will complete")
+            .With("ReadRowCount", rowCount)
+            .With("RequestedRowCount", ReadRowCount_);
 
         std::vector<std::vector<TSharedRef>> requestedRowLists;
         if (CanCompleteWithFastPath(rowCount)) {
@@ -471,11 +471,10 @@ private:
 
             DoCancelFutures(std::move(guard));
 
-            YT_LOG_DEBUG("Started repairing rows "
-                "(AvailableIndices: %v, ErasedIndices: %v, RepairIndices: %v)",
-                availableIndices,
-                erasedIndices,
-                repairIndices);
+            YT_TLOG_DEBUG("Started repairing rows")
+                .With("AvailableIndices", availableIndices)
+                .With("ErasedIndices", erasedIndices)
+                .With("RepairIndices", repairIndices);
 
             std::vector<std::vector<TSharedRef>> repairRowLists(repairIndices.size());
             for (int index = 0; index < std::ssize(repairIndices); ++index) {
@@ -503,10 +502,10 @@ private:
 
         Promise_.Set(std::move(requestedRowLists));
 
-        YT_LOG_DEBUG("Erasure rows read session completed");
+        YT_TLOG_DEBUG("Erasure rows read session completed");
     }
 
-    void Fail(TGuard<NThreading::TSpinLock>&& guard)
+    void Fail(TGuard<TSpinLock>&& guard)
     {
         YT_ASSERT_SPINLOCK_AFFINITY(Lock_);
 
@@ -516,14 +515,15 @@ private:
         auto erasedIndices = GetErasedIndices(availableIndices);
 
         auto error = TError("Erasure journal chunk cannot be read")
-            << TErrorAttribute("chunk_id", Reader_->ChunkId_)
-            << TErrorAttribute("required_indices", Reader_->PartIndices_)
-            << TErrorAttribute("erased_indices", erasedIndices)
-            << TErrorAttribute("available_indices", availableIndices);
+            .With("chunk_id", Reader_->ChunkId_)
+            .With("required_indices", Reader_->PartIndices_)
+            .With("erased_indices", erasedIndices)
+            .With("available_indices", availableIndices);
 
         DoCancelFutures(std::move(guard));
 
-        YT_LOG_WARNING(error);
+        YT_TLOG_WARNING("Erasure journal chunk cannot be read")
+            .With(error);
         Promise_.Set(error);
     }
 
@@ -544,7 +544,7 @@ private:
     TPartIndexList GetErasedIndices(const TPartIndexList& availableIndices) const
     {
         TPartIndexSet set;
-        for (int index = 0; index < Reader_->Codec_->GetTotalPartCount(); ++index) {
+        for (int index = 0; index < Reader_->Codec_->GetParams().TotalPartCount; ++index) {
             set.insert(index);
         }
         for (int index : availableIndices) {
@@ -595,7 +595,8 @@ private:
 
     void OnSessionCanceled(const TError& error)
     {
-        YT_LOG_DEBUG(error, "Erasure rows read session canceled");
+        YT_TLOG_DEBUG("Erasure rows read session canceled")
+            .With(error);
 
         auto guard = Guard(Lock_);
 
@@ -606,7 +607,7 @@ private:
         DoCancelFutures(std::move(guard));
     }
 
-    void DoCancelFutures(TGuard<NThreading::TSpinLock>&& guard)
+    void DoCancelFutures(TGuard<TSpinLock>&& guard)
     {
         std::vector<TFuture<void>> futuresToCancel;
         for (const auto& [_, partSession] : PartSessions_) {

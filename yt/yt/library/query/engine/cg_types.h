@@ -49,6 +49,7 @@ using NYT::NQueryClient::TSubqueryParameters;
 using NYT::NQueryClient::TSubqueryWriteOpClosure;
 using NYT::NQueryClient::TNestedExecutionContext;
 using NYT::NQueryClient::TNestedGroupByClosure;
+using NYT::NQueryClient::TNestedOrderByClosure;
 
 using NYT::NTableClient::TRowBuffer;
 using NYT::NTableClient::TLogicalTypePtr;
@@ -98,6 +99,7 @@ struct TTypeBuilder<bool>
     OPAQUE_TYPE(TLogicalTypePtr*)
 
     OPAQUE_TYPE(TNestedExecutionContext*)
+    OPAQUE_TYPE(TNestedOrderByClosure*)
 
     OPAQUE_TYPE(struct tm*)
 
@@ -108,7 +110,6 @@ struct TTypeBuilder<bool>
 template <>
 struct TTypeBuilder<TRowHeader>
 {
-public:
     enum Fields
     {
         Count,
@@ -126,7 +127,6 @@ public:
 template <>
 struct TTypeBuilder<TRow>
 {
-public:
     using THeader = TTypeBuilder<TRowHeader*>;
 
     enum Fields
@@ -144,7 +144,6 @@ public:
 template <>
 struct TTypeBuilder<TMutableRow>
 {
-public:
     using THeader = TTypeBuilder<TRowHeader*>;
 
     enum Fields
@@ -162,7 +161,6 @@ public:
 template <>
 struct TTypeBuilder<TExpressionClosure>
 {
-public:
     using TOpaqueValues = TTypeBuilder<void* const*>;
     using TBuffer = TTypeBuilder<TExpressionContext*>;
 
@@ -185,7 +183,6 @@ public:
 template <>
 struct TTypeBuilder<TJoinComparers>
 {
-public:
     enum Fields
     {
         PrefixEqComparer,
@@ -213,7 +210,6 @@ public:
 template <>
 struct TTypeBuilder<TNestedExecutionContext>
 {
-public:
     enum Fields
     {
         ExpressionContext,

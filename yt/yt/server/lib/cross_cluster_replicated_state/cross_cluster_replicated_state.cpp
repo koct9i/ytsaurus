@@ -141,7 +141,9 @@ private:
         std::vector<TError> innerErrors;
         for (const auto& [index, versionList] : SEnumerate(versionLists)) {
             if (!versionList.IsOK()) {
-                YT_LOG_DEBUG(versionList, "Received error (ReplicaIndex: %v)", index);
+                YT_TLOG_DEBUG("Received error")
+                    .With("ReplicaIndex", index)
+                    .With(versionList);
                 failedClusters.emplace_back(index);
                 innerErrors.emplace_back(static_cast<const TError&>(versionList));
                 continue;
@@ -151,7 +153,7 @@ private:
 
         if (failedClusters.size() * 2 >= versionLists.size()) {
             auto error = TError("Can't get versions from cluster quorum")
-                << TErrorAttribute("failed_cluster_indices", failedClusters);
+                .With("failed_cluster_indices", failedClusters);
             *error.MutableInnerErrors() = std::move(innerErrors);
             THROW_ERROR std::move(error);
         }
@@ -175,11 +177,10 @@ private:
                 auto version = ConvertTo<std::string>(rawVersion);
                 entryVersions[entry] = std::max(entryVersions[entry], version);
             } catch (const TErrorException& error) {
-                YT_LOG_ERROR(
-                    error,
-                    "Invalid version attribute format (ReplicaIndex: %v, Entry: %Qv)",
-                    replicaIndex,
-                    NYson::ConvertToYsonString(versionEntry, NYson::EYsonFormat::Text));
+                YT_TLOG_ERROR("Invalid version attribute format")
+                    .With("ReplicaIndex", replicaIndex)
+                    .With("Entry", NYson::ConvertToYsonString(versionEntry, NYson::EYsonFormat::Text))
+                    .With(error);
             }
         }
     }
@@ -190,7 +191,9 @@ private:
         std::vector<TError> innerErrors;
         for (const auto& [index, checkResult] : SEnumerate(checkResults)) {
             if (!checkResult.IsOK()) {
-                YT_LOG_DEBUG(checkResult, "Invalid state directory (ReplicaIndex: %v)", index);
+                YT_TLOG_DEBUG("Invalid state directory")
+                    .With("ReplicaIndex", index)
+                    .With(checkResult);
                 failedClusters.emplace_back(index);
                 innerErrors.emplace_back(static_cast<const TError&>(checkResult));
                 continue;
@@ -199,7 +202,7 @@ private:
 
         if (failedClusters.size() * 2 >= checkResults.size()) {
             auto error = TError("Invalid state directories on cluster quorum")
-                << TErrorAttribute("failed_cluster_indices", failedClusters);
+                .With("failed_cluster_indices", failedClusters);
             *error.MutableInnerErrors() = std::move(innerErrors);
             THROW_ERROR std::move(error);
         }

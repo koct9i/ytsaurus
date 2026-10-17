@@ -6,8 +6,9 @@ from yt_commands import (
     write_table, alter_table, read_table, map, merge, sync_reshard_table, sync_create_cells, get_operation,
     sync_mount_table, sync_unmount_table, sync_flush_table, sync_compact_table, gc_collect, pull_queue, sort,
     start_transaction, commit_transaction, get_singular_chunk_id, write_file, read_hunks, remote_copy,
-    write_journal, create_domestic_medium, update_nodes_dynamic_config, raises_yt_error, copy, move, get_tablet_infos,
-    get_account_disk_space_limit, set_account_disk_space_limit, create_dynamic_table, create_user, wait_for_tablet_state)
+    write_journal, update_nodes_dynamic_config, raises_yt_error, copy, move, get_tablet_infos,
+    get_account_disk_space_limit, set_account_disk_space_limit, create_dynamic_table, create_user, wait_for_tablet_state,
+    freeze_table, unmount_table)
 
 from yt_type_helpers import make_schema
 
@@ -1785,7 +1786,7 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
         statistics = get(f"#{root_chunk_list_id}/@statistics")
         assert statistics["row_count"] == 7
         assert statistics["uncompressed_data_size"] == 508
-        assert statistics["data_weight"] == 202
+        assert statistics["data_weight"] == 174
         assert statistics["regular_disk_space"] > 2000
         assert statistics["regular_disk_space"] < 3000
         assert statistics["hunk_data_weight"] == 650
@@ -1842,7 +1843,7 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
         assert chunk_format_statistics["hunk_default"]["data_weight"] == 0
         assert chunk_format_statistics["table_versioned_simple"]["chunk_count"] == 5
         assert chunk_format_statistics["table_versioned_simple"]["uncompressed_data_size"] == 508
-        assert chunk_format_statistics["table_versioned_simple"]["data_weight"] == 202
+        assert chunk_format_statistics["table_versioned_simple"]["data_weight"] == 174
         assert chunk_format_statistics["table_versioned_simple"]["hunk_data_size"] == 690
         assert chunk_format_statistics["table_versioned_simple"]["hunk_data_weight"] == 650
 
@@ -1853,11 +1854,11 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
         assert get("//tmp/t/@unmerged_row_count") == 7
         assert get("//tmp/t/@chunk_count") == 10
         assert get("//tmp/t/@uncompressed_data_size") == 1198
-        assert get("//tmp/t/@data_weight") == 852
+        assert get("//tmp/t/@data_weight") == 824
 
         erasure_statistics = get("//tmp/t/@erasure_statistics")
         assert erasure_statistics["none"]["chunk_count"] == 5
-        assert erasure_statistics["none"]["data_weight"] == 202
+        assert erasure_statistics["none"]["data_weight"] == 174
         assert erasure_statistics["isa_reed_solomon_6_3"]["chunk_count"] == 5
         assert erasure_statistics["isa_reed_solomon_6_3"]["data_weight"] == 0
 
@@ -1865,11 +1866,11 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
         assert compression_statistics["none"]["chunk_count"] == 5
         assert compression_statistics["none"]["data_weight"] == 0
         assert compression_statistics["lz4"]["chunk_count"] == 5
-        assert compression_statistics["lz4"]["data_weight"] == 202
+        assert compression_statistics["lz4"]["data_weight"] == 174
 
         chunk_media_statistics = get("//tmp/t/@chunk_media_statistics")
         assert chunk_media_statistics["default"]["chunk_count"] == 10
-        assert chunk_media_statistics["default"]["data_weight"] == 202
+        assert chunk_media_statistics["default"]["data_weight"] == 174
         assert chunk_media_statistics["default"]["hunk_data_size"] == 690
 
         tablet_statistics = get("//tmp/t/@tablet_statistics")
@@ -1907,7 +1908,7 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
         assert delta_statistics["chunk_count"] == 0
         snapshot_statistics = get("//tmp/t/@snapshot_statistics")
         assert snapshot_statistics["chunk_count"] == 10
-        assert snapshot_statistics["data_weight"] == 852
+        assert snapshot_statistics["data_weight"] == 824
         assert snapshot_statistics["uncompressed_data_size"] == 1198
 
     @authors("akozhikhov")
@@ -1922,6 +1923,7 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
 
         sync_unmount_table("//tmp/t")
         sync_reshard_table("//tmp/t", [[], [10]])
+        set("//tmp/t/@enable_compaction_and_partitioning", False)
         sync_mount_table("//tmp/t")
 
         root_chunk_list_id = get("//tmp/t/@chunk_list_id")
@@ -1937,20 +1939,48 @@ class TestSortedDynamicTablesHunks(TestSortedDynamicTablesBase):
         assert statistics["chunk_count"] == 1
         assert statistics["referenced_regular_disk_space"] == 344
 
-        set("//tmp/t/@forced_compaction_revision", 1)
-        remount_table("//tmp/t")
-        wait(lambda: get("//tmp/t/@chunk_row_count") == 3)
-        wait(lambda: get("//tmp/t/@chunk_count") == 4)
+        store_chunk_ids_before_compaction = builtins.set(self._get_store_chunk_ids("//tmp/t"))
 
-        statistics = get(f"#{root_chunk_list_id}/@statistics")
-        assert statistics["row_count"] == 3
-        assert statistics["chunk_count"] == 2
-        assert statistics["hunk_data_weight"] == 320
-        assert statistics["hunk_data_size"] == 344
-        assert statistics["hunk_erasure_disk_space"] == 0
-        statistics = get(f"#{hunk_root_chunk_list_id}/@statistics")
-        assert statistics["chunk_count"] == 2
-        assert statistics["referenced_regular_disk_space"] == 344
+        set("//tmp/t/@forced_compaction_revision", 1)
+        set("//tmp/t/@enable_compaction_and_partitioning", True)
+        remount_table("//tmp/t")
+
+        expected_compaction_state = {
+            "store_chunks_replaced": True,
+            "root_statistics": {
+                "row_count": 3,
+                "chunk_count": 2,
+                "hunk_data_weight": 320,
+                "hunk_data_size": 344,
+                "hunk_erasure_disk_space": 0,
+            },
+            "hunk_root_statistics": {
+                "chunk_count": 2,
+                "referenced_regular_disk_space": 344,
+            },
+        }
+
+        def _get_compaction_state():
+            store_chunk_ids = builtins.set(self._get_store_chunk_ids("//tmp/t"))
+            root_statistics = get(f"#{root_chunk_list_id}/@statistics")
+            hunk_root_statistics = get(f"#{hunk_root_chunk_list_id}/@statistics")
+            return {
+                "store_chunks_replaced": store_chunk_ids_before_compaction.isdisjoint(store_chunk_ids),
+                "root_statistics": {
+                    key: root_statistics[key]
+                    for key in expected_compaction_state["root_statistics"]
+                },
+                "hunk_root_statistics": {
+                    key: hunk_root_statistics[key]
+                    for key in expected_compaction_state["hunk_root_statistics"]
+                },
+            }
+
+        wait(
+            lambda: _get_compaction_state() == expected_compaction_state,
+            error_message=lambda: "Unexpected state after compaction: {}".format(
+                _get_compaction_state()),
+        )
 
     @authors("akozhikhov")
     @pytest.mark.parametrize("hunk_erasure_codec", ["none", "isa_reed_solomon_6_3"])
@@ -2124,9 +2154,51 @@ class TestOrderedDynamicTablesHunks(TestSortedDynamicTablesBase):
         sync_mount_table("//tmp/t")
         assert_items_equal(select_rows("* from [//tmp/t]"), rows)
 
+        sync_unmount_table("//tmp/t")
         remove("//tmp/t/@hunk_storage_id")
         remove("//tmp/t")
         wait(lambda: not exists("#{}".format(store_chunk_id)))
+
+    @authors("akozhikhov")
+    @pytest.mark.parametrize("state", ["frozen", "unmounted"])
+    def test_unlock_hunk_stores_without_periodic_scan(self, state):
+        update_nodes_dynamic_config({
+            "tablet_node": {
+                "hunk_lock_manager": {
+                    "unlock_check_period": 600000,
+                    "hunk_store_extra_lifetime": 600000,
+                },
+            },
+        })
+
+        sync_create_cells(1)
+        self._create_table()
+        hunk_storage_id = create("hunk_storage", "//tmp/h", attributes={
+            "store_rotation_period": 600000,
+        })
+        set("//tmp/t/@hunk_storage_id", hunk_storage_id)
+        sync_mount_table("//tmp/h")
+        sync_mount_table("//tmp/t")
+
+        rows = [{"key": 0, "value": "x" * 100}]
+        self._insert_rows_with_hunk_storage("//tmp/t", rows)
+
+        tablet_id = get("//tmp/t/@tablets/0/tablet_id")
+        hunk_tablet_id = get("//tmp/h/@tablets/0/tablet_id")
+        hunk_store_id = self._get_active_store_id("//tmp/h")
+        locks_path = (
+            f"//sys/tablets/{hunk_tablet_id}/orchid/stores/{hunk_store_id}/tablet_locks"
+        )
+        assert get(locks_path)[tablet_id] > 0
+
+        command = freeze_table if state == "frozen" else unmount_table
+        command("//tmp/t")
+        wait(lambda: get("//tmp/t/@tablet_state") == state, timeout=30)
+        wait(lambda: tablet_id not in get(locks_path))
+
+        if state == "unmounted":
+            sync_mount_table("//tmp/t")
+        assert_items_equal(select_rows("key, value from [//tmp/t]"), rows)
 
     @authors("akozhikhov", "aleksandra-zh")
     @pytest.mark.parametrize("optimize_for", ["scan", "lookup"])
@@ -2467,6 +2539,152 @@ class TestOrderedDynamicTablesHunks(TestSortedDynamicTablesBase):
             err[0].contains_text("table contains unsealed hunk chunk")
 
     @authors("akozhikhov")
+    def test_cumulative_data_weight_with_hunks(self):
+        sync_create_cells(1)
+
+        schema = [
+            {"name": "key", "type": "int64"},
+            {"name": "value", "type": "string"},
+            {"name": "$cumulative_data_weight", "type": "int64"},
+        ]
+        self._create_table(schema=schema)
+
+        hunk_storage_id = create("hunk_storage", "//tmp/h", attributes={
+            "scan_backoff_period": 1000,
+        })
+        set("//tmp/t/@hunk_storage_id", hunk_storage_id)
+        sync_mount_table("//tmp/h")
+        sync_mount_table("//tmp/t")
+
+        def _expect_cumulative_data_weights(weights, check_on_master=False):
+            rows = select_rows("[$cumulative_data_weight] from [//tmp/t]")
+            assert [row["$cumulative_data_weight"] for row in rows] == weights
+            if check_on_master:
+                cumulative_data_weight = get("//tmp/t/@cumulative_data_weight")
+                assert cumulative_data_weight == rows[-1]["$cumulative_data_weight"]
+
+        self._insert_rows_with_hunk_storage("//tmp/t", [{"key": 0, "value": "a" * 5}])
+        _expect_cumulative_data_weights([22])
+
+        self._insert_rows_with_hunk_storage("//tmp/t", [{"key": 1, "value": "b" * 50}])
+        _expect_cumulative_data_weights([22, 89])
+
+        sync_flush_table("//tmp/t")
+        _expect_cumulative_data_weights([22, 89], check_on_master=True)
+
+        sync_unmount_table("//tmp/t")
+        sync_mount_table("//tmp/t")
+        _expect_cumulative_data_weights([22, 89], check_on_master=True)
+
+        self._insert_rows_with_hunk_storage("//tmp/t", [{"key": 2, "value": "c" * 30}])
+        _expect_cumulative_data_weights([22, 89, 136])
+
+        trim_rows("//tmp/t", 0, 2)
+        _expect_cumulative_data_weights([136])
+
+        sync_unmount_table("//tmp/t")
+        sync_mount_table("//tmp/t")
+        _expect_cumulative_data_weights([136], check_on_master=True)
+
+    @authors("akozhikhov")
+    def test_trimmed_hunk_data_weight_statistics(self):
+        sync_create_cells(1)
+        self._create_table()
+
+        hunk_storage_id = create("hunk_storage", "//tmp/h", attributes={
+            "scan_backoff_period": 1000,
+        })
+        set("//tmp/t/@hunk_storage_id", hunk_storage_id)
+        sync_mount_table("//tmp/h")
+        sync_mount_table("//tmp/t")
+
+        def _get_data_weights():
+            root_chunk_list_id = get("//tmp/t/@chunk_list_id")
+            tablet_chunk_list_id = get("#{}/@child_ids/0".format(root_chunk_list_id))
+            statistics = get("#{}/@statistics".format(tablet_chunk_list_id))
+            return {
+                key: statistics[key]
+                for key in [
+                    "data_weight",
+                    "logical_data_weight",
+                    "trimmed_data_weight",
+                    "hunk_data_weight",
+                    "logical_hunk_data_weight",
+                    "trimmed_hunk_data_weight",
+                ]
+            }
+
+        def _expect_data_weights(data_weight, hunk_data_weight, trimmed_data_weight, trimmed_hunk_data_weight):
+            expected = {
+                "data_weight": data_weight,
+                "logical_data_weight": data_weight + trimmed_data_weight,
+                "trimmed_data_weight": trimmed_data_weight,
+                "hunk_data_weight": hunk_data_weight,
+                "logical_hunk_data_weight": hunk_data_weight + trimmed_hunk_data_weight,
+                "trimmed_hunk_data_weight": trimmed_hunk_data_weight,
+            }
+            # NB: Trimming is asynchronous.
+            wait(lambda: _get_data_weights() == expected)
+
+        # NB: Data weight of a row consists of the row's own weight, the weight of its int64 key
+        # and the weight of its value. The latter is accounted for in hunk data weight instead
+        # if the value is large enough to be moved to a hunk chunk.
+        hunk_row_weight = 1 + 8
+        inline_row_weight = 1 + 8 + 5
+
+        self._insert_rows_with_hunk_storage("//tmp/t", [
+            {"key": 0, "value": "a" * 20},
+            {"key": 1, "value": "b" * 5},
+        ])
+        sync_flush_table("//tmp/t")
+        _expect_data_weights(
+            data_weight=hunk_row_weight + inline_row_weight,
+            hunk_data_weight=20,
+            trimmed_data_weight=0,
+            trimmed_hunk_data_weight=0)
+
+        self._insert_rows_with_hunk_storage("//tmp/t", [{"key": 2, "value": "c" * 30}])
+        sync_flush_table("//tmp/t")
+        _expect_data_weights(
+            data_weight=2 * hunk_row_weight + inline_row_weight,
+            hunk_data_weight=20 + 30,
+            trimmed_data_weight=0,
+            trimmed_hunk_data_weight=0)
+
+        # Trim the first store away.
+        trim_rows("//tmp/t", 0, 2)
+        _expect_data_weights(
+            data_weight=hunk_row_weight,
+            hunk_data_weight=30,
+            trimmed_data_weight=hunk_row_weight + inline_row_weight,
+            trimmed_hunk_data_weight=20)
+
+        self._insert_rows_with_hunk_storage("//tmp/t", [{"key": 3, "value": "d" * 40}])
+        sync_flush_table("//tmp/t")
+        _expect_data_weights(
+            data_weight=2 * hunk_row_weight,
+            hunk_data_weight=30 + 40,
+            trimmed_data_weight=hunk_row_weight + inline_row_weight,
+            trimmed_hunk_data_weight=20)
+
+        # Trimmed data weights survive unmount-mount.
+        sync_unmount_table("//tmp/t")
+        sync_mount_table("//tmp/t")
+        _expect_data_weights(
+            data_weight=2 * hunk_row_weight,
+            hunk_data_weight=30 + 40,
+            trimmed_data_weight=hunk_row_weight + inline_row_weight,
+            trimmed_hunk_data_weight=20)
+
+        # Trim the second store away.
+        trim_rows("//tmp/t", 0, 3)
+        _expect_data_weights(
+            data_weight=hunk_row_weight,
+            hunk_data_weight=40,
+            trimmed_data_weight=2 * hunk_row_weight + inline_row_weight,
+            trimmed_hunk_data_weight=20 + 30)
+
+    @authors("akozhikhov")
     def test_reshard_ordered_table_with_hunks(self):
         sync_create_cells(1)
         self._create_table()
@@ -2698,7 +2916,7 @@ class TestOrderedDynamicTablesHunks(TestSortedDynamicTablesBase):
         assert rows[:2] == pull_queue("//tmp/t", offset=0, partition_index=0, max_row_count=2)
         assert rows[1:3] == pull_queue("//tmp/t", offset=1, partition_index=0, max_row_count=2)
 
-        assert rows[:5] == pull_queue("//tmp/t", offset=0, partition_index=0, max_data_weight=200)
+        assert rows[:2] == pull_queue("//tmp/t", offset=0, partition_index=0, max_data_weight=200)
 
     @authors("akozhikhov")
     def test_seal_after_queue_copy(self):
@@ -3286,7 +3504,6 @@ class TestOrderedDynamicTablesHunks(TestSortedDynamicTablesBase):
 class TestDynamicTablesHunkMedia(YTEnvSetup):
     ENABLE_MULTIDAEMON = False  # There are component restarts.
     NUM_NODES = 10
-    STORE_LOCATION_COUNT = 3
     DELTA_DYNAMIC_NODE_CONFIG = {
         "%true": {
             "tablet_node": {
@@ -3301,6 +3518,12 @@ class TestDynamicTablesHunkMedia(YTEnvSetup):
     NON_DEFAULT_MEDIUM_1 = "hdd1"
     NON_DEFAULT_MEDIUM_2 = "hdd2"
 
+    MEDIUM_CONFIG = {
+        "default": {},
+        NON_DEFAULT_MEDIUM_1: {},
+        NON_DEFAULT_MEDIUM_2: {},
+    }
+
     SORTED_SCHEMA = [
         {"name": "key", "type": "int64", "sort_order": "ascending"},
         {"name": "value", "type": "string", "max_inline_hunk_size": 10},
@@ -3310,20 +3533,6 @@ class TestDynamicTablesHunkMedia(YTEnvSetup):
         {"name": "key", "type": "int64"},
         {"name": "value", "type": "string", "max_inline_hunk_size": 10},
     ]
-
-    @classmethod
-    def on_masters_started(cls):
-        super(TestDynamicTablesHunkMedia, cls).on_masters_started()
-        create_domestic_medium(cls.NON_DEFAULT_MEDIUM_1)
-        create_domestic_medium(cls.NON_DEFAULT_MEDIUM_2)
-
-    @classmethod
-    def modify_node_config(cls, config, cluster_index):
-        assert len(config["data_node"]["store_locations"]) == 3
-
-        config["data_node"]["store_locations"][0]["medium_name"] = "default"
-        config["data_node"]["store_locations"][1]["medium_name"] = cls.NON_DEFAULT_MEDIUM_1
-        config["data_node"]["store_locations"][2]["medium_name"] = cls.NON_DEFAULT_MEDIUM_2
 
     @classmethod
     def setup_class(cls):
@@ -3846,7 +4055,11 @@ class TestDynamicTablesHunkMedia(YTEnvSetup):
 
     @authors("shakurov")
     def test_hunk_media_requisitions_multiple_tables(self):
-        self._init_sorted_dynamic_table("//tmp/t")
+        # Disable compaction so the per-flush hunk chunks are not merged into a
+        # single one before the assertion below.
+        self._init_sorted_dynamic_table(
+            "//tmp/t",
+            mount_config={"enable_compaction_and_partitioning": False})
 
         for i in range(5):
             rows = [{"key": 2 * i, "value": "a"}, {"key": 1 + 2 * i, "value": "b"*100}]
@@ -3907,60 +4120,6 @@ class TestDynamicTablesHunkMedia(YTEnvSetup):
 class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     ENABLE_MULTIDAEMON = True
 
-    def _setup_for_dictionary_compression(self, path):
-        set("{}/@mount_config/enable_lsm_verbose_logging".format(path), True)
-        set("{}/@mount_config/value_dictionary_compression".format(path), {
-            "enable": True,
-            "column_dictionary_size": 256,
-            "max_processed_chunk_count": 2,
-            "backoff_period": 1000,
-        })
-        set("{}/@hunk_chunk_reader/max_decompression_blob_size".format(path), 100)
-
-    def _wait_dictionaries_built(self, path, previous_hunk_chunk_count):
-        # One dictionary hunk chunk for each of two policies.
-        wait(lambda: len(self._get_hunk_chunk_ids(path)) == previous_hunk_chunk_count + 2)
-
-    def _find_data_hunk_chunks(self, path):
-        store_chunk_ids = self._get_store_chunk_ids(path)
-        data_hunk_chunk_ids = builtins.set()
-        for chunk_id in store_chunk_ids:
-            hunk_chunk_refs = get("#{}/@hunk_chunk_refs".format(chunk_id))
-            for ref in hunk_chunk_refs:
-                if ref["hunk_count"] != 0:
-                    data_hunk_chunk_ids.add(ref["chunk_id"])
-        return list(data_hunk_chunk_ids)
-
-    def _do_find_referenced_dictionary_hunk_chunks(self, path):
-        data_hunk_chunk_ids = self._find_data_hunk_chunks(path)
-        hunk_chunk_ids = self._get_hunk_chunk_ids(path)
-        dictionary_hunk_chunk_ids = [chunk_id for chunk_id in hunk_chunk_ids if chunk_id not in data_hunk_chunk_ids]
-
-        tablet_info = get(f"{path}/@tablets/0")
-
-        def is_referenced_dictionary(chunk_id):
-            try:
-                hunk_chunk_info = get("//sys/cluster_nodes/{}/orchid/tablet_cells/{}/tablets/{}/hunk_chunks/{}".format(
-                    tablet_info["cell_leader_address"],
-                    tablet_info["cell_id"],
-                    tablet_info["tablet_id"],
-                    chunk_id,
-                ))
-                return "dictionary_compression_policy" in hunk_chunk_info and not hunk_chunk_info["dangling"]
-            except YtError as err:
-                if err.contains_code(yt_error_codes.ResolveErrorCode):
-                    return False
-                raise
-
-        return [chunk_id for chunk_id in dictionary_hunk_chunk_ids if is_referenced_dictionary(chunk_id)]
-
-    def _find_referenced_dictionary_hunk_chunks(self, path, expected_count):
-        if expected_count is None:
-            return self._do_find_referenced_dictionary_hunk_chunks(path)
-
-        wait(lambda: len(self._do_find_referenced_dictionary_hunk_chunks(path)) == expected_count)
-        return self._do_find_referenced_dictionary_hunk_chunks(path)
-
     def _perform_forced_compaction(self, path, compaction_type):
         chunk_ids_before_compaction = builtins.set(self._get_store_chunk_ids(path))
         set("{}/@forced_{}_revision".format(path, compaction_type), 1)
@@ -3976,7 +4135,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_simple(self, in_memory_mode):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@in_memory_mode", in_memory_mode)
         sync_mount_table("//tmp/t")
 
@@ -3984,7 +4143,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
 
         rows2 = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100, 200)]
         insert_rows("//tmp/t", rows2)
@@ -3997,14 +4156,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_compaction(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
 
         rows2 = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100, 200)]
         insert_rows("//tmp/t", rows2)
@@ -4030,7 +4189,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_no_policy_probation(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@mount_config/value_dictionary_compression/policy_probation_samples_size", 500)
         set("//tmp/t/@mount_config/value_dictionary_compression/max_acceptable_compression_ratio", 1)
         sync_mount_table("//tmp/t")
@@ -4039,7 +4198,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
 
         rows2 = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100, 200)]
         insert_rows("//tmp/t", rows2)
@@ -4052,7 +4211,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_dictionary_refs(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@max_hunk_compaction_size", 1)
         sync_mount_table("//tmp/t")
 
@@ -4060,7 +4219,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
 
         dictionary_ids = self._find_referenced_dictionary_hunk_chunks("//tmp/t", 2)
         assert len(dictionary_ids) == 2
@@ -4106,7 +4265,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         alter_table("//tmp/t", schema=self._get_table_schema(schema=self.SCHEMA, max_inline_hunk_size=1000))
         sync_mount_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 2)
+        self._wait_value_dictionaries_built("//tmp/t", 2)
 
         self._perform_forced_compaction("//tmp/t", "compaction")
         new_store_chunk_ids_4 = self._get_store_chunk_ids("//tmp/t")
@@ -4127,14 +4286,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_inline_hunks(self):
         sync_create_cells(1)
         self._create_table(max_inline_hunk_size=1000)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 0)
+        self._wait_value_dictionaries_built("//tmp/t", 0)
 
         rows2 = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100, 200)]
         insert_rows("//tmp/t", rows2)
@@ -4152,14 +4311,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_read_after_disable(self):
         sync_create_cells(1)
         self._create_table(max_inline_hunk_size=1000)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 0)
+        self._wait_value_dictionaries_built("//tmp/t", 0)
         self._perform_forced_compaction("//tmp/t", "compaction")
         keys = [{"key": i} for i in range(100)]
         assert_items_equal(lookup_rows("//tmp/t", keys), rows)
@@ -4182,14 +4341,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_read_after_schema_alter(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         sync_unmount_table("//tmp/t")
@@ -4211,14 +4370,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_specify_policy_and_check_attribute(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         dictionary_ids = self._find_referenced_dictionary_hunk_chunks("//tmp/t", 2)
@@ -4238,7 +4397,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         remount_table("//tmp/t")
         set("//tmp/t/@mount_config/value_dictionary_compression/applied_policies", ["large_chunk_first"])
         remount_table("//tmp/t")
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
 
         self._perform_forced_compaction("//tmp/t", "store_compaction")
         new_dictionary_ids = self._find_referenced_dictionary_hunk_chunks("//tmp/t", 2)
@@ -4270,14 +4429,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100, "value2": "y" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4310,7 +4469,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS, max_inline_hunk_size=25)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         # Compressor will be created only for first value column.
@@ -4321,7 +4480,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
 
         assert len(self._find_data_hunk_chunks("//tmp/t")) == 1
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         assert len(self._find_data_hunk_chunks("//tmp/t")) == 0
@@ -4353,14 +4512,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_lookup_nonexistent_rows(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(200)]
@@ -4371,14 +4530,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_rebuild_dictionary(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
         dictionary_ids = self._find_referenced_dictionary_hunk_chunks("//tmp/t", 2)
         assert len(dictionary_ids) == 2
@@ -4387,7 +4546,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         remount_table("//tmp/t")
         set("//tmp/t/@mount_config/value_dictionary_compression/applied_policies", ["large_chunk_first", "fresh_chunk_first"])
         remount_table("//tmp/t")
-        self._wait_dictionaries_built("//tmp/t", 2)
+        self._wait_value_dictionaries_built("//tmp/t", 2)
 
         rows2 = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100, 200)]
         insert_rows("//tmp/t", rows2)
@@ -4415,12 +4574,12 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         write_table("//tmp/t", rows)
         alter_table("//tmp/t", dynamic=True)
 
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@chunk_format", "table_versioned_simple")
 
         sync_mount_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 0)
+        self._wait_value_dictionaries_built("//tmp/t", 0)
 
         keys = [{"key": i} for i in range(100)]
         assert_items_equal(lookup_rows("//tmp/t", keys), rows)
@@ -4441,14 +4600,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_destroy_dictionaries_upon_remount(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         dictionary_ids = self._find_referenced_dictionary_hunk_chunks("//tmp/t", 2)
@@ -4473,14 +4632,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "x" * 100, "value2": "y" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4516,14 +4675,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "x" * 100, "value2": "y" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4549,7 +4708,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         if enable_hash_chunk_index:
             self._enable_hash_chunk_index("//tmp/t")
         if enable_data_node_lookup:
@@ -4560,7 +4719,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4576,21 +4735,22 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100, "value2": str(i) + "y" * 40} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         def _check_statistics():
             chunk_format_statistics = get("//tmp/t/@chunk_format_statistics")
             if chunk_format_statistics["hunk_default"]["chunk_count"] != 3:
                 return False
-            assert chunk_format_statistics["table_versioned_simple"]["data_weight"] == 18080
+            # External values contribute local hunk references to the store chunk data weight.
+            assert chunk_format_statistics["table_versioned_simple"]["data_weight"] == 7890
             assert chunk_format_statistics["table_versioned_simple"]["uncompressed_data_size"] == 10016
             assert chunk_format_statistics["table_versioned_simple"]["compressed_data_size"] < 5000
             # TODO(akozhikhov): YT-26629
@@ -4601,10 +4761,125 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         wait(lambda: _check_statistics())
 
     @authors("akozhikhov")
+    def test_value_compression_mixed_hunk_read_data_weight(self):
+        sync_create_cells(1)
+        self._create_table(max_inline_hunk_size=1)
+        self._setup_for_value_dictionary_compression("//tmp/t")
+        set("//tmp/t/@hunk_chunk_reader/max_hunk_count_per_read", 10)
+        set("//tmp/t/@hunk_chunk_reader/max_total_hunk_length_per_read", 10000)
+        set("//tmp/t/@min_compaction_store_count", 100)
+        set("//tmp/t/@max_compaction_store_count", 200)
+        set("//tmp/t/@min_partitioning_store_count", 100)
+        set("//tmp/t/@max_partitioning_store_count", 200)
+        sync_mount_table("//tmp/t")
+        update_nodes_dynamic_config({
+            "tablet_node": {
+                "compression_dictionary_cache": {
+                    "capacity": 10000000,
+                }
+            }
+        })
+
+        rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
+        insert_rows("//tmp/t", rows)
+        sync_flush_table("//tmp/t")
+
+        uncompressed_hunk_chunk_ids = builtins.set(self._find_data_hunk_chunks("//tmp/t"))
+        assert len(uncompressed_hunk_chunk_ids) == 1
+        uncompressed_hunk_chunk_id = next(iter(uncompressed_hunk_chunk_ids))
+        assert not exists("#{}/@compression_dictionary_id".format(uncompressed_hunk_chunk_id))
+
+        self._wait_value_dictionaries_built("//tmp/t", 1)
+
+        compressed_row = {"key": 100, "value": "value100" + "x" * 100}
+        insert_rows("//tmp/t", [compressed_row])
+        sync_flush_table("//tmp/t")
+
+        compressed_hunk_chunk_ids = (
+            builtins.set(self._find_data_hunk_chunks("//tmp/t")) - uncompressed_hunk_chunk_ids)
+        assert len(compressed_hunk_chunk_ids) == 1
+        compressed_hunk_chunk_id = next(iter(compressed_hunk_chunk_ids))
+        assert exists("#{}/@compression_dictionary_id".format(compressed_hunk_chunk_id))
+
+        hunk_count = get("#{}/@hunk_count".format(uncompressed_hunk_chunk_id))
+        total_hunk_length = get("#{}/@total_hunk_length".format(uncompressed_hunk_chunk_id))
+        uncompressed_data_size = get("#{}/@uncompressed_data_size".format(uncompressed_hunk_chunk_id))
+        assert (uncompressed_data_size - total_hunk_length) % hunk_count == 0
+        hunk_header_size = (uncompressed_data_size - total_hunk_length) // hunk_count
+
+        expected_data_weight = hunk_header_size + len(rows[0]["value"]) + len(compressed_row["value"])
+        hunk_data_weight = self._init_tablet_sensor("//tmp/t", "lookup/hunks/data_weight")
+
+        assert_items_equal(
+            lookup_rows("//tmp/t", [{"key": rows[0]["key"]}, {"key": compressed_row["key"]}]),
+            [rows[0], compressed_row])
+
+        wait(lambda: hunk_data_weight.get_delta() >= expected_data_weight)
+        assert hunk_data_weight.get_delta() == expected_data_weight
+
+    @authors("akozhikhov")
+    def test_value_compression_external_hunk_store_data_weight(self):
+        sync_create_cells(1)
+        self._create_table(max_inline_hunk_size=1)
+        self._setup_for_value_dictionary_compression("//tmp/t")
+        set("//tmp/t/@min_compaction_store_count", 100)
+        set("//tmp/t/@max_compaction_store_count", 200)
+        set("//tmp/t/@min_partitioning_store_count", 100)
+        set("//tmp/t/@max_partitioning_store_count", 200)
+        sync_mount_table("//tmp/t")
+
+        rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
+        insert_rows("//tmp/t", rows)
+        sync_flush_table("//tmp/t")
+
+        self._wait_value_dictionaries_built("//tmp/t", 1)
+
+        store_chunk_ids = builtins.set(self._get_store_chunk_ids("//tmp/t"))
+        data_hunk_chunk_ids = builtins.set(self._find_data_hunk_chunks("//tmp/t"))
+
+        row = {"key": 100, "value": "value100" + "x" * 100}
+        insert_rows("//tmp/t", [row])
+        sync_flush_table("//tmp/t")
+
+        new_store_chunk_ids = builtins.set(self._get_store_chunk_ids("//tmp/t")) - store_chunk_ids
+        assert len(new_store_chunk_ids) == 1
+        new_store_chunk_id = next(iter(new_store_chunk_ids))
+        assert exists("#{}/@compression_dictionary_id".format(new_store_chunk_id))
+
+        new_data_hunk_chunk_ids = (
+            builtins.set(self._find_data_hunk_chunks("//tmp/t")) - data_hunk_chunk_ids)
+        assert len(new_data_hunk_chunk_ids) == 1
+        new_data_hunk_chunk_id = next(iter(new_data_hunk_chunk_ids))
+        assert exists("#{}/@compression_dictionary_id".format(new_data_hunk_chunk_id))
+
+        hunk_chunk_refs = get("#{}/@hunk_chunk_refs".format(new_store_chunk_id))
+        data_hunk_chunk_refs = [
+            (index, ref)
+            for index, ref in enumerate(hunk_chunk_refs)
+            if ref["hunk_count"] > 0
+        ]
+        assert len(data_hunk_chunk_refs) == 1
+        hunk_chunk_index, hunk_chunk_ref = data_hunk_chunk_refs[0]
+        assert hunk_chunk_ref["chunk_id"] == new_data_hunk_chunk_id
+        assert hunk_chunk_ref["hunk_count"] == 1
+
+        def get_varuint_size(value):
+            return max(1, (value.bit_length() + 6) // 7)
+
+        local_hunk_ref_size = (
+            1 +
+            get_varuint_size(hunk_chunk_index) +
+            get_varuint_size(hunk_chunk_ref["total_hunk_length"]) +
+            get_varuint_size(0) +
+            get_varuint_size(0))
+        expected_store_data_weight = 3 * 8 + local_hunk_ref_size
+        assert get("#{}/@data_weight".format(new_store_chunk_id)) == expected_store_data_weight
+
+    @authors("akozhikhov")
     def test_value_compression_dictionary_cache(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         update_nodes_dynamic_config({
@@ -4619,7 +4894,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4643,7 +4918,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_build_from_multiple_blocks(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@chunk_writer", {"block_size": 25})
         sync_mount_table("//tmp/t")
 
@@ -4651,7 +4926,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4661,7 +4936,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         sync_unmount_table("//tmp/t")
         sync_mount_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 2)
+        self._wait_value_dictionaries_built("//tmp/t", 2)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         assert_items_equal(lookup_rows("//tmp/t", keys), rows)
@@ -4676,14 +4951,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
 
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         keys = [{"key": i} for i in range(100)]
@@ -4693,7 +4968,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         alter_table("//tmp/t", schema=SCHEMA_WITH_MULTIPLE_KEY_COLUMNS)
         sync_mount_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 2)
+        self._wait_value_dictionaries_built("//tmp/t", 2)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         rows = [{"key": i, "key1": yson.YsonEntity(), "value": "value" + str(i) + "x" * 100} for i in range(100)]
@@ -4703,14 +4978,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_read_from_map(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "value" + str(i) + "x" * 100} for i in range(100)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         assert read_table("//tmp/t") == rows
@@ -4733,14 +5008,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         ]
         sync_create_cells(1)
         self._create_table(schema=SCHEMA_WITH_MULTIPLE_COLUMNS)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "key1": i + 1, "value": "value" + str(i) + "x" * 100, "value1": "y"} for i in range(10)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         assert_items_equal(
@@ -4754,7 +5029,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_empty_strings(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         keys = [{"key": i} for i in range(100)]
@@ -4762,7 +5037,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows + [{"key": 100, "value": ""}])
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         assert_items_equal(lookup_rows("//tmp/t", keys + [{"key": 100}]), rows + [{"key": 100, "value": ""}])
@@ -4771,7 +5046,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_multiple_chunks_compaction(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@chunk_writer", {"desired_chunk_weight": 750})
         set("//tmp/t/@mount_config/value_dictionary_compression/elect_random_policy", True)
         sync_mount_table("//tmp/t")
@@ -4780,7 +5055,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         get("//tmp/t/@chunk_ids")
@@ -4794,7 +5069,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_partitioning(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         set("//tmp/t/@mount_config/value_dictionary_compression/elect_random_policy", True)
         set("//tmp/t/@chunk_writer", {"block_size": 64, "testing_delay_before_chunk_close": 1000})
         set("//tmp/t/@compression_codec", "none")
@@ -4804,7 +5079,7 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
 
         tablet_id = get("//tmp/t/@tablets/0/tablet_id")
         address = get_tablet_leader_address(tablet_id)
@@ -4845,14 +5120,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
             {"name": "value2", "type": "string", "max_inline_hunk_size": 10},
         ]
         self._create_table(schema=schema)
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value1": "i am huuuunk" * 5, "value2": "i am hunk too" * 5} for i in range(10)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         merge(
@@ -4899,14 +5174,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
             {"name": "value1", "type": "string", "max_inline_hunk_size": 10},
             {"name": "value2", "type": "string", "max_inline_hunk_size": 10},
         ])
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value1": "i am huuuunk" * 30, "value2": "i am hunk too" * 30} for i in range(10)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         def _filter_rows(rows, keys):
@@ -4926,14 +5201,14 @@ class TestHunkValuesDictionaryCompression(TestSortedDynamicTablesHunks):
     def test_value_compression_hunk_statistics(self):
         sync_create_cells(1)
         self._create_table()
-        self._setup_for_dictionary_compression("//tmp/t")
+        self._setup_for_value_dictionary_compression("//tmp/t")
         sync_mount_table("//tmp/t")
 
         rows = [{"key": i, "value": "x" * 100} for i in range(10)]
         insert_rows("//tmp/t", rows)
         sync_flush_table("//tmp/t")
 
-        self._wait_dictionaries_built("//tmp/t", 1)
+        self._wait_value_dictionaries_built("//tmp/t", 1)
         self._perform_forced_compaction("//tmp/t", "compaction")
 
         root_chunk_list_id = get("//tmp/t/@chunk_list_id")
@@ -5141,7 +5416,7 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
 
         alter_table("//tmp/t", dynamic=True)
         assert get("//tmp/h/@associated_nodes") == []
-        assert not exists("//tmp/t/@hunk_storage_id")
+        assert get("//tmp/t/@hunk_storage_id") == "0-0-0-0"
 
         sync_mount_table("//tmp/t")
         rows2 = [{"key": i, "value": "value" + str(i) + "x" * 20} for i in range(10, 20)]
@@ -5396,8 +5671,8 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         assert statistics["referenced_regular_disk_space"] == 340
         assert statistics["chunk_count"] == 1
 
-        snapshot_statistics = get("//tmp/t/@snapshot_statistics")
-        assert snapshot_statistics["chunk_count"] == 2
+        # Hunk sealing statistics reach the native cell asynchronously.
+        wait(lambda: get("//tmp/t/@snapshot_statistics")["chunk_count"] == 2)
 
         tx = start_transaction()
         copy("//tmp/t", "//tmp/t3", tx=tx)
@@ -5513,7 +5788,7 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         hunk_root_chunk_list_id = get("//tmp/t/@hunk_chunk_list_id")
         statistics = get(f"#{root_chunk_list_id}/@statistics")
         assert statistics["chunk_count"] == 2
-        assert statistics["data_weight"] == 327
+        assert statistics["data_weight"] == 121
         assert statistics["hunk_data_weight"] == 260
         statistics = get(f"#{hunk_root_chunk_list_id}/@statistics")
         assert statistics["chunk_count"] == 1
@@ -5524,7 +5799,7 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         assert snapshot_statistics["chunk_count"] == 3
         assert snapshot_statistics["regular_disk_space"] > 5000
         assert snapshot_statistics["regular_disk_space"] < 6000
-        assert snapshot_statistics["data_weight"] == 587
+        assert snapshot_statistics["data_weight"] == 381
 
         new_rows_2 = [{"key": 12, "value": str(12) + "a" * 20}]
         self._insert_rows_with_hunk_storage("//tmp/t", new_rows_2)
@@ -5538,7 +5813,7 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         statistics = get(f"#{root_chunk_list_id}/@statistics")
         assert statistics["row_count"] == 12
         assert statistics["chunk_count"] == 3
-        assert statistics["data_weight"] == 356
+        assert statistics["data_weight"] == 130
         assert statistics["hunk_data_weight"] == 282
         statistics = get(f"#{hunk_root_chunk_list_id}/@statistics")
         assert statistics["chunk_count"] == 2
@@ -5547,7 +5822,7 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         assert statistics["regular_disk_space"] < 9000
         snapshot_statistics = get("//tmp/t/@snapshot_statistics")
         assert snapshot_statistics["chunk_count"] == 5
-        assert snapshot_statistics["data_weight"] == 638
+        assert snapshot_statistics["data_weight"] == 412
 
         alter_table("//tmp/t", dynamic=True)
         sync_mount_table("//tmp/t")
@@ -5563,7 +5838,7 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         statistics = get(f"#{root_chunk_list_id}/@statistics")
         assert statistics["row_count"] == 2
         assert statistics["chunk_count"] == 2
-        assert statistics["data_weight"] == 60
+        assert statistics["data_weight"] == 40
         assert statistics["hunk_data_weight"] == 22
         statistics = get(f"#{hunk_root_chunk_list_id}/@statistics")
         assert statistics["chunk_count"] == 1
@@ -5572,7 +5847,30 @@ class TestHunksInStaticTable(TestSortedDynamicTablesBase):
         assert statistics["regular_disk_space"] < 5000
         snapshot_statistics = get("//tmp/t/@snapshot_statistics")
         assert snapshot_statistics["chunk_count"] == 3
-        assert snapshot_statistics["data_weight"] == 82
+        assert snapshot_statistics["data_weight"] == 62
+
+    @authors("babenko")
+    def test_static_hunks_has_hunk_chunk_list(self):
+        create("table", "//tmp/t", attributes={"schema": self.SCHEMA})
+        assert not get("//tmp/t/@has_hunk_chunk_list")
+        assert get("//tmp/t/@hunk_chunk_list_id") == "0-0-0-0"
+
+        create("table", "//tmp/t_hunk", attributes={"schema": self.SCHEMA, "has_hunk_chunk_list": True})
+        assert get("//tmp/t_hunk/@has_hunk_chunk_list")
+        assert get("//tmp/t_hunk/@hunk_chunk_list_id") != "0-0-0-0"
+        assert "has_hunk_chunk_list" not in get("//tmp/t_hunk/@user_attribute_keys")
+
+        with raises_yt_error("Builtin attribute \"has_hunk_chunk_list\" cannot be set"):
+            set("//tmp/t/@has_hunk_chunk_list", True)
+        with raises_yt_error("Attribute \"has_hunk_chunk_list\" cannot be removed"):
+            remove("//tmp/t_hunk/@has_hunk_chunk_list")
+
+        with raises_yt_error("Cannot set \"has_hunk_chunk_list\" option for dynamic tables"):
+            create("table", "//tmp/t_dynamic", attributes={
+                "schema": self.SCHEMA,
+                "dynamic": True,
+                "has_hunk_chunk_list": True,
+            })
 
 
 class TestHunksInStaticTableMulticell(TestHunksInStaticTable):
@@ -5766,6 +6064,34 @@ class TestOrderedDynamicTablesHunksRpc(TestSortedDynamicTablesBase):
         {"name": "key", "type": "int64"},
         {"name": "value", "type": "string", "max_inline_hunk_size": 10},
     ]
+
+    @authors("akozhikhov")
+    def test_unmounted_queue_does_not_write_hunks(self):
+        sync_create_cells(1)
+
+        self._create_simple_table("//tmp/t", schema=self.SCHEMA)
+        hunk_storage_id = create("hunk_storage", "//tmp/h", attributes={
+            "scan_backoff_period": 1000,
+            "store_rotation_period": 1000000,
+        })
+        set("//tmp/t/@hunk_storage_id", hunk_storage_id)
+        sync_mount_table("//tmp/h")
+
+        hunk_tablet_id = get("//tmp/h/@tablets/0/tablet_id")
+        hunk_tablet_orchid = "//sys/tablets/{}/orchid".format(hunk_tablet_id)
+        wait(lambda: exists("{}/active_store_id".format(hunk_tablet_orchid)))
+        active_store_id = get("{}/active_store_id".format(hunk_tablet_orchid))
+        last_write_time_path = "{}/stores/{}/last_write_time".format(
+            hunk_tablet_orchid,
+            active_store_id,
+        )
+        last_write_time = get(last_write_time_path)
+
+        rows = [{"key": 0, "value": "0" * 100, "$tablet_index": 0}]
+        with raises_yt_error(".* .* has no mounted tablets"):
+            self._insert_rows_with_hunk_storage("//tmp/t", rows)
+
+        assert get(last_write_time_path) == last_write_time
 
     @authors("akozhikhov")
     def test_unmounted_errors_1(self):

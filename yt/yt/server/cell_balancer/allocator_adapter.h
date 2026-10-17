@@ -11,7 +11,6 @@ namespace NYT::NCellBalancer {
 struct IAllocatorAdapter
     : public TRefCounted
 {
-public:
     virtual bool IsNewAllocationAllowed(
         const TBundleInfoPtr& /*bundleInfo*/,
         const std::string& /*dataCenterName*/,
@@ -90,7 +89,8 @@ public:
     virtual void SetDefaultSpareAttributes(const std::string& proxyName, TSchedulerMutations* mutations) const = 0;
 
     virtual const THashSet<std::string>& GetAliveInstances(const std::string& dataCenterName) const = 0;
-    virtual std::vector<std::string> GetOfflineInstances(
+
+    virtual std::vector<std::string> GetOfflineInstancesToDeallocate(
         const TSchedulerInputState& input,
         const std::string& dataCenterName) const = 0;
 

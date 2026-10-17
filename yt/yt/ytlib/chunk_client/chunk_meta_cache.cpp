@@ -10,7 +10,7 @@
 
 #include <yt/yt_proto/yt/client/chunk_client/proto/chunk_meta.pb.h>
 
-#include <library/cpp/yt/threading/rw_spin_lock.h>
+#include <library/cpp/yt/system/rw_spin_lock.h>
 
 namespace NYT::NChunkClient {
 
@@ -61,7 +61,8 @@ public:
             for (int index = 1; index < std::ssize(*extensionTags); ++index) {
                 if (extensionTags.value()[index - 1] == extensionTags.value()[index]) {
                     return MakeFuture<TRefCountedChunkMetaPtr>(
-                        TError("Extension tags are not unique (Tags: %v)", *extensionTags));
+                        TError("Extension tags are not unique")
+                            .With("extension_tags", *extensionTags));
                 }
             }
         }
@@ -201,7 +202,7 @@ public:
     }
 
 private:
-    mutable YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, Lock_);
+    mutable YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, Lock_);
 
     TRefCountedChunkMetaPtr MainMeta_;
 
@@ -335,7 +336,7 @@ private:
                     NChunkClient::EErrorCode::ChunkMetaCacheFetchFailed,
                     "Error fetching meta for chunk %v",
                     chunkId)
-                    << metaOrError;
+                    .With(metaOrError);
                 cookie.Cancel(error);
                 THROW_ERROR(error);
             }

@@ -33,8 +33,19 @@ struct TShuffleWireRecordTag { };
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TShuffleRecordBuilder::TShuffleRecordBuilder(i32 mapperId, i64 startRowId)
-    : MapperId_(mapperId)
+bool TIdentityColumnIds::AreValid() const noexcept
+{
+    return WriterId >= 0 &&
+        WriterId < MaxColumnId &&
+        RowId >= 0 &&
+        RowId < MaxColumnId &&
+        WriterId != RowId;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TShuffleRecordBuilder::TShuffleRecordBuilder(i32 writerId, i64 startRowId)
+    : WriterId_(writerId)
     , NextRowId_(startRowId)
     , BlockWriter_(std::in_place, EmptyTableSchema, GetNullMemoryUsageTracker())
 { }
@@ -61,7 +72,7 @@ std::optional<TShuffleRecord> TShuffleRecordBuilder::FlushRecord()
     return TShuffleRecord{
         .Header = TRecordHeader{
             .RowCount = static_cast<i32>(rowCount),
-            .MapperId = MapperId_,
+            .WriterId = WriterId_,
             .StartRow = startRow,
         },
         .UncompressedPayload = std::move(block.Data),
@@ -79,6 +90,11 @@ i64 TShuffleRecordBuilder::GetDataSize() const
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+TRecordHeader ReadShuffleRecordHeader(const TSharedRef& wire)
+{
+    return ReadShuffleRecordHeader(TRange(&wire, 1));
+}
 
 TRecordHeader ReadShuffleRecordHeader(TRange<TSharedRef> wire)
 {
@@ -111,6 +127,13 @@ std::vector<TSharedRef> CompressShuffleRecord(
 
     auto* codecPtr = GetCodec(codec);
     return {TSharedRef(std::move(headerRef)), codecPtr->Compress(record.UncompressedPayload)};
+}
+
+TShuffleRecord DecompressShuffleRecord(
+    const TSharedRef& wire,
+    ECodec codec)
+{
+    return DecompressShuffleRecord(TRange(&wire, 1), codec);
 }
 
 TShuffleRecord DecompressShuffleRecord(
@@ -147,8 +170,12 @@ TShuffleRecord DecompressShuffleRecord(
 
 TParsedRecord ParseShuffleRecord(
     TShuffleRecord record,
-    TChunkedMemoryPool* pool)
+    TChunkedMemoryPool* pool,
+    std::optional<TIdentityColumnIds> identityColumnIds,
+    bool validateIdentityColumnIds)
 {
+    YT_VERIFY(!identityColumnIds || identityColumnIds->AreValid());
+
     THROW_ERROR_EXCEPTION_IF(
         record.Header.RowCount < 0,
         "Shuffle record header has negative row count: %v",
@@ -184,16 +211,39 @@ TParsedRecord ParseShuffleRecord(
         /*sortOrders*/ {},
         /*commonKeyPrefix*/ 0,
         /*keyWideningOptions*/ {},
-        /*extraColumnCount*/ 0,
+        /*extraColumnCount*/ identityColumnIds ? IdentityColumnCount : 0,
         /*decodeInlineHunkValues*/ false,
         /*unpackAny*/ false);
 
     auto* rows = reinterpret_cast<TUnversionedRow*>(
         pool->AllocateAligned(sizeof(TUnversionedRow) * rowCount));
 
-    for (i32 i = 0; i < rowCount; ++i) {
-        std::construct_at(&rows[i], reader.GetRow(pool, /*remapIds*/ false));
-        if (i + 1 < rowCount) {
+    for (i32 rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
+        auto row = reader.GetRow(pool, /*remapIds*/ false);
+        if (identityColumnIds) {
+            if (validateIdentityColumnIds) [[unlikely]] {
+                for (const auto& value : row) {
+                    if (value.Id == identityColumnIds->WriterId) {
+                        THROW_ERROR_EXCEPTION(
+                            "Input row contains writer identity column ID %v",
+                            value.Id);
+                    }
+                    if (value.Id == identityColumnIds->RowId) {
+                        THROW_ERROR_EXCEPTION(
+                            "Input row contains row identity column ID %v",
+                            value.Id);
+                    }
+                }
+            }
+            row.PushBack(MakeUnversionedInt64Value(
+                record.Header.WriterId,
+                identityColumnIds->WriterId));
+            row.PushBack(MakeUnversionedInt64Value(
+                record.Header.StartRow + rowIndex,
+                identityColumnIds->RowId));
+        }
+        std::construct_at(&rows[rowIndex], row);
+        if (rowIndex + 1 < rowCount) {
             YT_VERIFY(reader.NextRow());
         }
     }

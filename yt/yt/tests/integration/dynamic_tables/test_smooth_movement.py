@@ -1273,11 +1273,162 @@ class TestSmoothMovementWithMountCacheDelay(SmoothMovementBase):
             h.wait_for_action()
 
     @authors("ifsmirnov")
-    def test_lookup_retries(self):
+    def test_lookup_retries_simple(self):
         rows = self._prepare()
         keys = [{"key": row["key"]} for row in rows]
 
         # lookup_rows must succeed and return correct data despite the stale mount cache.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+    @authors("ifsmirnov")
+    def test_lookup_retries_with_multiple_mount_cache_entries(self):
+        sync_create_cells(2)
+
+        self._create_sorted_table("//tmp/t")
+        sync_mount_table("//tmp/t")
+
+        rows = [{"key": 0, "value": "0"}]
+        keys = [{"key": 0}]
+        insert_rows("//tmp/t", rows)
+
+        table_id = get("//tmp/t/@id")
+
+        # Keep the path entry stale after smooth movement.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+        tablet_id = get("//tmp/t/@tablets/0/tablet_id")
+        helper = SmoothMovementHelper(tablet_id)
+        helper.start()
+        helper.wait_for_action()
+
+        # Add an up-to-date entry for the same table under a different cache key.
+        assert_items_equal(lookup_rows(f"#{table_id}", keys), rows)
+
+        set("//sys/@config/table_manager/testing/get_mount_info_delay", 30000)
+
+        # The stale path entry must be patched from the redirection hint despite the newer entry.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+    @authors("ifsmirnov")
+    def test_lookup_retries_with_multiple_reshard_hints(self):
+        cell_ids = sync_create_cells(2)
+
+        self._create_sorted_table(
+            "//tmp/t",
+            pivot_keys=[[], [100]],
+            tablet_balancer_config={"enable_auto_reshard": False})
+        sync_mount_table("//tmp/t", target_cell_ids=cell_ids)
+
+        rows = [{"key": key, "value": str(key)} for key in [0, 50, 100, 150]]
+        keys = [{"key": row["key"]} for row in rows]
+        insert_rows("//tmp/t", rows)
+
+        # Warm up the mount cache with the original tablets.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+        tablet_ids = [tablet["tablet_id"] for tablet in get("//tmp/t/@tablets")]
+        actions = [
+            create("tablet_action", "", attributes={
+                "kind": "reshard",
+                "tablet_ids": [tablet_ids[0]],
+                "pivot_keys": [[], [50]],
+                "inplace_reshard": True,
+                "expiration_timeout": 60000,
+            }),
+            create("tablet_action", "", attributes={
+                "kind": "reshard",
+                "tablet_ids": [tablet_ids[1]],
+                "pivot_keys": [[100], [150]],
+                "inplace_reshard": True,
+                "expiration_timeout": 60000,
+            }),
+        ]
+        for action in actions:
+            wait(lambda: self._check_action(action))
+
+        set("//sys/@config/table_manager/testing/get_mount_info_delay", 30000)
+
+        # Both redirection hints must be applied within the only allowed retry.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+    @authors("ifsmirnov")
+    def test_lookup_retries_with_smooth_movement_and_reshard_hints(self):
+        cell_ids = sync_create_cells(3)
+
+        self._create_sorted_table(
+            "//tmp/t",
+            pivot_keys=[[], [100]],
+            tablet_balancer_config={"enable_auto_reshard": False})
+        sync_mount_table("//tmp/t", target_cell_ids=cell_ids[:2])
+
+        rows = [{"key": key, "value": str(key)} for key in [0, 50, 100, 150]]
+        keys = [{"key": row["key"]} for row in rows]
+        insert_rows("//tmp/t", rows)
+
+        # Warm up the mount cache with the original tablets.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+        tablet_ids = [tablet["tablet_id"] for tablet in get("//tmp/t/@tablets")]
+
+        helper = SmoothMovementHelper(tablet_ids[0], cell_ids[2])
+        helper.start()
+        helper.wait_for_action()
+
+        action = create("tablet_action", "", attributes={
+            "kind": "reshard",
+            "tablet_ids": [tablet_ids[1]],
+            "pivot_keys": [[100], [150]],
+            "inplace_reshard": True,
+            "expiration_timeout": 60000,
+        })
+        wait(lambda: self._check_action(action))
+
+        set("//sys/@config/table_manager/testing/get_mount_info_delay", 30000)
+
+        # Smooth movement and reshard hints must be applied within the only allowed retry.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+    @authors("ifsmirnov")
+    def DISABLED_test_lookup_retries_with_multiple_reshard_hints_from_same_node(self):
+        # Enable this test when Multiread reports reshard hints for all affected tablets.
+        cell_ids = sync_create_cells(1)
+
+        self._create_sorted_table(
+            "//tmp/t",
+            pivot_keys=[[], [100]],
+            tablet_balancer_config={"enable_auto_reshard": False})
+        sync_mount_table("//tmp/t", cell_id=cell_ids[0])
+
+        rows = [{"key": key, "value": str(key)} for key in [0, 50, 100, 150]]
+        keys = [{"key": row["key"]} for row in rows]
+        insert_rows("//tmp/t", rows)
+
+        # Warm up the mount cache with the original tablets.
+        assert_items_equal(lookup_rows("//tmp/t", keys), rows)
+
+        tablet_ids = [tablet["tablet_id"] for tablet in get("//tmp/t/@tablets")]
+        actions = [
+            create("tablet_action", "", attributes={
+                "kind": "reshard",
+                "tablet_ids": [tablet_ids[0]],
+                "pivot_keys": [[], [50]],
+                "inplace_reshard": True,
+                "expiration_timeout": 60000,
+            }),
+            create("tablet_action", "", attributes={
+                "kind": "reshard",
+                "tablet_ids": [tablet_ids[1]],
+                "pivot_keys": [[100], [150]],
+                "inplace_reshard": True,
+                "expiration_timeout": 60000,
+            }),
+        ]
+        for action in actions:
+            wait(lambda: self._check_action(action))
+
+        set("//sys/@config/table_manager/testing/get_mount_info_delay", 30000)
+
+        # Both hints would have to be returned by a single Multiread to fit into one retry.
         assert_items_equal(lookup_rows("//tmp/t", keys), rows)
 
     @authors("ifsmirnov")

@@ -8,9 +8,11 @@
 
 namespace NYT::NTabletClient {
 
+using namespace NTransactionClient;
+using namespace NYTree;
+
 using NYT::ToProto;
 using NYT::FromProto;
-using namespace NYTree;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -49,6 +51,13 @@ void FromProto(TUnfoldedColumns* original, const NProto::TUnfoldedColumns& seria
     FromProto(&original->IndexColumn, serialized.index_column());
 }
 
+void FormatValue(TStringBuilderBase* builder, const TUnfoldedColumns& unfoldedColumns, TStringBuf /*spec*/)
+{
+    builder->AppendFormat("{TableColumn: %v, IndexColumn: %v}",
+        unfoldedColumns.TableColumn,
+        unfoldedColumns.IndexColumn);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 void TIndexInfo::Register(TRegistrar registrar)
@@ -65,6 +74,8 @@ void TIndexInfo::Register(TRegistrar registrar)
         .Optional();
     registrar.Parameter("evaluated_columns_schema", &TThis::EvaluatedColumnsSchema)
         .Optional();
+    registrar.Parameter("backfill_timestamp", &TThis::BackfillTimestamp)
+        .Default(NullTimestamp);
 }
 
 void ToProto(NProto::TIndexInfo* serialized, const TIndexInfo& original)
@@ -83,6 +94,7 @@ void ToProto(NProto::TIndexInfo* serialized, const TIndexInfo& original)
     if (const auto& evaluatedColumnsSchema = original.EvaluatedColumnsSchema) {
         ToProto(serialized->mutable_evaluated_columns_schema(), evaluatedColumnsSchema);
     }
+    serialized->set_backfill_timestamp(ToProto(original.BackfillTimestamp));
 }
 
 void FromProto(TIndexInfo* original, const NProto::TIndexInfo& serialized)
@@ -106,6 +118,9 @@ void FromProto(TIndexInfo* original, const NProto::TIndexInfo& serialized)
     if (serialized.has_evaluated_columns_schema()) {
         original->EvaluatedColumnsSchema = New<NTableClient::TTableSchema>(
             FromProto<NTableClient::TTableSchema>(serialized.evaluated_columns_schema()));
+    }
+    if (serialized.has_backfill_timestamp()) {
+        FromProto(&original->BackfillTimestamp, serialized.backfill_timestamp());
     }
 }
 

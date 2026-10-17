@@ -110,8 +110,10 @@ public:
     const IAlertManagerPtr& GetAlertManager() const;
     const IConfigManagerPtr& GetConfigManager() const;
     const TDynamicClusterConfigPtr& GetDynamicConfig() const;
+    const IMasterCellGroupManagerPtr& GetMasterCellGroupManager() const;
     const IMulticellManagerPtr& GetMulticellManager() const;
     const IMulticellStatisticsCollectorPtr& GetMulticellStatisticsCollector() const;
+    const NCypressServer::ISequoiaActionsExecutorPtr& GetSequoiaActionsExecutor() const;
     const NIncumbentServer::IIncumbentManagerPtr& GetIncumbentManager() const;
     const NRpc::IServerPtr& GetRpcServer() const;
     const NRpc::IChannelPtr& GetLocalRpcChannel() const;
@@ -156,6 +158,7 @@ public:
     const NTabletServer::IBackupManagerPtr& GetBackupManager() const;
     const NChaosServer::IChaosManagerPtr& GetChaosManager() const;
     const NSequoiaServer::ISequoiaManagerPtr& GetSequoiaManager() const;
+    const NSequoiaServer::IPrelockTrackerPtr& GetPrelockTracker() const;
     const NSequoiaServer::ICypressProxyTrackerPtr& GetCypressProxyTracker() const;
     const NSequoiaServer::IGroundUpdateQueueManagerPtr& GetGroundUpdateQueueManager() const;
     const NHiveServer::IHiveManagerPtr& GetHiveManager() const;
@@ -210,6 +213,7 @@ protected:
 
     IAlertManagerPtr AlertManager_;
     IConfigManagerPtr ConfigManager_;
+    IMasterCellGroupManagerPtr MasterCellGroupManager_;
     IMulticellManagerPtr MulticellManager_;
     IMulticellStatisticsCollectorPtr MulticellStatisticsCollector_;
     IHiveProfilingManagerPtr HiveProfilingManager_;
@@ -265,6 +269,7 @@ protected:
     NTabletServer::IReplicatedTableTrackerStateProviderPtr ReplicatedTableTrackerStateProvider_;
     NChaosServer::IChaosManagerPtr ChaosManager_;
     NSequoiaServer::ISequoiaManagerPtr SequoiaManager_;
+    NSequoiaServer::IPrelockTrackerPtr PrelockTracker_;
     NSequoiaServer::ICypressProxyTrackerPtr CypressProxyTracker_;
     NSequoiaServer::IGroundUpdateQueueManagerPtr GroundUpdateQueueManager_;
     NHiveServer::IHiveManagerPtr HiveManager_;

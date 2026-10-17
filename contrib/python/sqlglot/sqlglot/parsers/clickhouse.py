@@ -156,6 +156,7 @@ AGG_FUNCTIONS = {
     "quantile",
     "quantiles",
     "quantileExact",
+    "quantileExactInclusive",
     "quantilesExact",
     "quantilesExactExclusive",
     "quantileExactLow",
@@ -251,6 +252,14 @@ class ClickHouseParser(parser.Parser):
             for k, v in parser.Parser.FUNCTIONS.items()
             if k not in ("TRANSFORM", "APPROX_TOP_SUM")
         },
+        **{
+            regexp_extract: lambda args: exp.RegexpExtract(
+                this=seq_get(args, 0),
+                expression=seq_get(args, 1),
+                group=seq_get(args, 2),
+            )
+            for regexp_extract in ("REGEXPEXTRACT", "REGEXP_EXTRACT", "REGEXP_SUBSTR")
+        },
         **{f"TOSTARTOF{unit}": _build_timestamp_trunc(unit=unit) for unit in TIMESTAMP_TRUNC_UNITS},
         "ANY": exp.AnyValue.from_arg_list,
         "ARRAYCOMPACT": exp.ArrayCompact.from_arg_list,
@@ -262,6 +271,10 @@ class ClickHouseParser(parser.Parser):
         "ARRAYMIN": exp.ArrayMin.from_arg_list,
         "ARRAYREVERSE": exp.ArrayReverse.from_arg_list,
         "ARRAYSLICE": exp.ArraySlice.from_arg_list,
+        "ARRAYFILTER": lambda args: exp.ArrayFilter(
+            this=seq_get(args, 1), expression=seq_get(args, 0)
+        ),
+        "ARRAYMAP": lambda args: exp.Transform(this=seq_get(args, 1), expression=seq_get(args, 0)),
         "CURRENTDATABASE": exp.CurrentDatabase.from_arg_list,
         "CURRENTSCHEMAS": exp.CurrentSchemas.from_arg_list,
         "COUNTIF": _build_count_if,
@@ -275,6 +288,7 @@ class ClickHouseParser(parser.Parser):
         "DATE_FORMAT": _build_datetime_format(exp.TimeToStr),
         "DATE_SUB": build_date_delta(exp.DateSub, default_unit=None),
         "DATESUB": build_date_delta(exp.DateSub, default_unit=None),
+        "DATETRUNC": exp.DateTrunc.from_arg_list,
         "FORMATDATETIME": _build_datetime_format(exp.TimeToStr),
         "HAS": exp.ArrayContains.from_arg_list,
         "ILIKE": build_like(exp.ILike),
@@ -376,6 +390,7 @@ class ClickHouseParser(parser.Parser):
     PROPERTY_PARSERS = {
         **{k: v for k, v in parser.Parser.PROPERTY_PARSERS.items() if k != "DYNAMIC"},
         "ENGINE": lambda self: self._parse_engine_property(),
+        "REFRESH": lambda self: self._parse_auto_refresh_property(),
         "UUID": lambda self: self.expression(exp.UuidProperty(this=self._parse_string())),
     }
 
@@ -421,6 +436,7 @@ class ClickHouseParser(parser.Parser):
 
     ALIAS_TOKENS = parser.Parser.ALIAS_TOKENS - {
         TokenType.FORMAT,
+        TokenType.SETTINGS,
     }
 
     LOG_DEFAULTS_TO_LN = True
@@ -640,9 +656,9 @@ class ClickHouseParser(parser.Parser):
         return super()._parse_position(haystack_first=True)
 
     # https://clickhouse.com/docs/en/sql-reference/statements/select/with/
-    def _parse_cte(self) -> exp.CTE | None:
+    def _parse_cte(self) -> exp.CTE | exp.FunctionSpecification | None:
         # WITH <identifier> AS <subquery expression>
-        cte: exp.CTE | None = self._try_parse(super()._parse_cte)
+        cte: exp.CTE | exp.FunctionSpecification | None = self._try_parse(super()._parse_cte)
 
         if not cte:
             # WITH <expression> AS <identifier>
@@ -800,6 +816,58 @@ class ClickHouseParser(parser.Parser):
                 self._retreat(index)
         return None
 
+    def _parse_auto_refresh_property(self) -> exp.AutoRefreshProperty | None:
+        index = self._index - 1
+        cadence = self._prev.text.upper() if self._match_texts(("EVERY", "AFTER")) else None
+        interval = (
+            self._parse_interval(require_interval=False, parse_function_unit=False)
+            if cadence
+            else None
+        )
+
+        if cadence and not interval:
+            self._retreat(index)
+            return None
+
+        offset = None
+        if self._match_text_seq("OFFSET"):
+            offset = self._parse_interval(require_interval=False, parse_function_unit=False)
+            if not offset:
+                self._retreat(index)
+                return None
+
+        randomize = None
+        if self._match_text_seq("RANDOMIZE", "FOR"):
+            randomize = self._parse_interval(require_interval=False, parse_function_unit=False)
+            if not randomize:
+                self._retreat(index)
+                return None
+
+        dependencies = None
+        if self._match_text_seq("DEPENDS", "ON"):
+            dependencies = self._parse_csv(lambda: self._parse_table_parts(schema=True))
+            if not dependencies:
+                self._retreat(index)
+                return None
+
+        if not cadence and not dependencies:
+            self._retreat(index)
+            return None
+
+        settings = self._parse_settings_property() if self._match_text_seq("SETTINGS") else None
+
+        return self.expression(
+            exp.AutoRefreshProperty(
+                this=interval,
+                cadence=cadence,
+                offset=offset,
+                randomize=randomize,
+                expressions=dependencies,
+                settings=settings,
+                append=self._match_text_seq("APPEND"),
+            )
+        )
+
     def _parse_index_constraint(self, kind: str | None = None) -> exp.IndexColumnConstraint:
         # INDEX name1 expr TYPE type1(args) GRANULARITY value
         this = self._parse_id_var()
@@ -852,7 +920,7 @@ class ClickHouseParser(parser.Parser):
         return exp.DefinerProperty(this=self._parse_string())
 
     def _parse_projection_def(self) -> exp.ProjectionDef | None:
-        if not self._match_text_seq("PROJECTION"):
+        if not self._match(TokenType.PROJECTION):
             return None
 
         return self.expression(

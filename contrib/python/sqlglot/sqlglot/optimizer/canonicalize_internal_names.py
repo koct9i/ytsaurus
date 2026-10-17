@@ -3,7 +3,7 @@ from __future__ import annotations
 import typing as t
 
 from sqlglot import exp
-from sqlglot.helper import name_sequence
+from sqlglot.helper import name_sequence, seq_get
 from sqlglot.optimizer.scope import Scope, find_all_in_scope, traverse_scope
 
 if t.TYPE_CHECKING:
@@ -40,9 +40,11 @@ def canonicalize_internal_names(expression: E) -> E:
     while stack:
         node = stack.pop()
         if isinstance(node, exp.SetOperation):
-            stack.append(node.left.unnest())
+            # Access the args directly instead of the left/right properties, because set operation
+            # operands aren't guaranteed to be Query nodes, e.g. in VALUES (1) UNION ALL SELECT 1
+            stack.append(node.this.unnest())
             if node.args.get("by_name"):
-                stack.append(node.right.unnest())
+                stack.append(node.expression.unnest())
         else:
             output_scope_exprs.add(id(node))
 
@@ -59,6 +61,9 @@ def canonicalize_internal_names(expression: E) -> E:
     # Shared across scopes so a Table referenced from multiple scopes (LATERAL/UNNEST) gets consistent column names
     table_columns: dict[int, dict[str, str]] = {}
 
+    # Shared across UDTF sources so chained correlated UNNESTs get consistent names for their alias columns
+    udtf_columns: dict[int, dict[str, str]] = {}
+
     for scope in traverse_scope(expression):
         scope_expr = scope.expression
         is_output_scope = id(scope_expr) in output_scope_exprs
@@ -68,6 +73,11 @@ def canonicalize_internal_names(expression: E) -> E:
             columns_by_source.setdefault(col.table, []).append(col)
         for table_col in scope.table_columns:
             columns_by_source.setdefault(table_col.name, []).append(table_col)
+
+        # Include qualified stars (e.g. `t.*`)
+        for star in scope.stars:
+            if isinstance(star, exp.Column) and star.table:
+                columns_by_source.setdefault(star.table, []).append(star)
 
         # source_canon: source's canonical name (used in WITH "_tN" AS, and as
         #   the physical table name in `Table.this`). Shared across every reference
@@ -113,16 +123,19 @@ def canonicalize_internal_names(expression: E) -> E:
                 elif source.is_udtf:
                     alias_holder = src_expr
 
+                # A UDTF (unlike a CTE/subquery) can be a source in multiple scopes, so keep its alias_holder and share its column map across them
+                is_udtf_source = alias_holder is src_expr
+
                 table_key = id(alias_holder) if alias_holder else id(source)
                 canon_t = scope_table.get(table_key, "")
 
                 if not canon_t:
                     canon_t = next_table()
                     scope_table[table_key] = canon_t
-                else:
+                elif not is_udtf_source:
                     alias_holder = None  # already renamed on a previous encounter
 
-                name_map = {}
+                name_map = udtf_columns.setdefault(id(src_expr), {}) if is_udtf_source else {}
             else:
                 continue
 
@@ -134,6 +147,18 @@ def canonicalize_internal_names(expression: E) -> E:
 
             table_map[source_name] = (canon_t, ref_alias)
 
+            # UNNEST struct fields are physical columns (preserve); the element alias is not
+            struct_field_names: set[str] = set()
+            src = source.expression
+            if (
+                isinstance(src, exp.Unnest)
+                and src.expressions
+                and src.expressions[0].type
+                and (element_type := seq_get(src.expressions[0].type.expressions, 0))
+                and element_type.is_type(exp.DataType.Type.STRUCT)
+            ):
+                struct_field_names = {cd.name for cd in element_type.expressions}
+
             for src_col in source_cols:
                 # BigQuery whole-row struct ref (`SELECT t FROM t`): the identifier
                 # IS the table alias, so rename it to this reference's alias.
@@ -142,20 +167,21 @@ def canonicalize_internal_names(expression: E) -> E:
                     continue
 
                 old_name = src_col.name
+                preserve_col = is_base_source or old_name in struct_field_names
                 canon_col = name_map.get(old_name)
 
                 if canon_col is None:
-                    if is_base_source:
+                    if preserve_col:
                         canon_col = old_name
                     else:
                         canon_col = child_output.get(old_name) or next_column()
 
                     name_map[old_name] = canon_col
 
-                # Base-table column refs are part of the data contract => preserve verbatim (including quote state).
-                # Scope-sourced column refs are internal handles pointing at CTE/subquery aliases (injected unquoted
-                # via exp.to_identifier); they must match, so _canon
-                if not is_base_source:
+                # Base-table and UNNEST struct-field column refs name physical columns => preserve
+                # verbatim (including quote state). Scope-sourced refs are internal handles pointing
+                # at CTE/subquery aliases (injected unquoted via exp.to_identifier), so _canon them.
+                if not preserve_col:
                     _canon(src_col.this, canon_col)
 
                 table_id = src_col.args.get("table")
@@ -232,7 +258,8 @@ def canonicalize_internal_names(expression: E) -> E:
         output_map: dict[str, str] = {}
         if isinstance(scope_expr, exp.Select):
             for sel in scope_expr.selects:
-                if isinstance(sel, exp.Alias):
+                # Sets default name for subquery projections, both aliased and unaliased
+                if isinstance(sel, (exp.Alias, exp.Subquery)) and sel.alias:
                     old_alias = sel.alias
                     if is_output_scope:
                         new_name = old_alias
@@ -281,8 +308,8 @@ def canonicalize_internal_names(expression: E) -> E:
                 while rename_stack:
                     node = rename_stack.pop()
                     if isinstance(node, exp.SetOperation):
-                        rename_stack.append(node.left)
-                        rename_stack.append(node.right)
+                        rename_stack.append(node.this)
+                        rename_stack.append(node.expression)
                         continue
                     if not isinstance(node, exp.Select):
                         continue

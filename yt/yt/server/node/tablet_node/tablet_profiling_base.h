@@ -37,6 +37,7 @@ public:
 
     TTableProfilerPtr CreateTableProfiler(
         EDynamicTableProfilingMode profilingMode,
+        EProfilingTagExportMode profilingTagExportMode,
         const std::string& tabletCellBundle,
         const NYPath::TYPath& tablePath,
         const std::string& tableTag,
@@ -51,13 +52,14 @@ public:
         NTabletClient::TTabletId tabletId);
 
 private:
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, Lock_);
 
     THashSet<NYPath::TYPath> AllTables_;
     NProfiling::TGauge ConsumedTableTags_;
 
     using TProfilerKey = std::tuple<
         EDynamicTableProfilingMode, // profiling mode
+        EProfilingTagExportMode,    // profiling tag export mode
         std::string,                // bundle
         std::string,                // table path or tag
         std::string,                // account

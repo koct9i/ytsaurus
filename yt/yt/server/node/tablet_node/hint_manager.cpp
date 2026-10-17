@@ -93,7 +93,7 @@ private:
     const TReplicatorHintConfigFetcherPtr ReplicatorHintConfigFetcher_;
     const IYPathServicePtr OrchidService_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, BannedReplicaClustersSpinLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, BannedReplicaClustersSpinLock_);
     THashSet<std::string, THash<TStringBuf>, TEqualTo<TStringBuf>> BannedReplicaClusters_;
 
     void OnDynamicConfigChanged(
@@ -107,8 +107,8 @@ private:
             BannedReplicaClusters_ = {newConfig->BannedReplicaClusters.begin(), newConfig->BannedReplicaClusters.end()};
         }
 
-        YT_LOG_DEBUG("Updated list of banned replica clusters (BannedReplicaClusters: %v)",
-            newConfig->BannedReplicaClusters);
+        YT_TLOG_DEBUG("Updated list of banned replica clusters")
+            .With("BannedReplicaClusters", newConfig->BannedReplicaClusters);
     }
 
     IYPathServicePtr CreateOrchidService()

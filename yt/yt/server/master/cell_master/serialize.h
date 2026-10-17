@@ -166,6 +166,10 @@ DEFINE_ENUM(EMasterReign,
     ((DeadSequoiaReplicasRemovalHydraTermCheck)                     (3261))  // grphil
     ((FixHunkChunkWeightStatisticsHistogram)                        (3262))  // akozhikhov
     ((NewWayToStoreHunkChunkListStatistics_26_1)                    (3263))  // akozhikhov
+    ((SequoiaRevision_26_1)                                         (3264))  // kvk1920
+    ((PrelockTracker_26_1)                                          (3265))  // kvk1920
+    ((FixValidationHeartbeatSchedulingAndClearing)                  (3266))  // grphil
+    ((ExpirationArmingTime_26_1)                                    (3267))  // theevilbird
 
     // 26.2 starts here.
     ((Start_26_2)                                                   (3300))  // ermolovd
@@ -198,6 +202,39 @@ DEFINE_ENUM(EMasterReign,
     ((ValidateChaosReplicationProgressOnTableMount)                 (3327))  // osidorkin
     ((FixHunkChunkWeightStatisticsHistogram_26_2)                   (3328))  // akozhikhov
     ((NewWayToStoreHunkChunkListStatistics)                         (3329))  // akozhikhov
+    ((SequoiaRevision_26_2)                                         (3330))  // kvk1920
+    ((SecondaryIndexUnfoldedColumnsSerializationFix)                (3331))  // sabdenovch
+    ((PrelockTracker_26_2)                                          (3332))  // kvk1920
+    ((ScratchChunkListKind)                                         (3333))  // babenko
+    ((FixValidationHeartbeatSchedulingAndClearing_26_2)             (3334))  // grphil
+    ((ExpirationArmingTime_26_2)                                    (3335))  // theevilbird
+    ((VerboseChunkLogging)                                          (3336))  // evanevannnn
+    ((FixBoomerangWaveEviction)                                     (3337))  // babenko
+    ((DropHasHunkChunkListUserAttribute)                            (3338))  // babenko
+    ((FixWaitableLocksAccumulation)                                 (3339))  // ivpiskarev
+    ((DetachChunkTrees)                                             (3340))  // babenko
+    ((ChunkMergerInfo)                                              (3341))  // aleksandra-zh
+    ((CustomCumulativeDataWeightForNewQueues)                       (3342))  // akozhikhov
+    ((SkipScratchChunkListParent)                                   (3343))  // babenko
+    ((AggregateStateType)                                           (3344))  // buyval01
+    ((LogicalHunkDataWeight)                                        (3345))  // akozhikhov
+    ((DeprecateArbitraryDataVersionSettings)                        (3346))  // sabdenovch
+    ((NoSuchYPathMethod)                                            (3347))  // kvk1920
+    ((PersistNodeLeaseTimeoutBeforeExtension)                       (3348))  // danilalexeev
+    ((MiscHunkStorageFixes)                                         (3349))  // akozhikhov
+    ((IntroduceStoresUpdateThrottler)                               (3350))  // alexelexa
+    ((MasterCellGroups)                                             (3351))  // evanevannnn
+    ((LegacyBaseIOConfigs)                                          (3352))  // ifsmirnov
+    ((NodeRegistrationRevision)                                     (3353))  // evanevannnn
+    ((AddPerUserActiveTransactionCountLimit)                        (3354))  // ivpiskarev
+    ((ChunkListRefactoring)                                         (3355))  // grphil
+    ((SecondaryIndexMoveWithinCell)                                 (3356))  // sabdenovch
+    ((TwoPhaseAlterTable)                                           (3357))  // ifsmirnov
+    ((SetEmptyRequisitionIndexOnImportByDefault)                    (3358))  // theevilbird
+    ((AccumulatePreloadPendingStoreCountCorrectly)                  (3359))  // sabdenovch
+    ((RecomputeAllTabletCellStatistics)                             (3360))  // sabdenovch
+    ((ClearSequoiaLastSeenReplicasOnMaster)                         (3361))  // aleksandra-zh
+    ((IgnoreMissingLeaseCellsOnForcedTransactionAbort)              (3362))  // shakurov
 );
 
 static_assert(TEnumTraits<EMasterReign>::IsMonotonic, "Master reign enum is not monotonic");

@@ -98,13 +98,14 @@ void TSlotManager::OnContainerDevicesCheckFinished(const TError& error)
         {
             if (!Bootstrap_->IsDataNode() && !Bootstrap_->IsTabletNode() && config->RestartContainerAfterFailedDeviceCheck) {
                 if (auto restartManager = Bootstrap_->GetRestartManager()) {
-                    YT_LOG_ERROR(error, "Request restart after test volume creation failed");
+                    YT_TLOG_ERROR("Request restart after test volume creation failed")
+                        .With(error);
                     restartManager->RequestRestart();
                 }
             }
 
             result = TError("Test container could not be created, snapshot container needs to be restarted")
-                << error;
+                .With(error);
         }
     }
 
@@ -118,7 +119,7 @@ void TSlotManager::OnPortoHealthCheckSuccess()
     if (IsJobEnvironmentResurrectionEnabled() &&
         CanResurrect())
     {
-        YT_LOG_INFO("Porto health check succeeded, try to resurrect slot manager");
+        YT_TLOG_INFO("Porto health check succeeded, try to resurrect slot manager");
 
         YT_VERIFY(Bootstrap_->IsExecNode());
 
@@ -132,7 +133,8 @@ void TSlotManager::OnPortoHealthCheckSuccess()
 
         auto result = WaitFor(InitializeEnvironment());
 
-        YT_LOG_ERROR_IF(!result.IsOK(), result, "Resurrection failed with error");
+        YT_TLOG_ERROR_IF(!result.IsOK(), "Resurrection failed with error")
+            .With(result);
     }
 }
 
@@ -148,9 +150,8 @@ void TSlotManager::OnPortoHealthCheckFailed(const TError& result)
         TError(NExecNode::EErrorCode::PortoHealthCheckFailed, "Porto health check failed"));
 
     if (!IsJobSchedulingDisabled()) {
-        YT_LOG_INFO(
-            result,
-            "Porto health check failed, disable slot manager");
+        YT_TLOG_INFO("Porto health check failed, disable slot manager")
+            .With(result);
 
         YT_VERIFY(Bootstrap_->IsExecNode());
 
@@ -180,7 +181,7 @@ void TSlotManager::Initialize()
         BIND_NO_PROPAGATE(&TSlotManager::OnJobsCpuLimitUpdated, MakeWeak(this))
             .Via(Bootstrap_->GetJobInvoker()));
 
-    if (StaticConfig_->JobEnvironment.GetCurrentType() == NJobProxy::EJobEnvironmentType::Porto) {
+    if (StaticConfig_->JobEnvironment.GetType() == NJobProxy::EJobEnvironmentType::Porto) {
         PortoHealthChecker_->SubscribeSuccess(BIND_NO_PROPAGATE(&TSlotManager::OnPortoHealthCheckSuccess, MakeStrong(this))
             .Via(Bootstrap_->GetJobInvoker()));
         PortoHealthChecker_->SubscribeFailed(BIND_NO_PROPAGATE(&TSlotManager::OnPortoHealthCheckFailed, MakeStrong(this))
@@ -194,7 +195,7 @@ void TSlotManager::Start()
         YT_ASSERT_THREAD_AFFINITY(JobThread);
 
         InitializeEnvironment().Subscribe(BIND([this, this_ = MakeStrong(this)] (const TError& /*error*/) {
-            if (StaticConfig_->JobEnvironment.GetCurrentType() == NJobProxy::EJobEnvironmentType::Porto) {
+            if (StaticConfig_->JobEnvironment.GetType() == NJobProxy::EJobEnvironmentType::Porto) {
                 PortoHealthChecker_->Start();
             }
         }));
@@ -202,15 +203,11 @@ void TSlotManager::Start()
         .AsyncVia(Bootstrap_->GetJobInvoker())
         .Run());
 
-    YT_LOG_FATAL_IF(
-        !IsJobEnvironmentResurrectionEnabled() && !initializeResult.IsOK(),
-        initializeResult,
-        "First slot manager initialization failed");
+    YT_TLOG_FATAL_IF(!IsJobEnvironmentResurrectionEnabled() && !initializeResult.IsOK(), "First slot manager initialization failed")
+        .With(initializeResult);
 
-    YT_LOG_ERROR_IF(
-        !initializeResult.IsOK(),
-        initializeResult,
-        "First slot manager initialization failed");
+    YT_TLOG_ERROR_IF(!initializeResult.IsOK(), "First slot manager initialization failed")
+        .With(initializeResult);
 }
 
 TFuture<void> TSlotManager::InitializeEnvironment()
@@ -220,15 +217,13 @@ TFuture<void> TSlotManager::InitializeEnvironment()
     auto expected = ESlotManagerState::Disabled;
 
     if (!State_.compare_exchange_strong(expected, ESlotManagerState::Initializing)) {
-        YT_LOG_DEBUG(
-            "Slot manager is already in (%v) state; skipping environment initialization",
-            expected);
+        YT_TLOG_DEBUG("Slot manager is in an unexpected state; skipping environment initialization")
+            .With("State", expected);
         return OKFuture;
     }
 
-    YT_LOG_INFO(
-        "Slot manager sync initialization started (SlotCount: %v)",
-        SlotCount_);
+    YT_TLOG_INFO("Slot manager sync initialization started")
+        .With("SlotCount", SlotCount_);
 
     {
         auto guard = WriterGuard(AliveLocationsLock_);
@@ -259,26 +254,25 @@ TFuture<void> TSlotManager::InitializeEnvironment()
         GetIdleCpuFraction());
         !error.IsOK())
     {
-        YT_LOG_WARNING(
-            "Failed to initialize job environment, disabling slot manager (Error: %v)",
-            error);
+        YT_TLOG_WARNING("Failed to initialize job environment, disabling slot manager")
+            .With("Error", error);
 
         SetDisabledState();
 
         return MakeFuture(error);
     } else {
-        YT_LOG_DEBUG("Job environment successfully initialized");
+        YT_TLOG_DEBUG("Job environment successfully initialized");
     }
 
     InitializeSlots();
 
     if (!jobEnvironment->IsEnabled()) {
-        auto error = TError("Job environment is disabled");
-        YT_LOG_WARNING(error);
+        static constexpr auto Message = "Job environment is disabled"_sb;
+        YT_TLOG_WARNING(Message);
 
         SetDisabledState();
 
-        return MakeFuture(error);
+        return MakeFuture(TError(Message));
     }
 
     {
@@ -287,7 +281,8 @@ TFuture<void> TSlotManager::InitializeEnvironment()
     }
 
     {
-        YT_LOG_DEBUG("Started to create locations (LocationCount: %v)", size(StaticConfig_->Locations));
+        YT_TLOG_DEBUG("Started to create locations")
+            .With("LocationCount", size(StaticConfig_->Locations));
 
         int locationIndex = 0;
         for (const auto& locationConfig : StaticConfig_->Locations) {
@@ -305,7 +300,7 @@ TFuture<void> TSlotManager::InitializeEnvironment()
         }
     }
 
-    YT_LOG_INFO("Slot manager sync initialization finished");
+    YT_TLOG_INFO("Slot manager sync initialization finished");
 
     return BIND(&TSlotManager::AsyncInitialize, MakeStrong(this))
         .AsyncVia(Bootstrap_->GetJobInvoker())
@@ -361,7 +356,8 @@ void TSlotManager::OnDynamicConfigChanged(
                 try {
                     jobEnvironment->OnDynamicConfigChanged(oldConfig, newConfig);
                 } catch (const std::exception& ex) {
-                    YT_LOG_ERROR(TError(ex));
+                    YT_TLOG_ERROR("Failed to apply dynamic config to job environment")
+                        .With(ex);
                 }
             }
         }));
@@ -434,10 +430,9 @@ IUserSlotPtr TSlotManager::AcquireSlot(NScheduler::NProto::TDeprecatedDiskReques
         try {
             location->ValidateEnabled();
         } catch (const std::exception& ex) {
-            YT_LOG_DEBUG(
-                ex,
-                "Skipping not enabled slot location (Path: %v)",
-                location->GetPath());
+            YT_TLOG_DEBUG("Skipping not enabled slot location")
+                .With("Path", location->GetPath())
+                .With(ex);
 
             ++skippedByDisabled;
             continue;
@@ -452,11 +447,11 @@ IUserSlotPtr TSlotManager::AcquireSlot(NScheduler::NProto::TDeprecatedDiskReques
 
     if (!bestLocation) {
         THROW_ERROR_EXCEPTION(NExecNode::EErrorCode::SlotNotFound, "No feasible slot found")
-            << TErrorAttribute("alive_location_count", AliveLocations_.size())
-            << TErrorAttribute("feasible_location_count", feasibleLocationCount)
-            << TErrorAttribute("skipped_by_disk_space", skippedByDiskSpace)
-            << TErrorAttribute("skipped_by_medium", skippedByMedium)
-            << TErrorAttribute("skipped_by_disabled", skippedByDisabled);
+            .With("alive_location_count", AliveLocations_.size())
+            .With("feasible_location_count", feasibleLocationCount)
+            .With("skipped_by_disk_space", skippedByDiskSpace)
+            .With("skipped_by_medium", skippedByMedium)
+            .With("skipped_by_disabled", skippedByDisabled);
     }
 
     auto slotType = ESlotType::Common;
@@ -656,15 +651,15 @@ void TSlotManager::InitializeSlots()
 
     auto slotInitTimeout = DynamicConfig_.Acquire()->SlotInitTimeout;
 
-    YT_LOG_DEBUG(
-        "Started to initialize slots (SlotInitTimeout: %v)",
-        slotInitTimeout);
+    YT_TLOG_DEBUG("Started to initialize slots")
+        .With("SlotInitTimeout", slotInitTimeout);
 
     FreeSlots_.clear();
     InitializedSlotCount_.store(0);
 
     for (int slotIndex = 0; slotIndex < SlotCount_; ++slotIndex) {
-        YT_LOG_DEBUG("Started to initialize slot (SlotIndex: %v)", slotIndex);
+        YT_TLOG_DEBUG("Started to initialize slot")
+            .With("SlotIndex", slotIndex);
         auto slotInitFuture = jobEnvironment->InitSlot(slotIndex)
             .WithTimeout(slotInitTimeout);
 
@@ -673,20 +668,20 @@ void TSlotManager::InitializeSlots()
                 YT_ASSERT_THREAD_AFFINITY(JobThread);
 
                 if (epoch != InitializationEpoch_) {
-                    YT_LOG_DEBUG(
-                        "Stale slot initialization encountered; skipping (OldEpoch: %v, NewEpoch: %v)",
-                        epoch,
-                        InitializationEpoch_);
+                    YT_TLOG_DEBUG("Stale slot initialization encountered; skipping")
+                        .With("OldEpoch", epoch)
+                        .With("NewEpoch", InitializationEpoch_);
                     return;
                 }
 
                 if (error.IsOK()) {
                     InitializedSlotCount_.fetch_add(1);
                     PushSlot(slotIndex);
-                    YT_LOG_DEBUG("Slot initialized (SlotIndex: %v)", slotIndex);
+                    YT_TLOG_DEBUG("Slot initialized")
+                        .With("SlotIndex", slotIndex);
                     Bootstrap_->GetJobResourceManager()->OnResourceAvailabilityChanged();
                 } else {
-                    auto wrappedError = TError("Failed to initialize slot %v", slotIndex) << error;
+                    auto wrappedError = TError("Failed to initialize slot %v", slotIndex).With(error);
                     jobEnvironment->Disable(std::move(wrappedError));
                 }
             })
@@ -703,11 +698,9 @@ TDuration TSlotManager::GetDisableJobsBackoff()
 void TSlotManager::VerifyCurrentState(ESlotManagerState expectedState) const
 {
     auto currentState = State_.load();
-    YT_LOG_FATAL_IF(
-        currentState != expectedState,
-        "Slot manager state race detected (Expected: %v, Actual: %v)",
-        expectedState,
-        currentState);
+    YT_TLOG_FATAL_IF(currentState != expectedState, "Slot manager state race detected")
+        .With("Expected", expectedState)
+        .With("Actual", currentState);
 }
 
 TSlotManager::TSlotManagerInfo TSlotManager::DoGetStateSnapshot() const
@@ -757,10 +750,8 @@ auto TSlotManager::GetStateSnapshot() const
         .AsyncVia(Bootstrap_->GetJobInvoker())
         .Run());
 
-    YT_LOG_FATAL_IF(
-        !snapshotOrError.IsOK(),
-        snapshotOrError,
-        "Unexpected failure during slot manager info lookup");
+    YT_TLOG_FATAL_IF(!snapshotOrError.IsOK(), "Unexpected failure during slot manager info lookup")
+        .With(snapshotOrError);
 
     return std::move(snapshotOrError.Value());
 }
@@ -796,9 +787,8 @@ void TSlotManager::ForceInitialize()
     auto expected = ESlotManagerState::Disabled;
 
     if (!State_.compare_exchange_strong(expected, ESlotManagerState::Initializing)) {
-        YT_LOG_DEBUG(
-            "Slot manager is already in (%v) state; skipping ForceInitialize",
-            expected);
+        YT_TLOG_DEBUG("Slot manager is in an unexpected state; skipping forced initialization")
+            .With("State", expected);
     } else {
         State_.store(ESlotManagerState::Initialized);
     }
@@ -838,7 +828,8 @@ void TSlotManager::OnJobsCpuLimitUpdated()
         auto cpuLimit = resourceManager->GetJobsCpuLimit();
         jobEnvironment->UpdateCpuLimit(cpuLimit);
     } catch (const std::exception& ex) {
-        YT_LOG_WARNING(ex, "Error updating job environment CPU limit");
+        YT_TLOG_WARNING("Error updating job environment CPU limit")
+            .With(ex);
     }
 }
 
@@ -865,9 +856,8 @@ bool TSlotManager::Disable(TError error)
     auto expected = ESlotManagerState::Initialized;
 
     if (!State_.compare_exchange_strong(expected, ESlotManagerState::Disabling)) {
-        YT_LOG_DEBUG(
-            "Slot manager is already in (%v) state; skipping Disable",
-            expected);
+        YT_TLOG_DEBUG("Slot manager is in an unexpected state; skipping disabling")
+            .With("State", expected);
         return false;
     }
 
@@ -876,8 +866,9 @@ bool TSlotManager::Disable(TError error)
 
         auto wrappedError = TError(NExecNode::EErrorCode::SchedulerJobsDisabled, "Scheduler jobs disabled")
         // NB: Must copy here since error is used in volume manager too.
-            << error;
-        YT_LOG_WARNING(wrappedError, "Disabling slot manager");
+            .With(error);
+        YT_TLOG_WARNING("Disabling slot manager")
+            .With(wrappedError);
         Alerts_.SetAlertError(
             std::move(wrappedError));
     }
@@ -886,7 +877,7 @@ bool TSlotManager::Disable(TError error)
     auto timeout = dynamicConfig->SlotReleaseTimeout;
 
     auto jobsAbortionError = TError("Job aborted due to fatal alert")
-        << TErrorAttribute("abort_reason", EAbortReason::NodeWithDisabledJobs);
+        .With("abort_reason", EAbortReason::NodeWithDisabledJobs);
 
     constexpr auto abortDramatically = [] (const char* error) {
         NLogging::TLogManager::Get()->Shutdown();
@@ -898,14 +889,13 @@ bool TSlotManager::Disable(TError error)
     if (auto syncResult = WaitFor(jobController->AbortAllJobs(jobsAbortionError).WithTimeout(timeout));
         !syncResult.IsOK())
     {
-        YT_LOG_ERROR(
-            syncResult,
-            "Free slot synchronization failed (ActualSlotCount: %v, TotalSlots: %v, InitializedSlots: %v, InitializationEpoch: %v, ActualSlots: %v)",
-            size(FreeSlots_),
-            SlotCount_,
-            InitializedSlotCount_.load(),
-            InitializationEpoch_,
-            MakeCompactIntervalView(GetSortedFreeSlots()));
+        YT_TLOG_ERROR("Free slot synchronization failed")
+            .With("ActualSlotCount", size(FreeSlots_))
+            .With("TotalSlots", SlotCount_)
+            .With("InitializedSlots", InitializedSlotCount_.load())
+            .With("InitializationEpoch", InitializationEpoch_)
+            .With("ActualSlots", MakeCompactIntervalView(GetSortedFreeSlots()))
+            .With(syncResult);
         abortDramatically("Free slot synchronization failed");
     }
 
@@ -919,34 +909,31 @@ bool TSlotManager::Disable(TError error)
             .WithTimeout(timeout));
 
         if (!disableVolumeManagerResult.IsOK()) {
-            YT_LOG_ERROR(
-                disableVolumeManagerResult,
-                "Failed to release volumes");
+            YT_TLOG_ERROR("Failed to release volumes")
+                .With(disableVolumeManagerResult);
             if (dynamicConfig->AbortOnFreeVolumeSynchronizationFailed) {
                 abortDramatically("Failed to release volumes");
             }
         }
 
         if (!disableLayerCacheResult.IsOK()) {
-            YT_LOG_ERROR(
-                disableLayerCacheResult,
-                "Disabling the layer cache failed with an error");
+            YT_TLOG_ERROR("Disabling the layer cache failed with an error")
+                .With(disableLayerCacheResult);
             if (dynamicConfig->AbortOnFreeVolumeSynchronizationFailed) {
                 abortDramatically("Disabling the layer cache failed with an error");
             }
         }
     }
 
-    YT_LOG_WARNING("Disable slot manager finished");
+    YT_TLOG_WARNING("Disable slot manager finished");
 
     if (ssize(FreeSlots_) != InitializedSlotCount_.load()) {
-        YT_LOG_ERROR(
-            "Some slots are hung after disabling slot manager (ActualSlotCount: %v, TotalSlots: %v, InitializedSlots: %v, InitializationEpoch: %v, ActualSlots: %v)",
-            size(FreeSlots_),
-            SlotCount_,
-            InitializedSlotCount_.load(),
-            InitializationEpoch_,
-            MakeCompactIntervalView(GetSortedFreeSlots()));
+        YT_TLOG_ERROR("Some slots are hung after disabling slot manager")
+            .With("ActualSlotCount", size(FreeSlots_))
+            .With("TotalSlots", SlotCount_)
+            .With("InitializedSlots", InitializedSlotCount_.load())
+            .With("InitializationEpoch", InitializationEpoch_)
+            .With("ActualSlots", MakeCompactIntervalView(GetSortedFreeSlots()));
         abortDramatically("Some slots are hung after disabling slot manager");
     }
 
@@ -961,9 +948,8 @@ void TSlotManager::OnGpuCheckCommandFailed(const TError& error)
 {
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
-    YT_LOG_WARNING(
-        error,
-        "GPU check failed alert set, jobs may be disabled if \"disable_jobs_on_gpu_check_failure\" specified");
+    YT_TLOG_WARNING("GPU check failed alert set, jobs may be disabled if \"disable_jobs_on_gpu_check_failure\" specified")
+        .With(error);
 
     {
         auto guard = WriterGuard(AlertsLock_);
@@ -975,7 +961,7 @@ void TSlotManager::OnPortoExecutorFailed(const TError& error)
 {
     YT_ASSERT_THREAD_AFFINITY_ANY();
 
-    Disable(TError(NExecNode::EErrorCode::PortoExecutorFailure, "Porto exeuctor failed") << error);
+    Disable(TError(NExecNode::EErrorCode::PortoExecutorFailure, "Porto exeuctor failed").With(error));
 }
 
 void TSlotManager::OnWaitingForJobCleanupTimeout(TError error)
@@ -1005,7 +991,8 @@ void TSlotManager::OnJobEnvironmentDisabled(TError error)
 
     YT_VERIFY(error.FindMatching(NExecNode::EErrorCode::JobEnvironmentDisabled));
 
-    YT_LOG_WARNING(error, "Job environment disabled; disabling slot manager");
+    YT_TLOG_WARNING("Job environment disabled; disabling slot manager")
+        .With(error);
 
     Disable(std::move(error));
 }
@@ -1027,11 +1014,10 @@ void TSlotManager::OnJobFinished(const TJobPtr& job)
         if (!Alerts_.HasArmedAlert(alertType)) {
             auto delay = GetDisableJobsBackoff();
 
-            YT_LOG_WARNING(
-                error,
-                "Scheduler jobs disabled (Until: %v, AlertType: %v)",
-                TInstant::Now() + delay,
-                alertType);
+            YT_TLOG_WARNING("Scheduler jobs disabled")
+                .With("Until", TInstant::Now() + delay)
+                .With("AlertType", alertType)
+                .With(error);
             Alerts_.SetAlertError(std::move(error), alertType);
 
             TDelayedExecutor::Submit(std::move(resetter), delay, Bootstrap_->GetJobInvoker());
@@ -1042,7 +1028,7 @@ void TSlotManager::OnJobFinished(const TJobPtr& job)
         setAlert(
             ESlotManagerAlertType::TooManyConsecutiveJobAbortions,
             TError("Too many consecutive scheduler job abortions")
-                << TErrorAttribute("max_consecutive_job_aborts", dynamicConfig->MaxConsecutiveJobAborts),
+                .With("max_consecutive_job_aborts", dynamicConfig->MaxConsecutiveJobAborts),
             BIND(&TSlotManager::ResetConsecutiveAbortedJobCount, MakeStrong(this)));
     }
 
@@ -1058,7 +1044,7 @@ void TSlotManager::OnJobFinished(const TJobPtr& job)
             setAlert(
                 ESlotManagerAlertType::TooManyConsecutiveGpuJobFailures,
                 TError("Too many consecutive GPU job failures")
-                    << TErrorAttribute("max_consecutive_gpu_job_failures", dynamicConfig->MaxConsecutiveGpuJobFailures),
+                    .With("max_consecutive_gpu_job_failures", dynamicConfig->MaxConsecutiveGpuJobFailures),
                 BIND(&TSlotManager::ResetConsecutiveFailedGpuJobCount, MakeStrong(this)));
         }
     }
@@ -1073,9 +1059,10 @@ void TSlotManager::OnJobProxyBuildInfoUpdated(const TError& error)
         auto hasAlert = Alerts_.HasArmedAlert(ESlotManagerAlertType::JobProxyUnavailable);
 
         if (!hasAlert && !error.IsOK()) {
-            YT_LOG_INFO(error, "Disabling scheduler jobs due to job proxy unavailability");
+            YT_TLOG_INFO("Disabling scheduler jobs due to job proxy unavailability")
+                .With(error);
         } else if (hasAlert && error.IsOK()) {
-            YT_LOG_INFO("Enable scheduler jobs as job proxy became available");
+            YT_TLOG_INFO("Enable scheduler jobs as job proxy became available");
         }
 
         Alerts_.SetAlertError(
@@ -1227,7 +1214,7 @@ void TSlotManager::InitMedia(const NChunkClient::TMediumDirectoryPtr& mediumDire
         auto descriptor = mediumDirectory->FindByName(defaultMediumName);
         if (!descriptor) {
             THROW_ERROR_EXCEPTION(
-                "Default medium is unknown (MediumName: %v)",
+                "Default medium %Qv is unknown",
                 defaultMediumName);
         }
         DefaultMediumIndex_ = descriptor->GetIndex();
@@ -1255,13 +1242,15 @@ void TSlotManager::FinishInitialization(const TError& error)
     VerifyCurrentState(ESlotManagerState::Initializing);
 
     if (error.IsOK()) {
-        YT_LOG_INFO("Slot manager async initialization finished");
+        YT_TLOG_INFO("Slot manager async initialization finished");
         State_.store(ESlotManagerState::Initialized);
     } else {
-        auto wrappedError = TError(NExecNode::EErrorCode::SchedulerJobsDisabled, "Initialization failed")
-            << error;
+        static constexpr auto Message = "Initialization failed"_sb;
+        auto wrappedError = TError(NExecNode::EErrorCode::SchedulerJobsDisabled, Message)
+            .With(error);
 
-        YT_LOG_WARNING(wrappedError, "Initialization failed");
+        YT_TLOG_WARNING(Message)
+            .With(error);
 
         {
             auto guard = WriterGuard(AlertsLock_);
@@ -1278,18 +1267,19 @@ void TSlotManager::AsyncInitialize()
 {
     YT_ASSERT_THREAD_AFFINITY(JobThread);
 
-    YT_LOG_INFO("Slot manager async initialization started");
+    YT_TLOG_INFO("Slot manager async initialization started");
 
     auto dynamicConfig = DynamicConfig_.Acquire();
     auto timeout = dynamicConfig->SlotReleaseTimeout;
     auto slotSync = WaitFor(Bootstrap_->GetJobController()->GetAllJobsCleanupFinishedFuture()
         .WithTimeout(timeout));
 
-    YT_LOG_FATAL_IF(!slotSync.IsOK(), slotSync, "Slot synchronization failed");
+    YT_TLOG_FATAL_IF(!slotSync.IsOK(), "Slot synchronization failed")
+        .With(slotSync);
 
     // To this moment all old processes must have been killed, so we can safely clean up old volumes
     // during root volume manager initialization.
-    JobEnvironmentType_ = StaticConfig_->JobEnvironment.GetCurrentType();
+    JobEnvironmentType_ = StaticConfig_->JobEnvironment.GetType();
     if (JobEnvironmentType_ == NJobProxy::EJobEnvironmentType::Porto) {
         if (auto oldVolumeManager = VolumeManager_.Acquire()) {
             oldVolumeManager->MarkLayersAsNotRemovable();
@@ -1307,16 +1297,14 @@ void TSlotManager::AsyncInitialize()
         initLocationFutures.push_back(location->Initialize(volumeManager));
     }
 
-    YT_LOG_INFO("Waiting for all locations to initialize");
+    YT_TLOG_INFO("Waiting for all locations to initialize");
 
     {
         auto error = WaitFor(AllSet(initLocationFutures));
-        YT_LOG_FATAL_UNLESS(
-            error.IsOK(),
-            error,
-            "Shutdown encountered");
+        YT_TLOG_FATAL_UNLESS(error.IsOK(), "Shutdown encountered")
+            .With(error);
     }
-    YT_LOG_INFO("Locations initialization finished");
+    YT_TLOG_INFO("Locations initialization finished");
 
     NumaNodeStates_.clear();
 
@@ -1340,10 +1328,9 @@ int TSlotManager::DoAcquireSlot(ESlotType slotType)
     YT_VERIFY(!FreeSlots_.empty());
     auto slotIndex = PopSlot();
 
-    YT_LOG_DEBUG(
-        "Exec slot acquired (SlotType: %v, SlotIndex: %v)",
-        slotType,
-        slotIndex);
+    YT_TLOG_DEBUG("Exec slot acquired")
+        .With("SlotType", slotType)
+        .With("SlotIndex", slotIndex);
 
     return slotIndex;
 }
@@ -1353,23 +1340,19 @@ void TSlotManager::PushSlot(int slotIndex)
     YT_ASSERT_THREAD_AFFINITY(JobThread);
 
     for (auto slot : TRingQueueIterableWrapper(FreeSlots_)) {
-        YT_LOG_FATAL_IF(
-            slot == slotIndex,
-            "Slot is already free (SlotIndex: %v, InitializationEpoch: %v)",
-            InitializationEpoch_,
-            slotIndex);
+        YT_TLOG_FATAL_IF(slot == slotIndex, "Slot is already free")
+            .With("SlotIndex", slotIndex)
+            .With("InitializationEpoch", InitializationEpoch_);
     }
 
     FreeSlots_.push(slotIndex);
 
-    YT_LOG_FATAL_IF(
-        ssize(FreeSlots_) > InitializedSlotCount_.load(),
-        "Too many free slots (FreeSlotCount: %v, TotalCount: %v, InitializedSlotCount: %v, InitializationEpoch: %v, FreeSlots: %v)",
-        ssize(FreeSlots_),
-        SlotCount_,
-        InitializedSlotCount_.load(),
-        InitializationEpoch_,
-        MakeCompactIntervalView(GetSortedFreeSlots()));
+    YT_TLOG_FATAL_IF(ssize(FreeSlots_) > InitializedSlotCount_.load(), "Too many free slots")
+        .With("FreeSlotCount", ssize(FreeSlots_))
+        .With("TotalCount", SlotCount_)
+        .With("InitializedSlotCount", InitializedSlotCount_.load())
+        .With("InitializationEpoch", InitializationEpoch_)
+        .With("FreeSlots", MakeCompactIntervalView(GetSortedFreeSlots()));
 }
 
 int TSlotManager::PopSlot()
@@ -1401,11 +1384,10 @@ void TSlotManager::ReleaseSlot(ESlotType slotType, int slotIndex, NClusterNode::
         }
     }
 
-    YT_LOG_DEBUG(
-        "Exec slot released (SlotType: %v, SlotIndex: %v, RequestedCpu: %v)",
-        slotType,
-        slotIndex,
-        requestedCpu);
+    YT_TLOG_DEBUG("Exec slot released")
+        .With("SlotType", slotType)
+        .With("SlotIndex", slotIndex)
+        .With("RequestedCpu", requestedCpu);
 }
 
 std::vector<int> TSlotManager::GetSortedFreeSlots()
@@ -1443,7 +1425,7 @@ NNodeTrackerClient::NProto::TDiskResources TSlotManager::GetDiskResources()
             locationResources->set_medium_index(info.medium_index());
         } catch (const std::exception& ex) {
             auto alert = TError("Failed to get location disk info")
-                << ex;
+                .With(ex);
             location->Disable(alert);
         }
     }
@@ -1493,9 +1475,8 @@ ESlotManagerAlertType DeduceAlertType(const TError& error, std::optional<ESlotMa
         return ESlotManagerAlertType::PortoFailure;
     }
 
-    YT_LOG_WARNING(
-        error,
-        "Unexpected alert error, mark alert as unclassified");
+    YT_TLOG_WARNING("Unexpected alert error, mark alert as unclassified")
+        .With(error);
 
     return ESlotManagerAlertType::NotClassified;
 }

@@ -15,6 +15,7 @@ class DatabricksGenerator(SparkGenerator):
     COPY_PARAMS_ARE_WRAPPED = False
     COPY_PARAMS_EQ_REQUIRED = True
     JSON_PATH_SINGLE_QUOTE_ESCAPE = False
+    JSON_PATH_KEY_QUOTED_FORCES_BRACKETS = True
     SAFE_JSON_PATH_KEY_RE = exp.SAFE_IDENTIFIER_RE
     QUOTE_JSON_PATH = False
     PARSE_JSON_NAME: str | None = "PARSE_JSON"
@@ -56,6 +57,9 @@ class DatabricksGenerator(SparkGenerator):
             exp.CurrentCatalog: lambda *_: "CURRENT_CATALOG()",
             exp.RegexpLike: None,
             exp.TryCast: None,
+            exp.RegrAvgx: lambda self, e: self._regr_sql(e),
+            exp.RegrSxx: lambda self, e: self._regr_sql(e),
+            exp.RegrSyy: lambda self, e: self._regr_sql(e),
         }.items()
         if v is not None
     }
@@ -89,6 +93,9 @@ class DatabricksGenerator(SparkGenerator):
 
         return super().columndef_sql(expression, sep)
 
+    def timeserieskey_sql(self, expression: exp.TimeseriesKey) -> str:
+        return f"{self.sql(expression, 'this')} TIMESERIES"
+
     def jsonpath_sql(self, expression: exp.JSONPath) -> str:
         expression.set("escape", None)
         path = super().jsonpath_sql(expression)
@@ -107,6 +114,13 @@ class DatabricksGenerator(SparkGenerator):
             seed = gen.this
 
         return self.func("UNIFORM", expression.this, expression.expression, seed)
+
+    def _regr_sql(self, expression: exp.RegrAvgx | exp.RegrSxx | exp.RegrSyy) -> str:
+        name = expression.sql_name()
+        x = expression.expression
+        if isinstance(x, exp.Distinct):
+            return self.func(name, exp.Distinct(expressions=[expression.this]), *x.expressions)
+        return self.func(name, expression.this, x)
 
     def clusterproperty_sql(self, expression):
         this = self.sql(expression, "this") or f"({self.expressions(expression, flat=True)})"

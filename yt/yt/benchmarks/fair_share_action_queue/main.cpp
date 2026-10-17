@@ -14,7 +14,7 @@
 
 #include <yt/yt/library/signals/signal_registry.h>
 
-#include <library/cpp/yt/threading/count_down_latch.h>
+#include <library/cpp/yt/system/count_down_latch.h>
 
 #include <library/cpp/yt/containers/intrusive_linked_list.h>
 
@@ -128,7 +128,7 @@ struct TThreadHistogramToListNode
     }
 };
 
-YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, HistogramsLock);
+YT_DECLARE_SPIN_LOCK(NYT::TSpinLock, HistogramsLock);
 TIntrusiveLinkedList<TThreadHistogram, TThreadHistogramToListNode> Histograms;
 
 TThreadHistogram::TThreadHistogram()
@@ -324,12 +324,12 @@ void BenchmarkThreadPool(size_t iterations, size_t threadCount, size_t taskCount
 
     auto actionCount = iterations * std::min(threadCount, taskCount);
 
-    YT_LOG_DEBUG("WARMUP");
+    YT_TLOG_DEBUG("WARMUP");
 
     // Warmup
     test(actionCount / 10);
 
-    YT_LOG_DEBUG("TESTING");
+    YT_TLOG_DEBUG("TESTING");
 
     auto cpuDuration = test(actionCount);
 
@@ -403,12 +403,12 @@ void BenchmarkFSThreadPool(
 
     auto actionCount = iterations * std::min(threadCount, taskCount);
 
-    YT_LOG_DEBUG("WARMUP");
+    YT_TLOG_DEBUG("WARMUP");
 
     // Warmup
     test(actionCount / 10);
 
-    YT_LOG_DEBUG("TESTING");
+    YT_TLOG_DEBUG("TESTING");
 
     auto cpuDuration = test(actionCount);
 

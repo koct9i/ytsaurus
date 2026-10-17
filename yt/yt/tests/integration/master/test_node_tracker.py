@@ -535,9 +535,19 @@ class TestRackDataCenterCells(TestRackDataCenter):
 
 ################################################################################
 
+
 class TestNodesThrottling(YTEnvSetup):
     ENABLE_MULTIDAEMON = False  # There are component restarts.
     NUM_NODES = 3
+
+    DELTA_NODE_CONFIG = {
+        "data_node": {
+            "master_connector": {
+                "heartbeat_period": 1000,
+                "heartbeat_period_splay": 100,
+            },
+        },
+    }
 
     @classmethod
     def get_node_count(self, state="online"):
@@ -555,6 +565,7 @@ class TestNodesThrottling(YTEnvSetup):
         # Now each node has approximately 20 chunks, so after registration they will send full heartbeats and will be throttled.
 
         self.Env.kill_nodes()
+        set("//sys/@config/chunk_manager/data_node_tracker/enable_chunk_replicas_throttling_in_heartbeats", True)
         set("//sys/@config/chunk_manager/data_node_tracker/max_concurrent_chunk_replicas_during_full_heartbeat", 1)
         # Disabling `minimize_commit_latency` and make delay between mutations flush, this will help throttling to be visible.
         set("//sys/@config/hydra_manager/minimize_commit_latency", False)
@@ -573,6 +584,22 @@ class TestNodesThrottling(YTEnvSetup):
 
         time.sleep(2)
         assert TestNodesThrottling.get_node_count() == 3
+
+    @authors("aleksandra-zh")
+    def test_full_heartbeats_forbidden_with_zero_limit(self):
+        set("//sys/@config/chunk_manager/data_node_tracker/max_concurrent_full_heartbeats", 0)
+        set("//sys/@config/chunk_manager/data_node_tracker/max_concurrent_location_full_heartbeats", 0)
+
+        self.Env.kill_nodes()
+        self.Env.start_nodes(sync=False)
+
+        wait(lambda: TestNodesThrottling.get_node_count(state="registered") == 3)
+        time.sleep(3)
+        assert TestNodesThrottling.get_node_count() == 0
+
+        set("//sys/@config/chunk_manager/data_node_tracker/max_concurrent_full_heartbeats", 3)
+        set("//sys/@config/chunk_manager/data_node_tracker/max_concurrent_location_full_heartbeats", 3)
+        wait(lambda: TestNodesThrottling.get_node_count() == 3)
 
     @authors("cherepashka")
     def test_registration_lease_reuse(self):
@@ -692,11 +719,95 @@ class TestNodesThrottling(YTEnvSetup):
             set("//sys/@config/node_tracker/max_locations_being_disposed", 0)
             pass
 
-        # If some nodes are being disposed, than we have retried registration and it was not throttled.
+        # If some nodes are being disposed, then we have retried registration and it was not throttled.
         wait(lambda: self.get_node_count("being_disposed") > 0)
         set("//sys/@config/node_tracker/max_locations_being_disposed", 20)
 
         wait(lambda: self.get_node_count() == self.NUM_NODES)
+
+##################################################################
+
+
+class TestHeartbeatRegistrationRevision(YTEnvSetup):
+    ENABLE_MULTIDAEMON = False  # Checks individual master and node logs.
+    ENABLE_LOG_COMPRESSION = False
+    NUM_MASTERS = 1
+    NUM_NODES = 1
+
+    DELTA_MASTER_CONFIG = {
+        "logging": {
+            "abort_on_alert": False,
+        },
+    }
+
+    def _read_log(self, path, offset):
+        with open(path) as log:
+            log.seek(offset)
+            return log.read()
+
+    @authors("evanevannnn")
+    @pytest.mark.parametrize("enforce_validation", [False, True])
+    @pytest.mark.parametrize("suppress_validation", [False, True])
+    def test_missing_heartbeat_registration_revision(self, enforce_validation, suppress_validation):
+        set("//sys/@config/chunk_manager/data_node_tracker/enable_registration_revision_validation", enforce_validation)
+        set(
+            "//sys/@config/chunk_manager/data_node_tracker/testing/suppress_registration_revision_validation",
+            suppress_validation,
+        )
+
+        node = ls("//sys/cluster_nodes")[0]
+        node_path = f"//sys/cluster_nodes/{node}"
+        wait(lambda: get(f"{node_path}/@state") == "online")
+        lease_transaction_id = get(f"{node_path}/@lease_transaction_id")
+
+        master_log = os.path.join(self.path_to_run, "logs/master-0-0.debug.log")
+        node_log = os.path.join(self.path_to_run, "logs/node-0.debug.log")
+        node_log_offset = os.path.getsize(node_log)
+
+        try:
+            update_nodes_dynamic_config({
+                "data_node": {"testing_options": {"omit_heartbeat_registration_revision": True}},
+            })
+
+            if enforce_validation and not suppress_validation:
+                wait(lambda: "Data node heartbeat belongs to an outdated registration" in self._read_log(
+                    node_log, node_log_offset))
+                # A new lease proves that the node re-registered; the offline state can be too brief to observe.
+                wait(lambda: get(f"{node_path}/@lease_transaction_id", default=None) not in (
+                    None, lease_transaction_id))
+            else:
+                master_log_offset = os.path.getsize(master_log)
+
+                if suppress_validation:
+                    # The first heartbeat may have been in flight during reconfiguration.
+                    wait(lambda: self._read_log(master_log, master_log_offset).count(
+                        "Processing incremental data node heartbeat") >= 2)
+                    assert "Data node heartbeat registration revision mismatch" not in self._read_log(
+                        master_log, master_log_offset
+                    )
+                else:
+                    def heartbeat_was_processed_after_alert():
+                        log = self._read_log(master_log, master_log_offset)
+                        alert_position = log.find("Data node heartbeat registration revision mismatch")
+                        return (
+                            alert_position >= 0
+                            and "Processing incremental data node heartbeat" in log[alert_position:]
+                        )
+
+                    wait(heartbeat_was_processed_after_alert)
+
+                assert get(f"{node_path}/@state") == "online"
+                assert get(f"{node_path}/@lease_transaction_id") == lease_transaction_id
+        finally:
+            update_nodes_dynamic_config({
+                "data_node": {"testing_options": {"omit_heartbeat_registration_revision": False}},
+            })
+
+        # The same running node must recover once it sends the real revision again.
+        wait(lambda: get(f"{node_path}/@state") == "online")
+        master_log_offset = os.path.getsize(master_log)
+        wait(lambda: "Processing incremental data node heartbeat" in self._read_log(master_log, master_log_offset))
+
 
 ##################################################################
 
@@ -749,8 +860,16 @@ class TestNodeTrackerPeriodicAlertChecks(YTEnvSetup):
         wait(lambda: self._has_alert("Node(s) had no job heartbeat for too long"))
 
     @authors("grphil")
-    def test_incomplete_state_alert(self):
-        set("//sys/@config/node_tracker/max_node_incomplete_state_duration", 1)
+    @pytest.mark.parametrize("all_inclomplete", [False, True])
+    def test_incomplete_state_alert(self, all_inclomplete):
+        # Both should work for being disposed.
+        if all_inclomplete:
+            set("//sys/@config/node_tracker/max_node_incomplete_state_duration", 1)
+            set("//sys/@config/node_tracker/max_node_dispose_state_duration", 30000)
+        else:
+            set("//sys/@config/node_tracker/max_node_incomplete_state_duration", 30000)
+            set("//sys/@config/node_tracker/max_node_dispose_state_duration", 1)
+
         set("//sys/@config/node_tracker/node_alerts_check_period", 100)
 
         set("//sys/@config/node_tracker/max_locations_being_disposed", 0)

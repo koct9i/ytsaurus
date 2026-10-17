@@ -70,6 +70,7 @@ void TReplicationCard::Save(TSaveContext& context) const
     Save(context, AwaitingCollocationId_);
     Save(context, SecondaryIndices_);
     Save(context, IndexTo_);
+    TNullableIntrusivePtrSerializer<>::Save(context, SecondaryIndexPendingTransition_);
 }
 
 void TReplicationCard::Load(TLoadContext& context)
@@ -93,12 +94,12 @@ void TReplicationCard::Load(TLoadContext& context)
             Load(context, AwaitingCollocationId_);
         }
         // COMPAT(sabdenovch)
-        if (context.GetVersion() >= EChaosReign::SecondaryIndices ||
-            context.GetVersion() < EChaosReign::Start_26_2 &&
-            context.GetVersion() >= EChaosReign::SecondaryIndices_26_1)
-        {
+        if (context.GetVersion() >= EChaosReign::SecondaryIndices) {
             Load(context, SecondaryIndices_);
             Load(context, IndexTo_);
+            if (context.GetVersion() >= EChaosReign::SecondaryIndexTransitionStates) {
+                TNullableIntrusivePtrSerializer<>::Load(context, SecondaryIndexPendingTransition_);
+            }
         }
     } else {
         using NYT::Load;
@@ -128,7 +129,9 @@ void TReplicationCard::Load(TLoadContext& context)
 
 void FormatValue(TStringBuilderBase* builder, const TReplicationCard& replicationCard, TStringBuf /*spec*/)
 {
-    builder->AppendFormat("{Id: %v, Replicas: %v, Era: %v, TableId: %v, TablePath: %v, TableClusterName: %v, CurrentTimestamp: %v, ReplicatedTableOptions: %v, CollocationId %v}",
+    builder->AppendFormat("{Id: %v, Replicas: %v, Era: %v, TableId: %v, TablePath: %v, "
+        "TableClusterName: %v, CurrentTimestamp: %v, ReplicatedTableOptions: %v, "
+        "CollocationId: %v, SecondaryIndices: %v, IndexTo: %v}",
         replicationCard.GetId(),
         replicationCard.Replicas(),
         replicationCard.GetEra(),
@@ -137,13 +140,20 @@ void FormatValue(TStringBuilderBase* builder, const TReplicationCard& replicatio
         replicationCard.GetTableClusterName(),
         replicationCard.GetCurrentTimestamp(),
         ConvertToYsonString(replicationCard.GetReplicatedTableOptions(), EYsonFormat::Text).AsStringBuf(),
-        (replicationCard.GetCollocation() ? replicationCard.GetCollocation()->GetId() : TGuid()));
+        (replicationCard.GetCollocation() ? replicationCard.GetCollocation()->GetId() : TGuid()),
+        MakeFormattableView(replicationCard.SecondaryIndices(), [] (TStringBuilderBase* builder, const TIndexInfo& index) {
+            builder->AppendFormat("%v - %Qlv", index.IndexObjectId, index.Kind);
+        }),
+        replicationCard.IndexTo());
 }
 
 bool TReplicationCard::IsReadyToMigrate() const
 {
-    return GetState() == EReplicationCardState::Normal ||
-        (GetState() == EReplicationCardState::GeneratingTimestampForNewEra && Replicas_.empty() && Coordinators_.empty());
+    return GetState() == EReplicationCardState::Normal || (
+        GetState() == EReplicationCardState::GeneratingTimestampForNewEra &&
+        Replicas_.empty() &&
+        Coordinators_.empty() &&
+        SecondaryIndices_.empty());
 }
 
 bool TReplicationCard::IsMigrated() const
@@ -164,6 +174,15 @@ void TReplicationCard::ValidateCollocationNotMigrating() const
     if (Collocation_) {
         Collocation_->ValidateNotMigrating();
     }
+}
+
+void TReplicationCard::ValidateNoPendingSecondaryIndexChanges() const
+{
+    THROW_ERROR_EXCEPTION_IF(SecondaryIndexPendingTransition_,
+        "Replication card %v awaits transition state %Qlv for index %v",
+        Id_,
+        SecondaryIndexPendingTransition_->State,
+        SecondaryIndexPendingTransition_->IndexReplicationCardId);
 }
 
 NChaosClient::TReplicationCardPtr TReplicationCard::ConvertToClientCard(const TReplicationCardFetchOptions& options)
@@ -217,6 +236,14 @@ NChaosClient::TReplicationCardPtr TReplicationCard::ConvertToClientCard(const TR
     }
 
     for (const auto& secondaryIndex : SecondaryIndices_) {
+        if (const auto& pending = SecondaryIndexPendingTransition_;
+            pending &&
+            secondaryIndex.IndexObjectId == pending->IndexReplicationCardId &&
+            pending->State == ESecondaryIndexTransitionState::PendingCreation)
+        {
+            continue;
+        }
+
         EmplaceOrCrash(
             clientCard->SecondaryIndices,
             secondaryIndex.IndexObjectId,
@@ -235,6 +262,16 @@ TReplicationCard::TSecondaryIndices::iterator TReplicationCard::FindSecondaryInd
         [&] (const TIndexInfo& secondaryIndexInfo) {
             return secondaryIndexInfo.IndexObjectId == indexCardId;
         });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TSecondaryIndexPendingTransition::Register(TRegistrar registrar)
+{
+    registrar.Parameter("state", &TThis::State);
+    registrar.Parameter("index_replication_card_id", &TThis::IndexReplicationCardId);
+    registrar.Parameter("new_correspondence", &TThis::NewCorrespondence)
+        .Optional();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

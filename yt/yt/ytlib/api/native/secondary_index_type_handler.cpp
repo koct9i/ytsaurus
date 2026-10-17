@@ -45,28 +45,36 @@ public:
         auto predicate = attributes->Find<std::string>("predicate");
         auto evaluatedColumnsSchema = attributes->Find<TTableSchemaPtr>("evaluated_columns_schema");
 
-        auto mountInfos = WaitFor(AllSucceeded(std::vector{
-                Client_->Connection_->GetTableMountCache()->GetTableInfo(tablePath),
-                Client_->Connection_->GetTableMountCache()->GetTableInfo(indexTablePath),
+        NApi::TGetNodeOptions getNodeOptions;
+        getNodeOptions.Attributes = {"id", "schema"};
+        getNodeOptions.ReadFrom = EMasterChannelKind::Cache;
+
+        auto tablesMetadata = WaitFor(AllSucceeded(std::vector{
+                Client_->GetNode(tablePath, getNodeOptions),
+                Client_->GetNode(indexTablePath, getNodeOptions),
             }))
             .ValueOrThrow();
 
+        auto tableNode = ConvertToNode(tablesMetadata[0]);
+        auto indexTableNode = ConvertToNode(tablesMetadata[1]);
 
-        auto indexTableSchema = mountInfos[1]->Schemas[ETableSchemaKind::Primary];
+        auto tableSchema = tableNode->Attributes().Get<TTableSchema>("schema");
+        auto indexTableSchema = indexTableNode->Attributes().Get<TTableSchema>("schema");
 
-        auto tableId = mountInfos[0]->TableId;
-        auto indexTableId = mountInfos[1]->TableId;
+        auto tableId = tableNode->Attributes().Get<TTableId>("id");
+        auto indexTableId = indexTableNode->Attributes().Get<TTableId>("id");
+
         auto tableType = TypeFromId(tableId);
 
         if (tableType != TypeFromId(indexTableId)) {
             THROW_ERROR_EXCEPTION("Table type mismatch")
-                << TErrorAttribute("table_type", tableType)
-                << TErrorAttribute("index_table_type", TypeFromId(indexTableId));
+                .With("table_type", tableType)
+                .With("index_table_type", TypeFromId(indexTableId));
         }
 
         if (tableId == indexTableId) {
             THROW_ERROR_EXCEPTION("Table cannot be an index to itself")
-                << TErrorAttribute("table_id", tableId);
+                .With("table_id", tableId);
         }
 
         if (tableType != EObjectType::ReplicatedTable && tableType != EObjectType::Table) {
@@ -76,8 +84,8 @@ public:
         auto cellTag = CellTagFromId(tableId);
         if (cellTag != CellTagFromId(indexTableId)) {
             THROW_ERROR_EXCEPTION("Table and index table native cell tags differ")
-                << TErrorAttribute("table_cell_tag", cellTag)
-                << TErrorAttribute("index_table_cell_tag", CellTagFromId(indexTableId));
+                .With("table_cell_tag", cellTag)
+                .With("index_table_cell_tag", CellTagFromId(indexTableId));
         }
 
         auto getUnfoldedColumns = [&] {
@@ -100,8 +108,8 @@ public:
 
         ValidateIndexSchema(
             kind,
-            *mountInfos[0]->Schemas[ETableSchemaKind::Primary],
-            *indexTableSchema,
+            tableSchema,
+            indexTableSchema,
             predicate,
             evaluatedColumnsSchema,
             unfoldedColumns);

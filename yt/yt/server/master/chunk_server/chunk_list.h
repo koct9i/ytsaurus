@@ -1,6 +1,7 @@
 #pragma once
 
 #include "public.h"
+
 #include "chunk_tree.h"
 #include "chunk_tree_statistics.h"
 #include "cumulative_statistics.h"
@@ -9,11 +10,12 @@
 
 #include <yt/yt/client/table_client/key_bound.h>
 
-#include <yt/yt/core/misc/property.h>
 #include <yt/yt/core/misc/indexed_vector.h>
 
 #include <library/cpp/yt/memory/range.h>
 #include <library/cpp/yt/memory/ref_tracked.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NChunkServer {
 
@@ -56,7 +58,7 @@ public:
     struct TAppendTabletChunkLists
     {
         TChunkList* OriginatingChunkList;
-        TChunkList* DeltaChunkList;
+        TChunkList* AppendDeltaChunkList;
     };
 
 public:
@@ -73,9 +75,9 @@ public:
     void Save(NCellMaster::TSaveContext& context) const;
     void Load(NCellMaster::TLoadContext& context);
 
-    TRange<TChunkListRawPtr> Parents() const;
-    void AddParent(TChunkList* parent);
-    void RemoveParent(TChunkList* parent);
+    TRange<TChunkTreeRawPtr> Parents() const;
+    void AddParent(TChunkTree* parent);
+    void RemoveParent(TChunkTree* parent);
 
     TRange<TChunkOwnerBaseRawPtr> TrunkOwningNodes() const;
     TRange<TChunkOwnerBaseRawPtr> BranchedOwningNodes() const;
@@ -96,6 +98,14 @@ public:
     void SetKind(EChunkListKind kind);
 
     bool IsSealed() const;
+
+    //! Whether the chunk list maintains and propagates tree statistics. False only for a scratch chunk
+    //! list, which is a mere holder of chunks.
+    bool HasStatistics() const;
+
+    bool IsHunkRoot() const;
+
+    bool IsHunkRelated() const;
 
     bool HasCumulativeStatistics() const;
     bool HasAppendableCumulativeStatistics() const;
@@ -151,7 +161,7 @@ private:
         void Persist(const NCellMaster::TPersistenceContext& context);
     };
 
-    TIndexedVector<TChunkListRawPtr> Parents_;
+    TIndexedVector<TChunkTreeRawPtr> Parents_;
     TIndexedVector<TChunkOwnerBaseRawPtr> TrunkOwningNodes_;
     TIndexedVector<TChunkOwnerBaseRawPtr> BranchedOwningNodes_;
 

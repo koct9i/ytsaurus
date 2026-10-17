@@ -127,7 +127,7 @@ struct TExecutionContext;
 struct TArrayJoinParameters
 {
     bool IsLeft;
-    std::vector<EValueType> FlattenedTypes;
+    std::vector<NTableClient::EValueType> FlattenedTypes;
     std::vector<int> SelfJoinedColumns;
     std::vector<int> ArrayJoinedColumns;
 };
@@ -239,7 +239,7 @@ struct TWriteOpClosure
 
 struct TSubqueryParameters
 {
-    std::vector<EValueType> FromTypes;
+    std::vector<NTableClient::EValueType> FromTypes;
 };
 
 struct TSubqueryWriteOpClosure
@@ -280,6 +280,30 @@ struct TExecutionContext
 };
 
 using TNestedGroupByClosure = TLookupRows;
+
+class TNestedOrderByClosure
+{
+public:
+    TNestedOrderByClosure(
+        TExpressionContext* context,
+        NWebAssembly::TCompartmentFunction<TComparerFunction> comparer,
+        i64 limit,
+        int rowSize);
+
+    void AddRow(const TPIValue* row);
+    TRange<TPIValue*> GetRows();
+
+private:
+    TExpressionContext* const Context_;
+    const NWebAssembly::TCompartmentFunction<TComparerFunction> Comparer_;
+    const i64 Limit_;
+    const int RowSize_;
+
+    std::vector<TPIValue*> Rows_;
+    i64 RowCount_ = 0;
+
+    void Trim();
+};
 
 struct TNestedExecutionContext
 {

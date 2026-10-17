@@ -29,11 +29,7 @@
 
 #include <yt/yt/server/lib/misc/job_reporter.h>
 
-#include <yt/yt/server/lib/nbd/config.h>
 #include <yt/yt/server/lib/nbd/server.h>
-
-#include <yt/yt/server/lib/signature/components/components.h>
-#include <yt/yt/server/lib/signature/components/config.h>
 
 #include <yt/yt/ytlib/auth/native_authentication_manager.h>
 #include <yt/yt/ytlib/auth/tvm_bridge_service.h>
@@ -52,9 +48,14 @@
 #include <yt/yt/client/signature/generator.h>
 #include <yt/yt/client/signature/validator.h>
 
+#include <yt/yt/library/nbd/config.h>
+
 #include <yt/yt/library/dns_over_rpc/server/dns_over_rpc_service.h>
 
 #include <yt/yt/library/disk_manager/hotswap_manager.h>
+
+#include <yt/yt/library/signature/components/components.h>
+#include <yt/yt/library/signature/components/config.h>
 
 #include <yt/yt/core/service_discovery/yp/config.h>
 
@@ -107,7 +108,7 @@ public:
 
     void Initialize() override
     {
-        YT_LOG_INFO("Initializing exec node");
+        YT_TLOG_INFO("Initializing exec node");
 
         // Cycles are fine for bootstrap.
         GetDynamicConfigManager()
@@ -160,7 +161,7 @@ public:
             ClusterNodeBootstrap_,
             {
                 .LocalAddress = NNet::BuildServiceAddress(GetLocalHostName(), GetConfig()->RpcPort),
-                .Logger = ExecNodeLogger().WithTag("Component: ThrottlerManager"),
+                .Logger = ExecNodeLogger().WithTag("Component", "ThrottlerManager"),
                 .Profiler = ExecNodeProfiler().WithPrefix("/throttler_manager")
             }
         );
@@ -217,13 +218,11 @@ public:
     void Run() override
     {
         {
-            YT_LOG_INFO("Waiting for throttlers to initialize");
+            YT_TLOG_INFO("Waiting for throttlers to initialize");
             auto error = WaitFor(ThrottlerManager_->Start());
-            YT_LOG_FATAL_UNLESS(
-                error.IsOK(),
-                error,
-                "Unexpected failure while waiting for throttlers to initialize");
-            YT_LOG_INFO("Throttlers initialized");
+            YT_TLOG_FATAL_UNLESS(error.IsOK(), "Unexpected failure while waiting for throttlers to initialize")
+                .With(error);
+            YT_TLOG_INFO("Throttlers initialized");
         }
 
         auto nbdConfig = DynamicConfig_.Acquire()->ExecNode->Nbd;
@@ -480,7 +479,7 @@ private:
 
     TSignatureComponentsPtr SignatureComponents_;
 
-    IPollerPtr AuxPoller_;
+    IThreadPoolPollerPtr AuxPoller_;
 
     void BuildJobProxyConfigTemplate(const std::optional<TSecondaryMasterConnectionConfigs>& optionalNewSecondaryMasterConfigs)
     {
@@ -512,7 +511,8 @@ private:
             for (const auto& secondaryMasterConfig : newJobProxyConfigTemplate->OriginalClusterConnection->Static->SecondaryMasters) {
                 auto cellTag = CellTagFromId(secondaryMasterConfig->CellId);
                 if (newSecondaryMasterConfigs.erase(cellTag)) {
-                    YT_LOG_ALERT("Config contains a cell that was reported as new (CellTag: %v)", cellTag);
+                    YT_TLOG_ALERT("Config contains a cell that was reported as new")
+                        .With("CellTag", cellTag);
                 }
             }
 
@@ -543,7 +543,6 @@ private:
 
         newJobProxyConfigTemplate->StderrPath = GetConfig()->ExecNode->JobProxy->JobProxyLogging->JobProxyStderrPath;
         newJobProxyConfigTemplate->ExecutorStderrPath = GetConfig()->ExecNode->JobProxy->JobProxyLogging->ExecutorStderrPath;
-        newJobProxyConfigTemplate->TestRootFS = GetConfig()->ExecNode->JobProxy->TestRootFS;
         newJobProxyConfigTemplate->AlwaysAbortOnMemoryReserveOverdraft = GetConfig()->ExecNode->JobProxy->AlwaysAbortOnMemoryReserveOverdraft;
 
         newJobProxyConfigTemplate->CoreWatcher = GetConfig()->ExecNode->JobProxy->CoreWatcher;
@@ -628,8 +627,11 @@ private:
         JobReporter_->OnDynamicConfigChanged(
             oldConfig->ExecNode->JobReporter,
             newConfig->ExecNode->JobReporter);
-        if (newConfig->ExecNode->SignatureComponents) {
-            YT_UNUSED_FUTURE(SignatureComponents_->Reconfigure(newConfig->ExecNode->SignatureComponents));
+        if (newConfig->ExecNode->SignatureComponents || oldConfig->ExecNode->SignatureComponents) {
+            YT_UNUSED_FUTURE(SignatureComponents_->Reconfigure(
+                newConfig->ExecNode->SignatureComponents
+                    ? newConfig->ExecNode->SignatureComponents
+                    : GetConfig()->ExecNode->SignatureComponents));
         }
 
         DynamicConfig_.Store(newConfig);
@@ -637,6 +639,8 @@ private:
         if (NbdThreadPool_ && newConfig->ExecNode->Nbd) {
             NbdThreadPool_->SetThreadCount(newConfig->ExecNode->Nbd->Server->ThreadCount);
         }
+        AuxPoller_->SetThreadCount(
+            newConfig->AuxPollerThreadCount.value_or(GetConfig()->AuxPollerThreadCount));
     }
 
     DECLARE_THREAD_AFFINITY_SLOT(ControlThread);

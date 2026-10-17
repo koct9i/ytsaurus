@@ -301,9 +301,14 @@ struct TRootDirectoryBuilderTool
 struct TMkFsConfig
     : public NYTree::TYsonStruct
 {
-public:
     std::string Path;
     std::string Type;
+
+    //! Pass -E lazy_itable_init=1,lazy_journal_init=1 to mke2fs.
+    bool LazyInitialization;
+
+    //! Filesystem block size; if null, mke2fs picks one.
+    std::optional<i64> BlockSize;
 
     REGISTER_YSON_STRUCT(TMkFsConfig);
 
@@ -322,7 +327,6 @@ struct TMkFsAsRootTool
 struct TChangeOomScoreAdjAsRootConfig
     : public NYTree::TYsonStruct
 {
-public:
     pid_t Pid;
     int Score;
 

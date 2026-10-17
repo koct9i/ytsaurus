@@ -33,7 +33,7 @@ using namespace NYTree;
 
 using NChunkClient::NProto::TDataStatistics;
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "TestEvaluate");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "TestEvaluate");
 
 namespace {
 
@@ -150,7 +150,7 @@ TQueryStatistics DoExecuteQuery(
 
     auto readerMock = New<NiceMock<TReaderMock>>();
     EXPECT_CALL(*readerMock, Read(_))
-        .WillRepeatedly(Invoke(readRows));
+        .WillRepeatedly(readRows);
     ON_CALL(*readerMock, GetReadyEvent())
         .WillByDefault(Return(OKFuture));
 
@@ -598,7 +598,16 @@ std::pair<TQueryPtr, TQueryStatistics> TQueryEvaluateTest::DoEvaluate(
         return {};
     }
 
-    auto primaryQuery = Prepare(query, dataSplits, evaluateOptions.PlaceholderValues, TPreparePlanFragmentOptions{.SyntaxVersion = evaluateOptions.SyntaxVersion, .BuilderVersion = DefaultExpressionBuilderVersion});
+    auto primaryQuery = Prepare(
+        query,
+        dataSplits,
+        evaluateOptions.PlaceholderValues,
+        TPreparePlanFragmentOptions{
+            .SyntaxVersion = evaluateOptions.SyntaxVersion,
+            .BuilderVersion = DefaultExpressionBuilderVersion,
+            // COMPAT(dtorilov): Remove after 26.2.
+            .EnableScalarSubqueryOrderByAndLimit = evaluateOptions.EnableScalarSubqueryOrderByAndLimit,
+        });
 
     TQueryOptions options;
     options.InputRowLimit = evaluateOptions.InputRowLimit;
@@ -647,6 +656,10 @@ std::pair<TQueryPtr, TQueryStatistics> TQueryEvaluateTest::DoEvaluate(
 
             if (!found) {
                 found = findHierarchicalJoin(primaryQuery->HierarchicalJoinsBeforeGroupBy);
+            }
+
+            if (!found) {
+                found = findHierarchicalJoin(primaryQuery->HierarchicalJoinsAfterGroupBy);
             }
         }
 
@@ -806,7 +819,7 @@ TEvaluateCoordinatedGroupByResult TQueryEvaluateTest::EvaluateCoordinatedGroupBy
 
         auto readerMock = New<NiceMock<TReaderMock>>();
         EXPECT_CALL(*readerMock, Read(_))
-            .WillRepeatedly(Invoke(readRows));
+            .WillRepeatedly(readRows);
         ON_CALL(*readerMock, GetReadyEvent())
             .WillByDefault(Return(OKFuture));
 
@@ -900,7 +913,7 @@ ISchemafulPipePtr TQueryEvaluateTest::RunOnNodeThread(
 
     auto readerMock = New<NiceMock<TReaderMock>>();
     EXPECT_CALL(*readerMock, Read(_))
-        .WillRepeatedly(Invoke(readRows));
+        .WillRepeatedly(readRows);
     ON_CALL(*readerMock, GetReadyEvent())
         .WillByDefault(Return(OKFuture));
 

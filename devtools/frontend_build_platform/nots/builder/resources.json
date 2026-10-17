@@ -1,0 +1,24 @@
+{
+  "info": {
+    "created": "2026-10-17T00:08:09Z",
+    "pr": {
+      "id": 16526355,
+      "author": "baymer",
+      "summary": "FBP-3521: reject workspace protocol in pnpm overrides"
+    }
+  },
+  "by_platform": {
+    "darwin": {
+      "uri": "sbr:14075792608"
+    },
+    "darwin-arm64": {
+      "uri": "sbr:14075791813"
+    },
+    "linux": {
+      "uri": "sbr:14075794108"
+    },
+    "linux-aarch64": {
+      "uri": "sbr:14075793353"
+    }
+  }
+}

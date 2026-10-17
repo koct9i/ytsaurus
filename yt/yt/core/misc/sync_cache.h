@@ -6,7 +6,7 @@
 
 #include <yt/yt/library/profiling/sensor.h>
 
-#include <library/cpp/yt/threading/rw_spin_lock.h>
+#include <library/cpp/yt/system/rw_spin_lock.h>
 
 #include <atomic>
 
@@ -63,6 +63,7 @@ protected:
 
     std::atomic<i64> Capacity_;
     std::atomic<double> YoungerSizeFraction_;
+    std::atomic<bool> RejectOversizedItems_;
 
     explicit TSyncSlruCacheBase(
         TSlruCacheConfigPtr config,
@@ -72,6 +73,12 @@ protected:
     virtual void OnAdded(const TValuePtr& value);
     virtual void OnRemoved(const TValuePtr& value);
     virtual void OnTotalWeightUpdated(i64 weightDelta);
+
+    //! For testing purposes only.
+    const NProfiling::TCounter& GetRejectedOversizedCounter() const;
+    const NProfiling::TCounter& GetRejectedOversizedWeightCounter() const;
+    const NProfiling::TCounter& GetEvictedCounter() const;
+    const NProfiling::TCounter& GetEvictedWeightCounter() const;
 
 private:
     struct TItem
@@ -86,7 +93,7 @@ private:
 
     struct TShard
     {
-        YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SpinLock);
+        YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SpinLock);
 
         TIntrusiveListWithAutoDelete<TItem, TDelete> YoungerLruList;
         TIntrusiveListWithAutoDelete<TItem, TDelete> OlderLruList;
@@ -107,6 +114,10 @@ private:
     NProfiling::TCounter HitWeightCounter_;
     NProfiling::TCounter MissedWeightCounter_;
     NProfiling::TCounter DroppedWeightCounter_;
+    NProfiling::TCounter RejectedOversizedCounter_;
+    NProfiling::TCounter RejectedOversizedWeightCounter_;
+    NProfiling::TCounter EvictedCounter_;
+    NProfiling::TCounter EvictedWeightCounter_;
     std::atomic<i64> YoungerWeightCounter_ = 0;
     std::atomic<i64> OlderWeightCounter_ = 0;
 
@@ -116,7 +127,7 @@ private:
     bool Touch(TShard* shard, TItem* item);
     void DrainTouchBuffer(TShard* shard);
 
-    void Trim(TShard* shard, NThreading::TWriterGuard<NThreading::TReaderWriterSpinLock>& guard);
+    void Trim(TShard* shard, TWriterGuard<TReaderWriterSpinLock>& guard);
 
     void PushToYounger(TShard* shard, TItem* item);
     void MoveToYounger(TShard* shard, TItem* item);

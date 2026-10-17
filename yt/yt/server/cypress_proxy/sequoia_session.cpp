@@ -9,6 +9,8 @@
 #include "master_connector.h"
 #include "user_directory.h"
 
+#include <yt/yt/server/lib/security_server/access_log.h>
+
 #include <yt/yt/server/lib/sequoia/cypress_transaction.h>
 #include <yt/yt/server/lib/sequoia/helpers.h>
 
@@ -37,6 +39,8 @@
 #include <yt/yt/client/object_client/helpers.h>
 
 #include <yt/yt/core/rpc/dispatcher.h>
+
+#include <yt/yt/core/ytree/fluent.h>
 
 #include <library/cpp/iterator/enumerate.h>
 #include <library/cpp/iterator/zip.h>
@@ -392,11 +396,66 @@ void TraverseSelectedSubtree(
 
 ////////////////////////////////////////////////////////////////////////////////
 
+namespace NDetail {
+
+////////////////////////////////////////////////////////////////////////////////
+
+TAccessLogTransactionInfo::TAccessLogTransactionInfo(std::vector<TAccessLogTransactionEntry> entries)
+    : Entries_(std::move(entries))
+{ }
+
+void TAccessLogTransactionInfo::WriteTransactionInfo(IYsonConsumer* consumer) const
+{
+    int size = std::ssize(Entries_);
+    for (int index = 0; index < size; ++index) {
+        const auto& entry = Entries_[index];
+
+        auto fluent = BuildYsonMapFragmentFluently(consumer);
+        fluent.Item("transaction_id").Value(entry.Id);
+        if (entry.Attributes) {
+            auto attributes = ConvertTo<IMapNodePtr>(entry.Attributes);
+            if (auto child = attributes->FindChild("title")) {
+                fluent.Item("transaction_title").Value(child);
+            }
+            for (const char* key : {"operation_id", "operation_title", "operation_type"}) {
+                if (auto child = attributes->FindChild(key)) {
+                    fluent.Item(key).Value(child);
+                }
+            }
+        }
+
+        if (index + 1 < size) {
+            consumer->OnKeyedItem("parent");
+            consumer->OnBeginMap();
+        }
+    }
+
+    for (int index = 0; index + 1 < size; ++index) {
+        consumer->OnEndMap();
+    }
+}
+
+TTransactionId TAccessLogTransactionInfo::GetTransactionId() const
+{
+    return Entries_.empty() ? NullTransactionId : Entries_.front().Id;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+} // namespace NDetail
+
+////////////////////////////////////////////////////////////////////////////////
+
 DEFINE_REFCOUNTED_TYPE(TSequoiaSession)
 
 TTransactionId TSequoiaSession::GetCurrentCypressTransactionId() const
 {
     return CypressTransactionAncestry_.back();
+}
+
+const NSecurityServer::ITransactionAccessLogInfo& TSequoiaSession::GetAccessLogTransactionInfo() const
+{
+    return AccessLogTransactionInfo_;
 }
 
 TSequoiaSession::TSubtree TSequoiaSession::TPagedSubtreeFetcher::FetchNextPage()
@@ -443,6 +502,7 @@ TSequoiaSession::TPagedSubtreeFetcher::TPagedSubtreeFetcher(
 TSequoiaSessionPtr TSequoiaSession::Start(
     IBootstrap* bootstrap,
     const TAuthenticationIdentity& authenticationIdentity,
+    std::string description,
     TTransactionId cypressTransactionId,
     const std::vector<TTransactionId>& cypressPrerequisiteTransactionIds)
 {
@@ -466,15 +526,22 @@ TSequoiaSessionPtr TSequoiaSession::Start(
     auto nativeAuthenticatedClient = bootstrap->GetNativeConnection()->CreateNativeClient(clientOptions);
 
     const auto& masterConnector = bootstrap->GetMasterConnector();
+
+    TTransactionStartOptions transactionStartOptions;
+    transactionStartOptions.Attributes = CreateEphemeralAttributes();
+    transactionStartOptions.Attributes->Set("title", description);
+
     auto sequoiaTransaction = WaitFor(
         StartCypressProxyTransaction(
             sequoiaClient,
             ESequoiaTransactionType::CypressModification,
             masterConnector->GetSequoiaTransactionFeatures(),
-            cypressPrerequisiteTransactionIds))
+            cypressPrerequisiteTransactionIds,
+            transactionStartOptions))
         .ValueOrThrow();
 
     std::vector<TTransactionId> cypressTransactions;
+    std::vector<NDetail::TAccessLogTransactionEntry> accessLogTransactionChain;
 
     if (cypressTransactionId) {
         auto cypressTransactionRecords = WaitFor(sequoiaTransaction->LookupRows(
@@ -505,6 +572,17 @@ TSequoiaSessionPtr TSequoiaSession::Start(
             record->AncestorIds.end(),
             cypressTransactions.begin() + 1);
         cypressTransactions.back() = cypressTransactionId;
+
+        accessLogTransactionChain.reserve(1 + record->AncestorIds.size());
+        accessLogTransactionChain.push_back({
+            .Id = cypressTransactionId,
+            .Attributes = record->Attributes,
+        });
+        for (int i = std::ssize(record->AncestorIds) - 1; i >= 0; --i) {
+            accessLogTransactionChain.push_back({
+                .Id = record->AncestorIds[i],
+            });
+        }
     } else {
         cypressTransactions = {NullTransactionId};
     }
@@ -514,7 +592,8 @@ TSequoiaSessionPtr TSequoiaSession::Start(
         std::move(sequoiaTransaction),
         std::move(cypressTransactions),
         std::move(nativeAuthenticatedClient),
-        std::move(authenticatedUser));
+        std::move(authenticatedUser),
+        std::move(accessLogTransactionChain));
 }
 
 void TSequoiaSession::MaybeLockAndReplicateCypressTransaction()
@@ -531,7 +610,7 @@ void TSequoiaSession::MaybeLockAndReplicateCypressTransaction()
     // lib/sequoia/cypress_transaction.cpp.
     SequoiaTransaction_->LockRow(
         NRecords::TTransactionKey{.TransactionId = cypressTransactionId},
-        SequoiaTransaction_->GetFeatures().UseSharedWriteLocksForCypressTransactions
+        SequoiaTransaction_->GetFeatures().UseSharedWriteLocksForCypressTransactions.value_or(true)
             ? ELockType::SharedWrite
             : ELockType::SharedStrong);
 
@@ -615,7 +694,8 @@ void TSequoiaSession::Commit(TCellId coordinatorCellId)
             }
 
             if (error.FindMatching(NSequoiaClient::EErrorCode::InvalidSequoiaReign)) {
-                YT_LOG_ALERT(error, "Failed to commit Sequoia transaction");
+                YT_TLOG_ALERT("Failed to commit Sequoia transaction")
+                    .With(error);
 
                 return WrapCypressProxyRegistrationError(std::move(error));
             }
@@ -844,6 +924,23 @@ TFuture<TNodeIdToConstAttributes> TSequoiaSession::FetchNodeAttributesFromMaster
         }));
 }
 
+TFuture<IConstAttributeDictionaryPtr> TSequoiaSession::FetchSingleObjectAttributes(
+    TObjectId objectId,
+    const TAttributeFilter& attributeFilter) const
+{
+    auto requestTemplate = TYPathProxy::Get("&/@");
+    if (attributeFilter) {
+        ToProto(requestTemplate->mutable_attributes(), attributeFilter);
+    }
+
+    auto batcher = CreateGetBatcher(requestTemplate, {objectId});
+    return batcher.Invoke()
+        .Apply(BIND([=] (const TMasterYPathProxy::TVectorizedGetBatcher::TVectorizedResponse& rsp) -> IConstAttributeDictionaryPtr {
+            const auto& value = GetOrCrash(rsp, objectId).ValueOrThrow();
+            return ConvertToAttributes(TYsonString(value->value()));
+        }));
+}
+
 const NNative::IClientPtr& TSequoiaSession::GetNativeAuthenticatedClient() const
 {
     return NativeAuthenticatedClient_;
@@ -863,6 +960,10 @@ TMasterYPathProxy::TVectorizedGetBatcher TSequoiaSession::CreateGetBatcher(
             subbatchSize = it->second;
         }
     }
+
+    SetSuppressAccessLogging(requestTemplate, true);
+    SetSuppressAccessTracking(requestTemplate, true);
+    SetSuppressExpirationTimeoutRenewal(requestTemplate, true);
 
     return TMasterYPathProxy::CreateGetBatcher(
         GetNativeAuthenticatedClient(),
@@ -1592,13 +1693,15 @@ TSequoiaSession::TSequoiaSession(
     ISequoiaTransactionPtr sequoiaTransaction,
     std::vector<TTransactionId> cypressTransactionIds,
     NNative::IClientPtr nativeAuthenticatedClient,
-    TUserDescriptorPtr authenticatedUser)
+    TUserDescriptorPtr authenticatedUser,
+    std::vector<NDetail::TAccessLogTransactionEntry> accessLogTransactionChain)
     : SequoiaTransaction_(sequoiaTransaction)
     , Bootstrap_(bootstrap)
     , CypressTransactionAncestry_(std::move(cypressTransactionIds))
     , CypressTransactionDepths_(EnumerateCypressTransactionAncestry(CypressTransactionAncestry_))
     , NativeAuthenticatedClient_(std::move(nativeAuthenticatedClient))
     , AuthenticatedUser_(std::move(authenticatedUser))
+    , AccessLogTransactionInfo_(std::move(accessLogTransactionChain))
     , AcdFetcher_(New<TAcdFetcher>(std::move(sequoiaTransaction)))
 { }
 

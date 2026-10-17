@@ -444,7 +444,6 @@ private:
         return true;
     }
 
-private:
     TAstParserContext Ctx_;
     TIssues Issues_;
 };
@@ -625,6 +624,7 @@ void DestroyNode(TAstNode* node) {
         node->Destroy();
     }
 }
+
 } // namespace
 
 TAstParseResult::~TAstParseResult() {

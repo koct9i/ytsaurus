@@ -6,7 +6,6 @@ import re
 import typing as t
 
 from sqlglot import exp, generator, transforms
-
 from sqlglot.dialects.dialect import (
     DATETIME_DELTA,
     JSON_EXTRACT_TYPE,
@@ -33,13 +32,18 @@ from sqlglot.dialects.dialect import (
     rename_func,
     remove_from_array_using_filter,
     strposition_sql,
-    str_to_time_sql,
     timestrtotime_sql,
     unit_to_str,
+    week_unit_to_dow,
+    weekstart_unit_to_str,
+    WEEK_START_DAY_TO_DOW,
 )
 from sqlglot.generator import unsupported_args
-from sqlglot.helper import is_date_unit, seq_get
+from sqlglot.helper import find_new_name, is_date_unit, seq_get
+from sqlglot.optimizer.scope import find_all_in_scope
 from builtins import type as Type
+
+_CONNECT_BY_ARGS_TO_SKIP = frozenset({"connect", "where", "from_", "with_", "expressions"})
 
 # Regex to detect time zones in timestamps of the form [+|-]TT[:tt]
 # The pattern matches timezone offsets that appear after the time portion
@@ -65,18 +69,6 @@ WS_CONTROL_CHARS_TO_DUCK = {
     "\u001d": 29,
     "\u001e": 30,
     "\u001f": 31,
-}
-
-# Days of week to ISO 8601 day-of-week numbers
-# ISO 8601 standard: Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6, Sunday=7
-WEEK_START_DAY_TO_DOW = {
-    "MONDAY": 1,
-    "TUESDAY": 2,
-    "WEDNESDAY": 3,
-    "THURSDAY": 4,
-    "FRIDAY": 5,
-    "SATURDAY": 6,
-    "SUNDAY": 7,
 }
 
 MAX_BIT_POSITION = exp.Literal.number(32768)
@@ -169,6 +161,24 @@ def _last_day_sql(self: DuckDBGenerator, expression: exp.LastDay) -> str:
     For other date parts (year, quarter, week), we need to implement equivalent logic.
     """
     date_expr = expression.this
+    unit_expr = expression.args.get("unit")
+
+    week_start = week_unit_to_dow(unit_expr)
+    if week_start:
+        # The week's last day precedes its start day; DuckDB DAYOFWEEK: Sunday=0, ..., Saturday=6
+        last_dow = week_start - 1
+        dow = exp.func("EXTRACT", "DAYOFWEEK", date_expr)
+
+        # Days to the last day of week: (last_dow + 7 - dayofweek) % 7
+        days_to_last_expr = exp.Mod(
+            this=exp.Paren(this=exp.Sub(this=exp.Literal.number(last_dow + 7), expression=dow)),
+            expression=exp.Literal.number(7),
+        )
+        interval_expr = exp.Interval(this=days_to_last_expr, unit=exp.var("DAY"))
+        add_expr = exp.Add(this=date_expr, expression=interval_expr)
+
+        return self.sql(exp.cast(add_expr, exp.DType.DATE))
+
     unit = expression.text("unit")
 
     if not unit or unit.upper() == "MONTH":
@@ -197,20 +207,6 @@ def _last_day_sql(self: DuckDBGenerator, expression: exp.LastDay) -> str:
         # Last day of the last month of the quarter
         last_day_expr = exp.func("LAST_DAY", first_day_last_month_expr)
         return self.sql(last_day_expr)
-
-    if unit.upper() == "WEEK":
-        # DuckDB DAYOFWEEK: Sunday=0, Monday=1, ..., Saturday=6
-        dow = exp.func("EXTRACT", "DAYOFWEEK", date_expr)
-        # Days to the last day of week: (7 - dayofweek) % 7, assuming the last day of week is Sunday (Snowflake)
-        # Wrap in parentheses to ensure correct precedence
-        days_to_sunday_expr = exp.Mod(
-            this=exp.Paren(this=exp.Sub(this=exp.Literal.number(7), expression=dow)),
-            expression=exp.Literal.number(7),
-        )
-        interval_expr = exp.Interval(this=days_to_sunday_expr, unit=exp.var("DAY"))
-        add_expr = exp.Add(this=date_expr, expression=interval_expr)
-        cast_expr = exp.cast(add_expr, exp.DType.DATE)
-        return self.sql(cast_expr)
 
     self.unsupported(f"Unsupported date part '{unit}' in LAST_DAY function")
     return self.function_fallback_sql(expression)
@@ -710,6 +706,124 @@ def _seq_to_range_in_generator(expression: exp.Expr) -> exp.Expr:
     return expression.transform(replace_seq, copy=False)
 
 
+def connect_by_to_recursive_cte(expression: exp.Expr) -> exp.Expr:
+    # Rewrites START WITH ... CONNECT BY PRIOR into WITH RECURSIVE
+    # Falls through unchanged if there are no PRIORs.
+    if not isinstance(expression, exp.Select) or not expression.args.get("connect"):
+        return expression
+
+    connect = expression.args["connect"]
+    connect_pred = connect.args["connect"]
+
+    priors = list(connect_pred.find_all(exp.Prior))
+    if not priors:
+        return expression
+
+    from_ = expression.args.get("from_")
+    if not from_ or expression.args.get("joins"):
+        return expression
+
+    source_table = from_.this
+    base_select_exprs = expression.expressions
+    base_where = expression.args.get("where")
+    base_with = expression.args.get("with_")
+
+    # LEVEL is a Snowflake pseudo-column: it's always computed as a depth counter in the CTE.
+    has_level = any(
+        isinstance(col, exp.Column) and col.name.upper() == "LEVEL"
+        for e in base_select_exprs
+        for col in e.find_all(exp.Column)
+    )
+    has_star = expression.is_star
+
+    # CONNECT_BY_ROOT col yields the value of `col` from the START WITH row that begins each
+    # branch. Each one is threaded through the CTE as an extra column: the anchor binds it to the
+    # row's own value, the recursive arm forwards the parent's value unchanged.
+    root_col_names: list[str] = []
+    anchor_root_cols: list[exp.Expr] = []
+    inner_root_cols: list[exp.Expr] = []
+    roots = [root for e in base_select_exprs for root in e.find_all(exp.ConnectByRoot)]
+
+    for i, root in enumerate(roots):
+        name = f"_connect_by_root_{i}"
+        root_col_names.append(name)
+        anchor_root_cols.append(exp.alias_(root.this, name))
+        inner_root_cols.append(exp.alias_(exp.column(name, "_parent_row"), name))
+        root.replace(exp.column(name))
+
+    # Build the join condition from the full CONNECT BY predicate:
+    # PRIOR(col) → _parent_row.col, unqualified cols → _child_row.col.
+    def _qualify_connect_pred(node: exp.Expression) -> exp.Expression:
+        for col in find_all_in_scope(node, exp.Column):
+            col.set(
+                "table",
+                exp.to_identifier(
+                    "_parent_row" if isinstance(col.parent, exp.Prior) else "_child_row"
+                ),
+            )
+        for prior in find_all_in_scope(node, exp.Prior):
+            prior.replace(prior.this)
+        return node
+
+    # Avoid colliding with any CTE names already on the query.
+    cte_name = find_new_name(
+        {cte.alias for cte in (base_with.expressions if base_with else [])}, "_rootcte"
+    )
+
+    # Anchor: project all source columns + seed LEVEL at 1 + bind each root column to its own value.
+    anchor = exp.select(
+        exp.Star(), exp.alias_(exp.Literal.number(1), "level"), *anchor_root_cols
+    ).from_(source_table)
+    if connect.args.get("start"):
+        anchor = anchor.where(connect.args["start"])
+
+    # Recursive arm: carry all child columns + increment level + forward each root value.
+    # SELECT * in both arms means WHERE/PRIOR columns are always available without explicit tracking.
+    inner_query = (
+        exp.select(
+            exp.Column(this=exp.Star(), table=exp.to_identifier("_child_row")),
+            exp.alias_(exp.column("level", "_parent_row") + 1, "level"),
+            *inner_root_cols,
+        )
+        .from_(source_table.as_("_child_row"))
+        .join(exp.to_table(cte_name).as_("_parent_row"), on=_qualify_connect_pred(connect_pred))
+    )
+
+    # Outer SELECT re-projects from the CTE. Synthetic level/root columns are excluded from any
+    # star expansion (level only when not referenced) but kept where explicitly projected.
+    if has_star:
+        except_cols = [] if has_level else [exp.column("level")]
+        except_cols.extend(exp.column(name) for name in root_col_names)
+        star = exp.Star(except_=except_cols) if except_cols else exp.Star()
+        outer_select_exprs: list[exp.Expr] = [
+            star,
+            *(e for e in base_select_exprs if not e.is_star),
+        ]
+    else:
+        outer_select_exprs = base_select_exprs
+    outer_query = exp.select(*outer_select_exprs).from_(cte_name)
+    if base_where:
+        outer_query = outer_query.where(base_where.this)
+
+    # Attach the CTE, marking the WITH clause recursive.
+    if base_with:
+        outer_query.set("with_", base_with)
+    outer_query = outer_query.with_(
+        cte_name, as_=anchor.union(inner_query, distinct=False), recursive=True, copy=False
+    )
+
+    for arg, val in expression.args.items():
+        if val and arg not in _CONNECT_BY_ARGS_TO_SKIP:
+            outer_query.set(arg, val)
+
+    # Strip stale source table qualifiers in one pass; CTEs are child scopes so
+    # find_all_in_scope stays within the outer query only.
+    for col in find_all_in_scope(outer_query, exp.Column):
+        col.set("table", None)
+
+    return outer_query
+
+
 def _seq_sql(self: DuckDBGenerator, expression: exp.Func, byte_width: int) -> str:
     """
     Transpile Snowflake SEQ1/SEQ2/SEQ4/SEQ8 to DuckDB.
@@ -786,37 +900,18 @@ def _implicit_datetime_cast(
     return arg
 
 
-def _week_unit_to_dow(unit: exp.Expr | None) -> int | None:
-    """
-    Compute the Monday-based day shift to align DATE_DIFF('WEEK', ...) coming
-    from other dialects, e.g BigQuery's WEEK(<day>) or ISOWEEK unit parts.
-
-    Args:
-        unit: The unit expression (Var for ISOWEEK or WeekStart)
-
-    Returns:
-        The ISO 8601 day number (Monday=1, Sunday=7 etc) or None if not a week unit or if day is dynamic (not a constant).
-
-        Examples:
-            "WEEK(SUNDAY)" -> 7
-            "WEEK(MONDAY)" -> 1
-            "ISOWEEK" -> 1
-    """
-    # Handle plain Var expressions for ISOWEEK only
-    if isinstance(unit, exp.Var) and unit.name.upper() in "ISOWEEK":
+def _week_trunc_start_dow(unit: exp.Expr | None) -> int | None:
+    # DuckDB's weeks are ISO 8601, so ISOWEEK maps to its plain WEEK unit
+    if isinstance(unit, exp.Literal) and unit.name.upper() == "ISOWEEK":
         return 1
-
-    # Handle WeekStart expressions with explicit day
-    if isinstance(unit, exp.WeekStart):
-        return WEEK_START_DAY_TO_DOW.get(unit.name.upper())
-
-    return None
+    return week_unit_to_dow(unit)
 
 
 def _build_week_trunc_expression(
     date_expr: exp.Expr,
     start_dow: int,
     preserve_start_day: bool = False,
+    cast_to_date: bool = True,
 ) -> exp.Expr:
     """
     Build DATE_TRUNC expression for week boundaries with custom start day.
@@ -830,6 +925,8 @@ def _build_week_trunc_expression(
         preserve_start_day: If True, reverse the shift after truncating so the result lands on the
             correct week start day. Needed for DATE_TRUNC (absolute result matters) but
             not for DATE_DIFF (only relative alignment matters).
+        cast_to_date: If True, cast the shifted result back to DATE; set to False for
+            timestamp-valued inputs, where the result must remain a timestamp.
 
     Shift formula: Sunday (7) gets +1, others get (1 - start_dow).
     """
@@ -845,9 +942,10 @@ def _build_week_trunc_expression(
 
     if preserve_start_day:
         interval = exp.Interval(this=exp.Literal.string(str(-shift_days)), unit=exp.var("DAY"))
-        return exp.cast(
-            exp.DateAdd(this=truncated, expression=interval), to=exp.DType.DATE, copy=False
-        )
+        shifted_back: exp.Expr = exp.DateAdd(this=truncated, expression=interval)
+        if cast_to_date:
+            return exp.cast(shifted_back, to=exp.DType.DATE, copy=False)
+        return shifted_back
 
     return truncated
 
@@ -869,7 +967,7 @@ def _date_diff_sql(self: DuckDBGenerator, expression: exp.DateDiff | exp.Datetim
     date_part_boundary = expression.args.get("date_part_boundary")
 
     # Extract week start day; returns None if day is dynamic (column/placeholder)
-    week_start = _week_unit_to_dow(unit)
+    week_start = week_unit_to_dow(unit)
     if date_part_boundary and week_start and this and expr:
         expression.set("unit", exp.Literal.string("WEEK"))
 
@@ -1486,6 +1584,7 @@ class DuckDBGenerator(generator.Generator):
     ARRAY_SIZE_DIM_REQUIRED: bool | None = False
     NORMALIZE_EXTRACT_DATE_PARTS = True
     SUPPORTS_LIKE_QUANTIFIERS = False
+    HISTORICAL_DATA_POST_ALIAS = True
     SET_ASSIGNMENT_REQUIRES_VARIABLE_KEYWORD = True
 
     TRANSFORMS = {
@@ -1616,7 +1715,9 @@ class DuckDBGenerator(generator.Generator):
         exp.Lateral: _explode_to_unnest_sql,
         exp.LogicalOr: lambda self, e: self.func("BOOL_OR", _cast_to_boolean(e.this)),
         exp.LogicalAnd: lambda self, e: self.func("BOOL_AND", _cast_to_boolean(e.this)),
-        exp.Select: transforms.preprocess([_seq_to_range_in_generator]),
+        exp.Select: transforms.preprocess(
+            [connect_by_to_recursive_cte, _seq_to_range_in_generator]
+        ),
         exp.Seq1: lambda self, e: _seq_sql(self, e, 1),
         exp.Seq2: lambda self, e: _seq_sql(self, e, 2),
         exp.Seq4: lambda self, e: _seq_sql(self, e, 4),
@@ -1688,9 +1789,6 @@ class DuckDBGenerator(generator.Generator):
         ),
         exp.UnixToStr: lambda self, e: self.func(
             "STRFTIME", self.func("TO_TIMESTAMP", e.this), self.format_time(e)
-        ),
-        exp.DatetimeTrunc: lambda self, e: self.func(
-            "DATE_TRUNC", unit_to_str(e), exp.cast(e.this, exp.DType.DATETIME)
         ),
         exp.UnixToTime: _unix_to_time_sql,
         exp.UnixToTimeStr: lambda self, e: f"CAST(TO_TIMESTAMP({self.sql(e, 'this')}) AS TEXT)",
@@ -2115,6 +2213,25 @@ class DuckDBGenerator(generator.Generator):
                 LIST_DISTINCT(:arr1),
                 e -> LEN(LIST_FILTER(:arr2, x -> x IS NOT DISTINCT FROM e)) = 0
             )
+        END
+        """
+    )
+
+    # BigQuery's `x IN UNNEST(arr)` NULL semantics:
+    #   NULL IN UNNEST([1, 2])  -> NULL
+    #   3 IN UNNEST([1, NULL])  -> NULL
+    #   3 IN UNNEST([1, 2])     -> FALSE
+    #   1 IN UNNEST(NULL)       -> FALSE (not NULL)
+    #   1 IN UNNEST([])         -> FALSE
+    # The default `IN (SELECT UNNEST(...))` rewrite creates a correlated subquery
+    # that DuckDB rejects inside non-inner joins, so a CASE expression is used instead.
+    IN_UNNEST_TEMPLATE: exp.Expr = exp.maybe_parse(
+        """
+        CASE
+            WHEN :arr IS NULL OR ARRAY_LENGTH(:arr) = 0 THEN FALSE
+            WHEN ARRAY_CONTAINS(:arr, :value) THEN TRUE
+            WHEN :value IS NULL OR ARRAY_LENGTH(:arr) <> LIST_COUNT(:arr) THEN NULL
+            ELSE FALSE
         END
         """
     )
@@ -2577,9 +2694,6 @@ class DuckDBGenerator(generator.Generator):
         )
         return self.function_fallback_sql(expression)
 
-    def fromiso8601timestamp_sql(self, expression: exp.FromISO8601Timestamp) -> str:
-        return self.sql(exp.cast(expression.this, exp.DType.TIMESTAMPTZ))
-
     def strposition_sql(self, expression: exp.StrPosition) -> str:
         this = expression.this
         substr = expression.args.get("substr")
@@ -2632,14 +2746,13 @@ class DuckDBGenerator(generator.Generator):
             exp.DType.TIMESTAMPTZ,
         )
 
-        if expression.args.get("safe"):
-            formatted_time = self.format_time(expression)
-            cast_type = exp.DType.TIMESTAMPTZ if needs_tz else exp.DType.TIMESTAMP
-            return self.sql(
-                exp.cast(self.func("TRY_STRPTIME", expression.this, formatted_time), cast_type)
-            )
+        value, formatted_time = self._strptime_default_year(expression)
 
-        base_sql = str_to_time_sql(self, expression)
+        if expression.args.get("safe"):
+            cast_type = exp.DType.TIMESTAMPTZ if needs_tz else exp.DType.TIMESTAMP
+            return self.sql(exp.cast(self.func("TRY_STRPTIME", value, formatted_time), cast_type))
+
+        base_sql = self.func("STRPTIME", value, formatted_time)
         if needs_tz:
             return self.sql(
                 exp.cast(
@@ -2650,14 +2763,30 @@ class DuckDBGenerator(generator.Generator):
         return base_sql
 
     def strtodate_sql(self, expression: exp.StrToDate) -> str:
-        formatted_time = self.format_time(expression)
+        value, formatted_time = self._strptime_default_year(expression)
         function_name = "STRPTIME" if not expression.args.get("safe") else "TRY_STRPTIME"
         return self.sql(
             exp.cast(
-                self.func(function_name, expression.this, formatted_time),
+                self.func(function_name, value, formatted_time),
                 exp.DataType(this=exp.DType.DATE),
             )
         )
+
+    def _strptime_default_year(
+        self, expression: exp.StrToTime | exp.StrToDate | exp.ParseDatetime
+    ) -> tuple[exp.ExpOrStr, exp.ExpOrStr | None]:
+        value: exp.ExpOrStr = expression.this
+        formatted_time: exp.ExpOrStr | None = self.format_time(expression)
+
+        if default_year := expression.args.get("default_year"):
+            value = exp.DPipe(this=exp.Literal.string(f"{default_year.name} "), expression=value)
+            formatted_time = exp.DPipe(this=exp.Literal.string("%Y "), expression=formatted_time)
+
+        return value, formatted_time
+
+    def parsedatetime_sql(self, expression: exp.ParseDatetime) -> str:
+        value, formatted_time = self._strptime_default_year(expression)
+        return self.func("STRPTIME", value, formatted_time)
 
     def parsetime_sql(self, expression: exp.ParseTime) -> str:
         formatted_time = self.format_time(expression)
@@ -3001,6 +3130,16 @@ class DuckDBGenerator(generator.Generator):
 
         return super().tablesample_sql(expression, tablesample_keyword=tablesample_keyword)
 
+    def in_sql(self, expression: exp.In) -> str:
+        unnest = expression.args.get("unnest")
+        if unnest:
+            return self.sql(
+                exp.replace_placeholders(
+                    self.IN_UNNEST_TEMPLATE, arr=unnest.expressions[0], value=expression.this
+                )
+            )
+        return super().in_sql(expression)
+
     def join_sql(self, expression: exp.Join) -> str:
         if (
             not expression.args.get("using")
@@ -3020,6 +3159,11 @@ class DuckDBGenerator(generator.Generator):
 
     def countif_sql(self, expression: exp.CountIf) -> str:
         if self.dialect.version >= (1, 2):
+            this = expression.this
+            if expression.args.get("zero_on_all_null") and not isinstance(this, exp.Distinct):
+                # DuckDB >= 1.2's COUNT_IF returns NULL when the condition is NULL on all rows,
+                # so we wrap the condition in IS TRUE to preserve count-like semantics
+                expression = exp.CountIf(this=exp.paren(this).is_(exp.true()))
             return self.function_fallback_sql(expression)
 
         # https://github.com/tobymao/sqlglot/pull/4749
@@ -3356,6 +3500,23 @@ class DuckDBGenerator(generator.Generator):
                 this=exp.func("LIST", exp.Distinct(expressions=[expression.this])),
                 expression=exp.Where(this=expression.this.copy().is_(exp.null()).not_()),
             )
+        )
+
+    def arrayconcatagg_sql(self, expression: exp.ArrayConcatAgg) -> str:
+        this = expression.this
+
+        if isinstance(this, exp.Limit):
+            self.unsupported("LIMIT in ARRAY_CONCAT_AGG cannot be transpiled to DuckDB")
+            this = this.this
+
+        inner = this.this if isinstance(this, exp.Order) else this
+
+        return self.func(
+            "FLATTEN",
+            exp.Filter(
+                this=exp.ArrayAgg(this=this),
+                expression=exp.Where(this=inner.copy().is_(exp.null()).not_()),
+            ),
         )
 
     def arrayunionagg_sql(self, expression: exp.ArrayUnionAgg) -> str:
@@ -3815,6 +3976,12 @@ class DuckDBGenerator(generator.Generator):
 
         return super().unnest_sql(expression)
 
+    def arrayagg_sql(self, expression: exp.ArrayAgg) -> str:
+        if isinstance(expression.this, exp.Limit):
+            self.unsupported("LIMIT inside ARRAY_AGG is not supported in DuckDB")
+
+        return super().arrayagg_sql(expression)
+
     def ignorenulls_sql(self, expression: exp.IgnoreNulls) -> str:
         this = expression.this
 
@@ -3822,6 +3989,14 @@ class DuckDBGenerator(generator.Generator):
             # DuckDB should render IGNORE NULLS only for the general-purpose
             # window functions that accept it e.g. FIRST_VALUE(... IGNORE NULLS) OVER (...)
             return super().ignorenulls_sql(expression)
+
+        # For ARRAY_AGG(expr IGNORE NULLS ...), convert IGNORE NULLS to a
+        # FILTER(WHERE expr IS NOT NULL) clause by setting nulls_excluded on
+        # the ArrayAgg.  The existing _add_arrayagg_null_filter method will
+        # emit the FILTER clause during arrayagg_sql / withingroup_sql.
+        if isinstance(this, exp.ArrayAgg):
+            this.set("nulls_excluded", True)
+            return self.sql(this)
 
         if isinstance(this, exp.First):
             this = exp.AnyValue(this=this.this)
@@ -4251,7 +4426,7 @@ class DuckDBGenerator(generator.Generator):
         unit = expression.args.get("unit")
         date = expression.this
 
-        week_start = _week_unit_to_dow(unit)
+        week_start = _week_trunc_start_dow(unit)
         unit = unit_to_str(expression)
 
         if week_start:
@@ -4270,11 +4445,33 @@ class DuckDBGenerator(generator.Generator):
 
         return result
 
+    def datetimetrunc_sql(self, expression: exp.DatetimeTrunc) -> str:
+        this = exp.cast(expression.this, exp.DType.DATETIME)
+        week_start = _week_trunc_start_dow(expression.args.get("unit"))
+        if week_start:
+            return self.sql(
+                _build_week_trunc_expression(
+                    this, week_start, preserve_start_day=True, cast_to_date=False
+                )
+            )
+
+        return self.func("DATE_TRUNC", unit_to_str(expression), this)
+
     def timestamptrunc_sql(self, expression: exp.TimestampTrunc) -> str:
-        unit = unit_to_str(expression)
         zone = expression.args.get("zone")
         timestamp = expression.this
-        date_unit = is_date_unit(unit)
+        week_start = _week_trunc_start_dow(expression.args.get("unit"))
+
+        # The week start emulation below is exact, so avoid weekstart_unit_to_str's degrade warning
+        unit = unit_to_str(expression) if week_start else weekstart_unit_to_str(self, expression)
+        date_unit = is_date_unit(unit) or bool(week_start)
+
+        def _trunc_expr(this: exp.Expr) -> exp.Expr:
+            if week_start:
+                return _build_week_trunc_expression(
+                    this, week_start, preserve_start_day=True, cast_to_date=False
+                )
+            return exp.func("DATE_TRUNC", unit, this)
 
         if date_unit and zone:
             # BigQuery's TIMESTAMP_TRUNC with timezone truncates in the target timezone and returns as UTC.
@@ -4282,10 +4479,13 @@ class DuckDBGenerator(generator.Generator):
             # 1. First AT TIME ZONE: ensures truncation happens in the target timezone
             # 2. Second AT TIME ZONE: converts the DATE result back to TIMESTAMPTZ (preserving time component)
             timestamp = exp.AtTimeZone(this=timestamp, zone=zone)
-            result_sql = self.func("DATE_TRUNC", unit, timestamp)
-            return self.sql(exp.AtTimeZone(this=result_sql, zone=zone))
+            trunced = _trunc_expr(timestamp)
+            if isinstance(trunced, exp.DateAdd):
+                # Parenthesize so the trailing AT TIME ZONE binds to the whole shifted expression
+                trunced = exp.Paren(this=trunced)
+            return self.sql(exp.AtTimeZone(this=trunced, zone=zone))
 
-        result = self.func("DATE_TRUNC", unit, timestamp)
+        result = self.sql(_trunc_expr(timestamp))
         if expression.args.get("input_type_preserved"):
             if timestamp.type and timestamp.is_type(exp.DType.TIME, exp.DType.TIMETZ):
                 dummy_date = exp.Cast(
@@ -4369,6 +4569,23 @@ class DuckDBGenerator(generator.Generator):
                     mon_strptime,
                 )
                 .else_(exp.TryCast(this=src, to=to))
+            )
+        elif (
+            isinstance(to_type, exp.Interval)
+            and (unit := to_type.unit)
+            and expression.args.get("requires_string")
+        ):
+            interval_type = exp.DataType.build("INTERVAL")
+            if isinstance(unit, exp.IntervalSpan):
+                self.unsupported(
+                    "TRY_CAST to INTERVAL with span (e.g. HOUR TO MINUTE) is not supported in DuckDB"
+                )
+                return self.sql(exp.TryCast(this=src, to=interval_type))
+            return self.sql(
+                exp.TryCast(
+                    this=exp.DPipe(this=src, expression=exp.Literal.string(f" {unit.name}")),
+                    to=interval_type,
+                )
             )
 
         return super().trycast_sql(expression)

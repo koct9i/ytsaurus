@@ -12,6 +12,7 @@
 #include <yt/yt/library/query/engine_api/column_evaluator.h>
 #include <yt/yt/library/query/engine_api/config.h>
 #include <yt/yt/library/query/engine_api/coordinator.h>
+#include <yt/yt/library/query/engine_api/query_engine_config.h>
 #include <yt/yt/library/query/engine_api/range_inferrer.h>
 
 #include <yt/yt/library/query/engine/folding_profiler.h>
@@ -48,7 +49,7 @@ using namespace NYson;
 
 using NCodegen::EExecutionBackend;
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "TestLogger");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "TestLogger");
 
 TEnumIndexedArray<EExecutionBackend, TSharedRef> GetTestUdfImplementationFiles(TStringBuf name)
 {
@@ -94,6 +95,33 @@ protected:
     TActionQueuePtr ActionQueue_;
 };
 
+std::string MakeQueryWithProjectionCount(int projectionCount)
+{
+    std::string query;
+    for (int index = 0; index < projectionCount; ++index) {
+        if (index > 0) {
+            query += ", ";
+        }
+        query += Format("%v AS projection_%v", index, index);
+    }
+    query += " FROM [//t]";
+    return query;
+}
+
+TEST_F(TQueryPrepareTest, ProjectionCountLimit)
+{
+    auto queryEngineConfig = New<TQueryEngineDynamicConfig>();
+
+    ExpectPrepareThrowsWithDiagnostics(
+        MakeQueryWithProjectionCount(10251),
+        HasSubstr("Maximum projection count exceeded"),
+        {},
+        {
+            .BuilderVersion = DefaultExpressionBuilderVersion,
+            .MaxProjectionCount = queryEngineConfig->MaxProjectionCount,
+        });
+}
+
 TEST_F(TQueryPrepareTest, BadSyntax)
 {
     ExpectPrepareThrowsWithDiagnostics(
@@ -121,7 +149,7 @@ TEST_F(TQueryPrepareTest, BadWhere)
 TEST_F(TQueryPrepareTest, BadTableName)
 {
     EXPECT_CALL(PrepareMock_, GetInitialSplit("//bad/table"))
-        .WillOnce(Invoke(&RaiseTableNotFound));
+        .WillOnce(&RaiseTableNotFound);
 
     ExpectPrepareThrowsWithDiagnostics(
         "a, b from [//bad/table]",
@@ -1074,7 +1102,7 @@ TEST_F(TQueryPrepareTest, AppendFunctionImplementationWithUdfObjectCodeCache)
         std::vector<TType>{EValueType::Int64}));
 
     auto implementationFiles = GetTestUdfImplementationFiles("test_udfs");
-    auto fingerprint = TSharedRef::FromString("append-function-implementation-test");
+    auto fingerprint = TSharedRef::FromString(std::string("append-function-implementation-test"));
 
     AppendFunctionImplementation(
         firstFunctionProfilers,
@@ -1192,6 +1220,33 @@ TEST_F(TQueryPrepareTest, OffsetLimit)
     EXPECT_THROW_THAT({
         ParseAndPreparePlanFragment(&PrepareMock_, "* from [//t] offset 5");
     }, HasSubstr("OFFSET used without LIMIT"));
+}
+
+TEST_F(TQueryPrepareTest, IncorrectOffsetAndLimit)
+{
+    EXPECT_CALL(PrepareMock_, GetInitialSplit("//t"))
+        .WillRepeatedly(Return(MakeFuture(MakeSplit({
+            {"a", EValueType::Int64},
+        }))));
+
+    for (const auto& [clauses, error] : std::vector<std::pair<std::string, std::string>>{
+        {"OFFSET 9223372036854775808 LIMIT 2", "Negative OFFSET is forbidden"},
+        {"OFFSET 18446744073709551615 LIMIT 2", "Negative OFFSET is forbidden"},
+        {"LIMIT 9223372036854775808", "Negative LIMIT is forbidden"},
+        {"LIMIT 18446744073709551615", "Negative LIMIT is forbidden"},
+        {Format("LIMIT %v", UnorderedReadHint), "Maximum LIMIT exceeded"},
+        {Format("LIMIT %v", OrderedReadWithPrefetchHint), "Maximum LIMIT exceeded"},
+        {Format("OFFSET 3 LIMIT %v", OrderedReadWithPrefetchHint - 1), "overflows i64"},
+        {"OFFSET 9223372036854775807 LIMIT 1", "overflows i64"},
+    }) {
+        for (bool ordered : {false, true}) {
+            auto query = Format("SELECT a FROM [//t] %v %v", ordered ? "ORDER BY a" : "", clauses);
+            SCOPED_TRACE(query);
+            EXPECT_THROW_THAT(
+                ParseAndPreparePlanFragment(&PrepareMock_, query),
+                HasSubstr(error));
+        }
+    }
 }
 
 TEST_F(TQueryPrepareTest, FormatQueryDepthLimit)
@@ -1476,7 +1531,7 @@ TEST_F(TQueryPrepareTest, OmitOrderByUsingFixedInferredPrefix)
     };
 
     EXPECT_NE(fragment->Query->OrderClause, nullptr);
-    EXPECT_EQ(fragment->Query->GetScanOrder(false), EScanOrder::Unordered);
+    EXPECT_EQ(fragment->Query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Unordered);
 
     auto [dataSource, query] = InferRanges(
         columnEvaluatorCache,
@@ -1490,7 +1545,7 @@ TEST_F(TQueryPrepareTest, OmitOrderByUsingFixedInferredPrefix)
         Logger());
 
     EXPECT_EQ(query->OrderClause, nullptr);
-    EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Ordered);
+    EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Ordered);
 }
 
 TEST_F(TQueryPrepareTest, LeftJoinOptionalizesType)
@@ -1673,6 +1728,37 @@ TEST_F(TQueryEvaluateTest, SimpleOffsetLimit)
         }, split);
 
         Evaluate("a FROM [//t] offset 5 limit 1", split, source, ResultMatcher(result));
+    }
+}
+
+TEST_F(TQueryEvaluateTest, OffsetAndLimitBoundaries)
+{
+    auto split = MakeSplit({
+        {"a", EValueType::Int64},
+    });
+    auto source = TSource{
+        "a=1",
+        "a=2",
+        "a=3",
+    };
+
+    for (const auto& [offset, limit, expectedRows] : std::vector<std::tuple<i64, i64, TSource>>{
+        {0, 0, {}},
+        {0, OrderedReadWithPrefetchHint - 1, {"a=1", "a=2", "a=3"}},
+        {1, OrderedReadWithPrefetchHint - 1, {"a=2", "a=3"}},
+        {2, OrderedReadWithPrefetchHint - 1, {"a=3"}},
+        {std::numeric_limits<i64>::max(), 0, {}},
+    }) {
+        auto result = YsonToRows(expectedRows, split);
+        for (bool ordered : {false, true}) {
+            auto query = Format(
+                "SELECT a FROM [//t] %v OFFSET %v LIMIT %v",
+                ordered ? "ORDER BY a" : "",
+                offset,
+                limit);
+            SCOPED_TRACE(query);
+            Evaluate(query, split, source, ResultMatcher(result));
+        }
     }
 }
 
@@ -8002,6 +8088,34 @@ TEST_F(TQueryEvaluateTest, CompositeMemberAccessorListAndDict)
     }
 }
 
+TEST_F(TQueryEvaluateTest, CompositeMemberAccessorOptionalListAndDict)
+{
+    auto split = MakeSplit({
+        {"list", OptionalLogicalType(ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int32)))},
+        {"dict", OptionalLogicalType(DictLogicalType(
+            SimpleLogicalType(ESimpleLogicalValueType::String),
+            OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::String))))}});
+
+    auto source = TSource{
+        "list=[1;2;3];dict={a=b;c=d}",
+        "list=[4];dict={a=e}",
+        "list=[];dict={}",
+    };
+
+    {
+        auto resultSplit = MakeSplit({
+            {"a", SimpleLogicalType(ESimpleLogicalValueType::String)}});
+        auto result = YsonToRows({"a=b", "a=e", "a=#"}, resultSplit);
+        EvaluateWithSyntaxV2("t.dict['a'] as a from `//t` as t limit 3", split, source, ResultMatcher(result));
+    }
+    {
+        auto resultSplit = MakeSplit({
+            {"c", SimpleLogicalType(ESimpleLogicalValueType::Int32)}});
+        auto result = YsonToRows({"c=1", "c=4", "c=#"}, resultSplit);
+        EvaluateWithSyntaxV2("t.list[0] as c from `//t` as t limit 3", split, source, ResultMatcher(result));
+    }
+}
+
 TEST_F(TQueryEvaluateTest, CompositeMemberAccessorDifferentTypes)
 {
     auto split = MakeSplit({
@@ -8845,6 +8959,92 @@ TEST_F(TQueryEvaluateTest, UniqAggregate)
         sources,
         ResultMatcher(result),
         EExecutionBackend::Native);
+}
+
+TEST_F(TQueryEvaluateTest, CardinalityOrderedTotalsWithThreeSplits)
+{
+    auto split = MakeSplit({
+        {"k0", EValueType::String, ESortOrder::Ascending},
+        {"k1", EValueType::Int64, ESortOrder::Ascending},
+        {"v", EValueType::Uint64},
+    });
+
+    auto resultSplit = MakeSplit({
+        {"k0", EValueType::String},
+        {"c", EValueType::Uint64},
+    });
+
+    auto result = YsonToRows({
+        "k0=a;c=1u",
+        "k0=b;c=1u",
+        "k0=c;c=1u",
+        "c=3u",
+    }, resultSplit);
+
+    for (auto executionBackend : {EExecutionBackend::Native, EExecutionBackend::WebAssembly}) {
+        if (executionBackend == EExecutionBackend::WebAssembly && !EnableWebAssemblyInUnitTests()) {
+            continue;
+        }
+
+        SCOPED_TRACE(ToString(executionBackend));
+        EvaluateFullCoordinatedGroupByImpl(
+            "k0, cardinality(v) as c from [//t] group by k0 with totals limit 100",
+            split,
+            {{
+                {"k0=a;k1=0;v=1u"},
+                {"k0=b;k1=0;v=2u"},
+                {"k0=c;k1=0;v=3u"},
+            }},
+            ResultMatcher(result),
+            executionBackend);
+    }
+}
+
+TEST_F(TQueryEvaluateTest, CardinalityOrderedTotalsWithAggregatedStates)
+{
+    auto split = MakeSplit({
+        {"k0", EValueType::String, ESortOrder::Ascending},
+        {"k1", EValueType::Int64, ESortOrder::Ascending},
+        {"v", EValueType::Uint64},
+    });
+
+    auto resultSplit = MakeSplit({
+        {"k0", EValueType::String},
+        {"c", EValueType::Uint64},
+    });
+
+    auto source = TSource{
+        "k0=a;k1=0;v=1u",
+        "k0=a;k1=1;v=2u",
+        "k0=b;k1=0;v=2u",
+        "k0=b;k1=1;v=3u",
+        "k0=c;k1=0;v=4u",
+    };
+
+    for (auto executionBackend : {EExecutionBackend::Native, EExecutionBackend::WebAssembly}) {
+        if (executionBackend == EExecutionBackend::WebAssembly && !EnableWebAssemblyInUnitTests()) {
+            continue;
+        }
+
+        for (int limit : {2, 100}) {
+            SCOPED_TRACE(Format("ExecutionBackend: %v, Limit: %v", executionBackend, limit));
+
+            auto resultRows = TSource{"k0=a;c=2u", "k0=b;c=2u"};
+            if (limit == 2) {
+                resultRows.push_back("c=3u");
+            } else {
+                resultRows.push_back("k0=c;c=1u");
+                resultRows.push_back("c=4u");
+            }
+
+            EvaluateFullCoordinatedGroupByImpl(
+                Format("k0, cardinality(v) as c from [//t] group by k0 with totals limit %v", limit),
+                split,
+                {{source}},
+                ResultMatcher(YsonToRows(resultRows, resultSplit)),
+                executionBackend);
+        }
+    }
 }
 
 TEST_F(TQueryEvaluateTest, CardinalityAggregateTotals)
@@ -10004,6 +10204,21 @@ INSTANTIATE_TEST_SUITE_P(
 
 ////////////////////////////////////////////////////////////////////////////////
 
+std::string BuildCaseQuery(int whenThenCount, bool withOperand, bool withDefault)
+{
+    TStringBuilder queryBuilder;
+    queryBuilder.AppendString(withOperand ? "select case a" : "select case");
+    for (int index = 0; index < whenThenCount; ++index) {
+        queryBuilder.AppendString(withOperand ? " when " : " when a = ");
+        queryBuilder.AppendFormat("%v then %v", index, index);
+    }
+    if (withDefault) {
+        queryBuilder.AppendString(" else -1");
+    }
+    queryBuilder.AppendString(" end as m from [//t]");
+    return queryBuilder.Flush();
+}
+
 class TQueryPrepareCaseTest
     : public TQueryPrepareTest
     , public ::testing::WithParamInterface<std::tuple<
@@ -10020,6 +10235,24 @@ TEST_P(TQueryPrepareCaseTest, Simple)
     ExpectPrepareThrowsWithDiagnostics(
         query,
         HasSubstr(errorMessage));
+}
+
+TEST_F(TQueryPrepareCaseTest, WhenThenCountLimit)
+{
+    constexpr int WhenThenCount = 20'001;
+
+    for (bool withOperand : {false, true}) {
+        for (bool withDefault : {false, true}) {
+            SCOPED_TRACE(Format("WithOperand: %v, WithDefault: %v", withOperand, withDefault));
+
+            EXPECT_CALL(PrepareMock_, GetInitialSplit("//t"))
+                .WillOnce(Return(MakeFuture(MakeSplit({{"a", EValueType::Int64}}))));
+
+            ExpectPrepareThrowsWithDiagnostics(
+                BuildCaseQuery(WhenThenCount, withOperand, withDefault),
+                HasSubstr("Maximum WHEN/THEN expression count exceeded"));
+        }
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -10135,6 +10368,102 @@ INSTANTIATE_TEST_SUITE_P(
             YsonToRows(
                 {"p=111", "p=111", "p=111", "p=111", "p=222", "p=333", "p=333", "p=333", "p=333",},
                 MakeSplit({{"p", EValueType::Int64},})))));
+
+TEST_F(TQueryEvaluateCaseTest, LongWhenThenList)
+{
+    constexpr int WhenThenCount = 20'000;
+
+    auto split = MakeSplit({
+        {"a", EValueType::Int64},
+    });
+    auto source = TSource{
+        "a=0",
+        Format("a=%v", WhenThenCount / 2),
+        Format("a=%v", WhenThenCount - 1),
+        Format("a=%v", WhenThenCount),
+        "a=#",
+    };
+
+    for (bool withOperand : {false, true}) {
+        for (bool withDefault : {false, true}) {
+            SCOPED_TRACE(Format("WithOperand: %v, WithDefault: %v", withOperand, withDefault));
+
+            auto result = YsonToRows(TSource{
+                "m=0",
+                Format("m=%v", WhenThenCount / 2),
+                Format("m=%v", WhenThenCount - 1),
+                withDefault ? "m=-1" : "m=#",
+                withDefault ? "m=-1" : "m=#",
+            }, MakeSplit({{"m", EValueType::Int64}}));
+
+            EvaluateOnlyViaNativeExecutionBackend(
+                BuildCaseQuery(WhenThenCount, withOperand, withDefault),
+                split,
+                source,
+                ResultMatcher(result));
+        }
+    }
+}
+
+TEST_F(TQueryEvaluateCaseTest, ConstantConditions)
+{
+    auto split = MakeSplit({{"a", EValueType::Int64}});
+    auto source = TSource{"a=0", "a=1"};
+    auto resultSplit = MakeSplit({{"m", EValueType::Int64}});
+
+    Evaluate(R"(
+        select case
+            when false then 1 / a
+            when a = 0 then 10
+            when true then 20
+            when 1 / (a - a) = 0 then 30
+            else 1 / (a - a)
+        end as m from [//t]
+    )", split, source, ResultMatcher(YsonToRows(TSource{"m=10", "m=20"}, resultSplit)));
+
+    Evaluate(
+        "case when false then a end as m from [//t]",
+        split,
+        source,
+        ResultMatcher(YsonToRows(TSource{"m=#", "m=#"}, resultSplit)));
+}
+
+TEST_F(TQueryEvaluateCaseTest, ResultTypes)
+{
+    auto split = MakeSplit({
+        {"k", EValueType::Int64},
+        {"b", EValueType::Boolean},
+        {"d", EValueType::Double},
+        {"s", EValueType::String},
+        {"u", EValueType::Uint64},
+    });
+    auto source = TSource{
+        "k=0;b=%false;d=1.5;s=foo;u=10u",
+        "k=1;b=%false;d=2.5;s=bar;u=20u",
+        "k=2;b=%true;d=3.5;s=baz;u=30u",
+        "k=1;b=#;d=#;s=#;u=#",
+    };
+    auto result = YsonToRows(TSource{
+        "b=%true;d=1.25;s=literal;u=1u",
+        "b=%false;d=2.5;s=bar;u=20u",
+        "b=#;d=#;s=#;u=#",
+        "b=#;d=#;s=#;u=#",
+    }, MakeSplit({
+        {"b", EValueType::Boolean},
+        {"d", EValueType::Double},
+        {"s", EValueType::String},
+        {"u", EValueType::Uint64},
+    }));
+
+    Evaluate(R"(
+        select
+            case k when 0 then true when 1 then b end as b,
+            case k when 0 then 1.25 when 1 then d end as d,
+            case k when 0 then 'literal' when 1 then s end as s,
+            case k when 0 then 1u when 1 then u end as u
+        from [//t]
+    )", split, source, ResultMatcher(result));
+}
 
 TEST_F(TQueryEvaluateCaseTest, Lazy)
 {
@@ -11471,7 +11800,7 @@ TEST_F(TQueryEvaluateTest, YsonLengthComposite)
     };
 
     auto resultSplit = MakeSplit({
-        {"length", EValueType::Int64}
+        {"length", EValueType::Int64},
     });
 
     auto result = YsonToRows({
@@ -11503,7 +11832,7 @@ TEST_F(TQueryEvaluateTest, YsonLengthCompositeStruct)
     };
 
     auto resultSplit = MakeSplit({
-        {"length", EValueType::Int64}
+        {"length", EValueType::Int64},
     });
 
     auto result = YsonToRows({
@@ -11529,7 +11858,7 @@ TEST_F(TQueryEvaluateTest, YsonLengthCompositeNestedList)
     };
 
     auto resultSplit = MakeSplit({
-        {"length", EValueType::Int64}
+        {"length", EValueType::Int64},
     });
 
     auto result = YsonToRows({
@@ -11653,6 +11982,132 @@ TEST_F(TQueryEvaluateTest, BigJoin2)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+TEST_F(TQueryEvaluateTest, MixedProjectionIndicesInGroupByAndOrderBy)
+{
+    auto split = MakeSplit({
+        {"a", EValueType::Int64},
+        {"b", EValueType::String},
+    });
+    auto source = TSource{"a=3;b=c", "a=1;b=z", "a=2;b=b", "a=2;b=a"};
+    auto resultSplit = MakeSplit({
+        {"score", EValueType::Int64},
+        {"text", EValueType::String},
+    });
+    auto result = YsonToRows({"score=13;text=c", "score=12;text=a"}, resultSplit);
+
+    for (const auto* clauses : {
+        "ORDER BY 1 DESC, text ASC LIMIT 2",
+        "ORDER BY (1, -a) DESC, text ASC LIMIT 2",
+        "ORDER BY 1 DESC, 2 ASC, length(b) LIMIT 2",
+        "GROUP BY 1, b ORDER BY score DESC, text ASC LIMIT 2",
+        "GROUP BY b, 1 ORDER BY score DESC, text ASC LIMIT 2",
+        "GROUP BY 1, b ORDER BY 1 DESC, text ASC LIMIT 2",
+        "ORDER BY 0, 1 DESC, 2 ASC LIMIT 2",
+        "ORDER BY 1 DESC, 0, 2 ASC LIMIT 2",
+        "ORDER BY 1 DESC, 2 ASC, 0 LIMIT 2",
+        "ORDER BY 0, score DESC, text ASC LIMIT 2",
+        "GROUP BY 0, 1, b ORDER BY 1 DESC, 2 ASC LIMIT 2",
+        "GROUP BY 1, 0, b ORDER BY score DESC, text ASC LIMIT 2",
+        "GROUP BY 1, b, 0 ORDER BY score DESC, text ASC LIMIT 2",
+        "GROUP BY 1, b ORDER BY 0, score DESC, text ASC LIMIT 2",
+        "GROUP BY 0, score, b ORDER BY 1 DESC, 2 ASC LIMIT 2",
+    }) {
+        auto query = Format("SELECT a + 10 AS score, b AS text FROM `//t` %v", clauses);
+        SCOPED_TRACE(query);
+        EXPECT_NO_THROW(Evaluate(
+            query,
+            split,
+            source,
+            ResultMatcher(result, resultSplit.TableSchema),
+            {.SyntaxVersion = 3}));
+    }
+}
+
+TEST_F(TQueryEvaluateTest, GroupByMixedProjectionIndicesWithoutOrderBy)
+{
+    auto split = MakeSplit({
+        {"a", EValueType::Int64},
+        {"b", EValueType::String},
+    });
+    auto source = TSource{"a=3;b=c", "a=1;b=z", "a=2;b=b", "a=2;b=a", "a=4;b=a"};
+    auto resultSplit = MakeSplit({
+        {"parity", EValueType::Int64},
+        {"b", EValueType::String},
+        {"count", EValueType::Int64},
+    });
+    auto result = YsonToRows({
+        "parity=0;b=a;count=2",
+        "parity=0;b=b;count=1",
+        "parity=1;b=c;count=1",
+        "parity=1;b=z;count=1",
+    }, resultSplit);
+
+    for (const auto* keys : {"1, b", "b, 1", "1, b, length(b)"}) {
+        auto query = Format(
+            "SELECT a %% 2 AS parity, b, sum(1) AS count FROM `//t` GROUP BY %v",
+            keys);
+        SCOPED_TRACE(query);
+        EXPECT_NO_THROW(Evaluate(
+            query,
+            split,
+            source,
+            OrderedResultMatcher(result, std::vector<std::string>{"parity", "b"}),
+            {.SyntaxVersion = 3}));
+    }
+}
+
+TEST_F(TQueryEvaluateTest, UnaliasedMixedProjectionIndices)
+{
+    auto split = MakeSplit({
+        {"a", EValueType::Int64},
+        {"b", EValueType::String},
+    });
+    auto source = TSource{"a=3;b=c", "a=1;b=z", "a=2;b=b", "a=2;b=a"};
+    auto resultSplit = MakeSplit({
+        {"$projection_1", EValueType::Int64},
+        {"b", EValueType::String},
+    });
+    auto result = YsonToRows({"\"$projection_1\"=13;b=c", "\"$projection_1\"=12;b=a"}, resultSplit);
+
+    for (const auto* clauses : {
+        "ORDER BY 1 DESC, b ASC LIMIT 2",
+        "GROUP BY 1, b ORDER BY 1 DESC, b ASC LIMIT 2",
+    }) {
+        auto query = Format("SELECT a + 10, b FROM `//t` %v", clauses);
+        SCOPED_TRACE(query);
+        EXPECT_NO_THROW(Evaluate(
+            query,
+            split,
+            source,
+            ResultMatcher(result, resultSplit.TableSchema),
+            {.SyntaxVersion = 3}));
+    }
+}
+
+TEST_F(TQueryEvaluateTest, ProjectionIndicesKeepLegacyIntegerConstants)
+{
+    auto split = MakeSplit({
+        {"a", EValueType::Int64},
+        {"b", EValueType::String},
+    });
+    auto source = TSource{"a=3;b=c", "a=1;b=z", "a=2;b=b", "a=2;b=a"};
+    auto resultSplit = MakeSplit({
+        {"score", EValueType::Int64},
+        {"b", EValueType::String},
+    });
+    auto result = YsonToRows({"score=12;b=a", "score=12;b=b"}, resultSplit);
+
+    for (int syntaxVersion : {1, 2}) {
+        SCOPED_TRACE(syntaxVersion);
+        Evaluate(
+            "SELECT a + 10 AS score, b FROM `//t` ORDER BY 1 DESC, b ASC LIMIT 2",
+            split,
+            source,
+            ResultMatcher(result, resultSplit.TableSchema),
+            {.SyntaxVersion = syntaxVersion});
+    }
+}
 
 class TQueryEvaluateSQLCompatibleGroupByOrderByTest
     : public TQueryEvaluateTest
@@ -11794,6 +12249,24 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(
             "a, b from `//t` order by -1 limit 42",
             "Reference expression index is out of bounds"),
+        std::make_tuple(
+            "a, b from `//t` order by 1, 3, b limit 42",
+            "Reference expression index is out of bounds"),
+        std::make_tuple(
+            "a, b from `//t` order by (1, -1), b limit 42",
+            "Reference expression index is out of bounds"),
+        std::make_tuple(
+            "a, b from `//t` group by 1, 3, b",
+            "Reference expression index is out of bounds"),
+        std::make_tuple(
+            "a, b from `//t` group by 1, -1, b",
+            "Reference expression index is out of bounds"),
+        std::make_tuple(
+            "a, b from `//t` group by 1, b order by 3 limit 42",
+            "Reference expression index is out of bounds"),
+        std::make_tuple(
+            "avg(a) as average, b from `//t` group by 1, b",
+            "Misuse of aggregate function \"avg\""),
         std::make_tuple(
             "avg(a % 2) from `//t` group by 1",
             "Misuse of aggregate function \"avg\"")));
@@ -11998,6 +12471,60 @@ TEST_F(TQueryEvaluateTest, ReverseScanOrderByDescOnFixedKeyPrefix)
     EXPECT_EQ(result.TabletsScanned, 1);
 }
 
+TEST_F(TQueryEvaluateTest, GroupByWithTotalsRequiredStringKey)
+{
+    auto split = MakeSplit({
+        TColumnSchema("wizard_name", EValueType::String).SetRequired(true),
+        TColumnSchema("time_bucket", EValueType::Int64),
+        TColumnSchema("value", EValueType::Int64),
+    });
+
+    auto source = TSource{
+        "wizard_name=\"\";time_bucket=100;value=10",
+        "wizard_name=\"\";time_bucket=200;value=20",
+        "wizard_name=\"\";time_bucket=100;value=30",
+        "wizard_name=\"\";time_bucket=200;value=40",
+    };
+
+    // Two grouped rows + one totals row (null keys, sum of all values).
+    auto expectedResult = YsonToRows({
+        "time_bucket=100;wizard_name=\"\";total=40",
+        "time_bucket=200;wizard_name=\"\";total=60",
+        "total=100",
+    }, MakeSplit({
+        {"time_bucket", EValueType::Int64},
+        {"wizard_name", EValueType::String},
+        {"total", EValueType::Int64},
+    }));
+
+    Evaluate(
+        "time_bucket, wizard_name, sum(value) as total"
+        " FROM [//t]"
+        " GROUP BY time_bucket, wizard_name WITH TOTALS",
+        split,
+        source,
+        ResultMatcher(expectedResult));
+
+    expectedResult = YsonToRows({
+        "time_bucket=100;wizard_name=\"\"",
+        "time_bucket=200;wizard_name=\"\"",
+        "",
+    }, MakeSplit({
+        {"time_bucket", EValueType::Int64},
+        {"wizard_name", EValueType::String},
+    }));
+
+    Evaluate(
+        "*"
+        " FROM [//t]"
+        " GROUP BY time_bucket, wizard_name WITH TOTALS",
+        split,
+        source,
+        ResultMatcher(expectedResult));
+
+    SUCCEED();
+}
+
 TEST_F(TQueryPrepareTest, ReverseScanNotAppliedWhenNonFixedSuffixIsAsc)
 {
     EXPECT_CALL(PrepareMock_, GetInitialSplit("//t"))
@@ -12106,7 +12633,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "* from [//t] order by k desc, l desc, m desc limit 10", {}, optionsOn)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {
@@ -12114,7 +12641,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "* from [//t] order by k desc limit 10", {}, optionsOn)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {
@@ -12122,7 +12649,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "* from [//t] order by k desc, l desc limit 10", {}, optionsOn)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {
@@ -12130,7 +12657,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "* from [//t] order by k desc, l asc limit 10", {}, optionsOn)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_FALSE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Unordered);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Unordered);
     }
 
     {
@@ -12138,7 +12665,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "* from [//t] order by l desc limit 10", {}, optionsOn)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_FALSE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Unordered);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Unordered);
     }
 
     {
@@ -12146,7 +12673,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "* from [//t] order by k desc limit 10", {}, optionsOff)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_FALSE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Unordered);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Unordered);
     }
 
     {
@@ -12154,7 +12681,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderBy)
             "sum(v) from [//t] group by k order by k desc limit 10", {}, optionsOn)->Query;
         EXPECT_TRUE(query->OrderClause);
         EXPECT_FALSE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Unordered);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Unordered);
     }
 }
 
@@ -12190,7 +12717,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderByOnFixedKeyPrefix)
             Logger());
 
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {
@@ -12209,7 +12736,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderByOnFixedKeyPrefix)
             Logger());
 
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {
@@ -12276,7 +12803,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderByOnFixedKeyPrefix)
             Logger());
 
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {
@@ -12309,7 +12836,7 @@ TEST_F(TQueryPrepareTest, ReverseScanForOrderByOnFixedKeyPrefix)
             Logger());
 
         EXPECT_TRUE(query->IsReverseScan);
-        EXPECT_EQ(query->GetScanOrder(false), EScanOrder::Reversed);
+        EXPECT_EQ(query->GetScanOrder(/*allowUnorderedGroupByWithLimit*/ false), EScanOrder::Reversed);
     }
 
     {

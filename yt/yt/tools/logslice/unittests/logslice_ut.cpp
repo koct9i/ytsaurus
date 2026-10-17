@@ -12,8 +12,14 @@
 
 #include <yt/yt/core/test_framework/framework.h>
 
+#include <yt/yt/core/ytree/fluent.h>
+
 #include <library/cpp/yt/cpu_clock/clock.h>
 #include <library/cpp/yt/logging/logger.h>
+#include <library/cpp/yt/logging/structured_payload.h>
+#include <library/cpp/yt/logging/tagged_payload.h>
+
+#include <util/generic/size_literals.h>
 
 #include <util/stream/str.h>
 #include <util/string/split.h>
@@ -51,8 +57,7 @@ protected:
         event.Family = ELogFamily::PlainText;
         event.Category = GetTestCategory();
         event.Level = ELogLevel::Info;
-        event.MessageRef = TSharedRef::FromString(TString(message));
-        event.MessageKind = ELogMessageKind::Unstructured;
+        event.Payload = MakeTaggedPayloadFromMessage(message);
         event.Instant = InstantToCpuInstant(instant);
         return event;
     }
@@ -64,7 +69,8 @@ protected:
     void WriteLog(
         const TString& fileName,
         std::optional<ECompressionMethod> compressionMethod,
-        const std::vector<std::pair<TInstant, TString>>& events)
+        const std::vector<std::pair<TInstant, TString>>& events,
+        bool structured = false)
     {
         auto config = New<TFileLogWriterConfig>();
         config->FileName = fileName;
@@ -75,8 +81,16 @@ protected:
         // Keep the file deterministic: no "Logging started" banner.
         config->EnableSystemMessages = false;
 
+        std::unique_ptr<ILogFormatter> formatter;
+        if (structured) {
+            formatter = std::make_unique<TStructuredLogFormatter>(TStructuredLogFormatterOptions{
+                .Format = ELogFormat::Yson,
+            });
+        } else {
+            formatter = std::make_unique<TPlainTextLogFormatter>();
+        }
         auto writer = CreateFileLogWriter(
-            std::make_unique<TPlainTextLogFormatter>(),
+            std::move(formatter),
             CreateDefaultSystemLogEventProvider(config),
             "test_writer",
             config,
@@ -84,6 +98,15 @@ protected:
 
         for (const auto& [instant, message] : events) {
             auto event = MakeEvent(instant, message);
+            if (structured) {
+                event.Family = ELogFamily::Structured;
+                event.Payload = MakeStructuredPayloadFromYson(
+                    NYTree::BuildYsonStringFluently<NYson::EYsonType::MapFragment>()
+                        .Item("timestamp").Value(instant)
+                        .Item("event_type").Value("fair_share_info")
+                        .Item("snapshot").Value(message)
+                        .Finish());
+            }
             writer->Write(event);
             writer->Flush();
         }
@@ -204,6 +227,34 @@ TEST_F(TLogSliceTest, ParseLogLineTime)
     // 26-char log timestamp, which parses back to the same instant.
     EXPECT_EQ("2020-01-02 03:04:05,123456", FormatLogTime(*local));
     EXPECT_EQ(local, ParseLogLineTime(FormatLogTime(*local)));
+
+    // Master access logs use the structured JSON formatter and millisecond
+    // precision. A payload field using the same key must not win over the
+    // formatter's later system field.
+    auto json = ParseLogLineTime(
+        R"({"instant":"1999-01-01 00:00:00,000","instant":"2020-01-02 03:04:05,123","method":"PrepareUnmount"})");
+    ASSERT_TRUE(json.has_value());
+    EXPECT_EQ(query + TDuration::MicroSeconds(123000), *json);
+
+    // Key-shaped text inside a payload string is not a structured timestamp.
+    EXPECT_FALSE(ParseLogLineTime(
+        R"({"message":"fake \"instant\":\"1999-01-01 00:00:00,000\""})").has_value());
+
+    // Block probes may include more than one JSON line. Only the first record
+    // describes the block's first timestamp; a later line must not replace it.
+    auto jsonBlockPrefix = ParseLogLineTime(
+        R"({"instant":"2020-01-02 03:04:05,123","method":"PrepareUnmount"}
+{"instant":"2020-01-02 03:04:06,456","method":"CommitUnmount"})");
+    ASSERT_TRUE(jsonBlockPrefix.has_value());
+    EXPECT_EQ(query + TDuration::MicroSeconds(123000), *jsonBlockPrefix);
+
+    auto yson = ParseLogLineTime(
+        R"({"cluster"="watt";"timestamp"="2026-08-19T11:20:00.123456Z";"instant"="2026-08-19 14:20:00,123";};)");
+    EXPECT_EQ(ParseQueryTime("2026-08-19T11:20:00.123456Z"), yson);
+    EXPECT_FALSE(ParseLogLineTime(
+        R"({"payload"={"timestamp"="2026-08-19T11:20:00Z";};};)").has_value());
+    EXPECT_FALSE(ParseLogLineTime(
+        R"({"message"="fake \"timestamp\"=\"2026-08-19T11:20:00Z\"";};)").has_value());
 }
 
 TEST_F(TLogSliceTest, ParseQueryTimeFormats)
@@ -319,6 +370,35 @@ TEST_F(TLogSliceTest, SlicePlainText)
     auto base = ParseQueryTime("2021-06-07T08:09:10.000000Z");
     WriteLog(logFile.Name(), /*compressionMethod*/ std::nullopt, MakeEvents(base));
     CheckSliceRanges(logFile.Name(), base);
+}
+
+TEST_F(TLogSliceTest, SliceYsonAndTimeRange)
+{
+    auto base = ParseQueryTime("2026-08-19T11:20:00.123456Z");
+    TString snapshot(6_MB, 'x');
+    std::vector<std::pair<TInstant, TString>> events = {
+        {base, "before"},
+        {base + TDuration::Seconds(1), snapshot},
+        {base + TDuration::Seconds(2), "after"},
+    };
+    for (const auto& [suffix, method] : std::vector<std::pair<TString, std::optional<ECompressionMethod>>>{
+        {".yson", std::nullopt},
+        {".yson.zstd", ECompressionMethod::Zstd},
+        {".yson.gz", ECompressionMethod::Gzip},
+    }) {
+        TTempFile logFile(GenerateRandomFileName("log") + suffix);
+        WriteLog(logFile.Name(), method, events, /*structured*/ true);
+        auto range = TimeRange(logFile.Name());
+        ASSERT_TRUE(range.has_value());
+        EXPECT_EQ(range->first, base);
+        EXPECT_EQ(range->second, base + TDuration::Seconds(2));
+
+        auto all = Slice(logFile.Name(), TInstant::Zero(), TInstant::Max());
+        ASSERT_EQ(all.size(), 3u);
+        EXPECT_NE(all[1].find(std::string(snapshot)), std::string::npos);
+        auto middle = Slice(logFile.Name(), base + TDuration::Seconds(1), base + TDuration::Seconds(1));
+        EXPECT_EQ(middle, (std::vector<std::string>{all[1]}));
+    }
 }
 
 TEST_F(TLogSliceTest, SliceOpenBounds)

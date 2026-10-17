@@ -18,6 +18,7 @@
 #include <util/memory/pool.h>
 
 #include <functional>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 #include <optional>
@@ -658,10 +659,11 @@ class TDirectArrayHolderInplace final: public TComputationValue<TDirectArrayHold
 public:
     void* operator new(size_t sz) = delete;
     void* operator new[](size_t sz) = delete;
-    void operator delete(void* mem, std::size_t sz) {
-        const auto pSize = static_cast<void*>(static_cast<ui8*>(mem) +
-                                              sizeof(TComputationValue<TDirectArrayHolderInplace>));
-        FreeWithSize(mem, sz + *static_cast<ui64*>(pSize) * sizeof(NUdf::TUnboxedValue));
+    // Destroying delete: reads Size_ member before running the destructor
+    void operator delete(TDirectArrayHolderInplace* self, std::destroying_delete_t) {
+        const auto fullSize = sizeof(TDirectArrayHolderInplace) + self->Size_ * sizeof(NUdf::TUnboxedValue);
+        self->~TDirectArrayHolderInplace();
+        FreeWithSize(self, fullSize);
     }
 
     void operator delete[](void* mem, std::size_t sz) = delete;
@@ -690,6 +692,10 @@ public:
 
     NUdf::TUnboxedValue* GetPtr() const {
         return (NUdf::TUnboxedValue*)(this + 1);
+    }
+
+    static consteval ui64 GetMaxSize() {
+        return (std::numeric_limits<ui64>::max() - sizeof(TDirectArrayHolderInplace)) / sizeof(NUdf::TUnboxedValue);
     }
 
 private:
@@ -1105,7 +1111,7 @@ public:
         }
     }
 
-public: // unavailable getters may be eliminated at compile time, but it'd make code much less readable
+    // unavailable getters may be eliminated at compile time, but it'd make code much less readable
     TValueEqual GetValueEqual() const {
         Y_ABORT_UNLESS(SupportEqual);
         return TValueEqual(KeyTypes_, IsTuple_, Equate_.Get());

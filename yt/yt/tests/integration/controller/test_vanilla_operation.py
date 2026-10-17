@@ -886,7 +886,7 @@ class TestSchedulerVanillaCommands(YTEnvSetup):
 
     @authors("krasovav")
     def test_non_root_nbd_volumes(self):
-        with raises_yt_error('Non-root nbd are not currently supported'):
+        with raises_yt_error('Non-root NBD are not currently supported'):
             vanilla(
                 spec={
                     "tasks": {
@@ -941,6 +941,47 @@ class TestSchedulerVanillaCommandsMulticell(TestSchedulerVanillaCommands):
         "11": {"roles": ["chunk_host"]},
         "12": {"roles": ["chunk_host"]},
     }
+
+
+class TestVanillaRestartOptionsValidation(YTEnvSetup):
+    ENABLE_MULTIDAEMON = True
+    NUM_MASTERS = 1
+    NUM_NODES = 1
+    NUM_SCHEDULERS = 1
+
+    @authors("pogorelov")
+    @pytest.mark.parametrize("fail_on_job_restart_in_task", [False, True])
+    def test_incompatible_fail_on_job_restart_and_restart_exit_code(self, fail_on_job_restart_in_task):
+        task = {
+            "job_count": 1,
+            "command": "echo done",
+            "restart_exit_code": 17,
+        }
+        if fail_on_job_restart_in_task:
+            task["fail_on_job_restart"] = True
+
+        with raises_yt_error("\"restart_exit_code\" cannot be set together with \"fail_on_job_restart\""):
+            vanilla(spec={
+                "tasks": {"task": task},
+                "fail_on_job_restart": not fail_on_job_restart_in_task,
+            })
+
+    @authors("pogorelov")
+    def test_restart_exit_code_in_another_task(self):
+        vanilla(spec={
+            "tasks": {
+                "task_with_restart_exit_code": {
+                    "job_count": 1,
+                    "command": "echo done",
+                    "restart_exit_code": 17,
+                },
+                "task_with_fail_on_job_restart": {
+                    "job_count": 1,
+                    "command": "echo done",
+                    "fail_on_job_restart": True,
+                },
+            },
+        })
 
 
 ##################################################################
@@ -1308,6 +1349,10 @@ class TestGangOperations(YTEnvSetup):
 
     def _verify_job_ids_equal(self, running_jobs, job_ids):
         assert set(running_jobs.keys()) == set(job_ids)
+
+    def _wait_job_aborted_on_node(self, op, job_id):
+        job_path = op.get_job_node_orchid_path(job_id) + "/exec_node/job_controller/active_jobs/{}".format(job_id)
+        wait(lambda: get(job_path + "/job_state", default="aborted") == "aborted")
 
     def _get_jobs_with_no_ranks(self, running_jobs):
         return [job_id for job_id, info in running_jobs.items() if info.get("gang_rank") is None]
@@ -1997,9 +2042,14 @@ class TestGangOperations(YTEnvSetup):
 
         wait(lambda: restarted_job_profiler.get_job_count_delta() == 2)
 
-        release_breakpoint(job_id=first_job_ids[0])
-        release_breakpoint(job_id=first_job_ids[1])
-        release_breakpoint(job_id=first_job_ids[2])
+        # Release each old job's breakpoint only after the job is aborted on its node.
+        # Otherwise a released job may run to completion before the incarnation-change
+        # abort reaches the node; a completed single-job gang allocation then finishes
+        # instead of being preserved for the replacement job, losing the monitoring
+        # descriptor association the assertion below checks. See YT-28595.
+        for old_job_id in first_job_ids:
+            self._wait_job_aborted_on_node(op, old_job_id)
+            release_breakpoint(job_id=old_job_id)
 
         first_allocation_id_to_monitoring_descriptors.pop(get_allocation_id_from_job_id(first_job_id))
 

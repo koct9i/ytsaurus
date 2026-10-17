@@ -40,8 +40,11 @@
 
 #include <yt/yt/core/tracing/trace_context.h>
 
+#include <yt/yt/core/ytree/composite_map.h>
 #include <yt/yt/core/ytree/fluent.h>
 #include <yt/yt/core/ytree/virtual.h>
+
+#include <library/cpp/yt/compact_containers/compact_vector.h>
 
 #include <library/cpp/iterator/enumerate.h>
 
@@ -66,6 +69,8 @@ using NYT::FromProto;
 using NHiveClient::NProto::TEncapsulatedMessage;
 
 ////////////////////////////////////////////////////////////////////////////////
+
+constexpr int TypicalPostDestinationCount = 8;
 
 static NConcurrency::TFlsSlot<TCellId> HiveMutationSenderId;
 static NConcurrency::TFlsSlot<TReign> HiveMutationSenderReign;
@@ -245,9 +250,9 @@ public:
         YT_VERIFY(HasHydraContext());
 
         if (UnregisteredCellIds_.erase(cellId) != 0 && !allowResurrection) {
-            YT_LOG_ALERT("Mailbox has been resurrected (SelfCellId: %v, CellId: %v)",
-                SelfCellId_,
-                cellId);
+            YT_TLOG_ALERT("Mailbox has been resurrected")
+                .With("SelfCellId", SelfCellId_)
+                .With("CellId", cellId);
         }
 
         auto mailboxHolder = std::make_unique<TCellMailbox>(cellId);
@@ -264,9 +269,9 @@ public:
                 BIND_NO_PROPAGATE(&THiveManager::RunPeriodicCellCheck, MakeWeak(this), cellRuntimeData));
         }
 
-        YT_LOG_INFO("Mailbox created (SelfCellId: %v, CellId: %v)",
-            SelfCellId_,
-            mailbox->GetCellId());
+        YT_TLOG_INFO("Mailbox created")
+            .With("SelfCellId", SelfCellId_)
+            .With("CellId", mailbox->GetCellId());
         return AsUntyped(mailbox);
     }
 
@@ -321,8 +326,8 @@ public:
 
         FrozenEdges_.Transform([&] (auto& frozenEdges) {
             if (!frozenEdges.empty()) {
-                YT_LOG_INFO("Unfreezing Hive edges (Edges: %v)",
-                    frozenEdges);
+                YT_TLOG_INFO("Unfreezing Hive edges")
+                    .With("Edges", frozenEdges);
                 frozenEdges.clear();
             }
 
@@ -330,8 +335,8 @@ public:
                 return;
             }
 
-            YT_LOG_INFO("Freezing Hive edges (Edges: %v)",
-                edgesToFreeze);
+            YT_TLOG_INFO("Freezing Hive edges")
+                .With("Edges", edgesToFreeze);
             frozenEdges = std::move(edgesToFreeze);
         });
     }
@@ -368,9 +373,9 @@ public:
 
         RemoveCellMailbox(cellId);
 
-        YT_LOG_INFO("Mailbox removed (SrcCellId: %v, DstCellId: %v)",
-            SelfCellId_,
-            cellId);
+        YT_TLOG_INFO("Mailbox removed")
+            .With("SrcCellId", SelfCellId_)
+            .With("DstCellId", cellId);
 
         return true;
     }
@@ -387,14 +392,14 @@ public:
         RemoveCellMailbox(cellId);
 
         if (!UnregisteredCellIds_.insert(cellId).second) {
-            YT_LOG_ALERT("Mailbox is already unregistered (SrcCellId: %v, DstCellId: %v)",
-                SelfCellId_,
-                cellId);
+            YT_TLOG_ALERT("Mailbox is already unregistered")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", cellId);
         }
 
-        YT_LOG_INFO("Mailbox unregistered (SrcCellId: %v, DstCellId: %v)",
-            SelfCellId_,
-            cellId);
+        YT_TLOG_INFO("Mailbox unregistered")
+            .With("SrcCellId", SelfCellId_)
+            .With("DstCellId", cellId);
 
         return true;
     }
@@ -431,10 +436,9 @@ public:
 
         auto otherEndpointId = GetSiblingAvenueEndpointId(selfEndpointId);
         if (AvenueMailboxMap_.Find(otherEndpointId)) {
-            YT_LOG_ALERT("Attempted to register already existing avenue endpoint, ignored "
-                "(SelfCellId: %v, SelfEndpointId: %v)",
-                SelfCellId_,
-                selfEndpointId);
+            YT_TLOG_ALERT("Attempted to register already existing avenue endpoint, ignored")
+                .With("SelfCellId", SelfCellId_)
+                .With("SelfEndpointId", selfEndpointId);
             return;
         }
 
@@ -444,16 +448,13 @@ public:
 
         auto outcomingMessageIdRange = mailbox->GetPersistentState()->GetOutcomingMessageIdRange();
         auto nextPersistentIncomingMessageId = mailbox->GetPersistentState()->GetNextPersistentIncomingMessageId();
-        YT_LOG_DEBUG("Avenue mailbox registered "
-            "(SelfCellId: %v, SelfEndpointId: %v, OtherEndpointId: %v, "
-            "OutcomingMessageId: %v, OutcomingMessageCount: %v, "
-            "NextPersistentIncomingMessageId: %v)",
-            SelfCellId_,
-            selfEndpointId,
-            otherEndpointId,
-            outcomingMessageIdRange.Begin,
-            outcomingMessageIdRange.GetCount(),
-            nextPersistentIncomingMessageId);
+        YT_TLOG_DEBUG("Avenue mailbox registered")
+            .With("SelfCellId", SelfCellId_)
+            .With("SelfEndpointId", selfEndpointId)
+            .With("OtherEndpointId", otherEndpointId)
+            .With("OutcomingMessageId", outcomingMessageIdRange.Begin)
+            .With("OutcomingMessageCount", outcomingMessageIdRange.GetCount())
+            .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId);
 
         if (!IsRecovery()) {
             auto avenueRuntimeData = CreateMailboxRuntimeData(mailbox);
@@ -481,24 +482,21 @@ public:
 
         auto* mailbox = AvenueMailboxMap_.Find(otherEndpointId);
         if (!mailbox) {
-            YT_LOG_ALERT("Attempted to remove a non-existing avenue endpoint, ignored "
-                "(SelfCellId: %v, SelfEndpointId: %v)",
-                SelfCellId_,
-                selfEndpointId);
+            YT_TLOG_ALERT("Attempted to remove a non-existing avenue endpoint, ignored")
+                .With("SelfCellId", SelfCellId_)
+                .With("SelfEndpointId", selfEndpointId);
             return {};
         }
 
         if (GetHiveMutationSenderId() == otherEndpointId) {
             if (allowDestructionInMessageToSelf) {
-                YT_LOG_DEBUG("Attempted to unregister avenue endpoint in the mutation "
-                    "received by itself, unregistration will be delayed (%v)",
-                    FormatIncomingMailboxEndpoints(otherEndpointId));
+                YT_TLOG_DEBUG("Attempted to unregister avenue endpoint in the mutation received by itself, unregistration will be delayed")
+                    .With(MakeIncomingMailboxEndpointsTags(otherEndpointId));
                 mailbox->SetRemovalScheduled(true);
                 return {};
             } else {
-                YT_LOG_FATAL("Attempted to unregister avenue endpoint in the mutation "
-                    "received by itself (%v)",
-                    FormatIncomingMailboxEndpoints(otherEndpointId));
+                YT_TLOG_FATAL("Attempted to unregister avenue endpoint in the mutation received by itself")
+                    .With(MakeIncomingMailboxEndpointsTags(otherEndpointId));
             }
         }
 
@@ -528,16 +526,13 @@ public:
 
         AvenueMailboxMap_.Remove(otherEndpointId);
 
-        YT_LOG_DEBUG("Avenue mailbox unregistered "
-            "(SelfCellId: %v, SelfEndpointId: %v, OtherEndpointId: %v, "
-            "FirstOutcomingMessageId: %v, OutcomingMessageCount: %v, "
-            "NextPersistentIncomingMessageId: %v)",
-            SelfCellId_,
-            selfEndpointId,
-            otherEndpointId,
-            cookie.FirstOutcomingMessageId,
-            cookie.OutcomingMessages.size(),
-            cookie.NextPersistentIncomingMessageId);
+        YT_TLOG_DEBUG("Avenue mailbox unregistered")
+            .With("SelfCellId", SelfCellId_)
+            .With("SelfEndpointId", selfEndpointId)
+            .With("OtherEndpointId", otherEndpointId)
+            .With("FirstOutcomingMessageId", cookie.FirstOutcomingMessageId)
+            .With("OutcomingMessageCount", cookie.OutcomingMessages.size())
+            .With("NextPersistentIncomingMessageId", cookie.NextPersistentIncomingMessageId);
 
         return cookie;
     }
@@ -628,11 +623,11 @@ private:
         THashMap<TEndpointId, TAvenueMailboxRuntimeDataPtr> EndpointIdToAvenueRuntimeData;
     };
 
-    NThreading::TAtomicObject<THiveRuntimeData> RuntimeData_;
+    TAtomicObject<THiveRuntimeData> RuntimeData_;
 
     THashSet<TCellId> UnregisteredCellIds_;
 
-    NThreading::TAtomicObject<std::vector<THiveEdge>> FrozenEdges_;
+    TAtomicObject<std::vector<THiveEdge>> FrozenEdges_;
 
     TPeriodicExecutorPtr ReadOnlyCheckExecutor_;
 
@@ -646,9 +641,9 @@ private:
 
         auto srcCellId = FromProto<TCellId>(request->src_cell_id());
 
-        context->SetRequestInfo("SrcCellId: %v, DstCellId: %v",
-            srcCellId,
-            SelfCellId_);
+        context->AnnotateRequest()
+            .With("SrcCellId", srcCellId)
+            .With("DstCellId", SelfCellId_);
 
         HydraManager_->ValidatePeer(EPeerKind::Leader);
 
@@ -661,8 +656,8 @@ private:
             response->set_last_outcoming_message_id(*lastOutcomingMessageId);
         }
 
-        context->SetResponseInfo("LastOutcomingMessageId: %v",
-            lastOutcomingMessageId);
+        context->AnnotateResponse()
+            .With("LastOutcomingMessageId", lastOutcomingMessageId);
 
         context->Reply();
     }
@@ -671,7 +666,7 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        context->SetRequestInfo();
+        context->AnnotateRequest();
 
         ValidatePeer(EPeerKind::LeaderOrFollower);
         SyncWithUpstream();
@@ -682,17 +677,17 @@ private:
                 auto syncResult = CellDirectory_->Synchronize(knownCells);
 
                 for (const auto& request : syncResult.ReconfigureRequests) {
-                    YT_LOG_DEBUG("Requesting cell reconfiguration (CellId: %v, ConfigVersion: %v -> %v)",
-                        request.NewDescriptor->CellId,
-                        request.OldConfigVersion,
-                        request.NewDescriptor->ConfigVersion);
+                    YT_TLOG_DEBUG("Requesting cell reconfiguration")
+                        .With("CellId", request.NewDescriptor->CellId)
+                        .With("OldConfigVersion", request.OldConfigVersion)
+                        .With("NewConfigVersion", request.NewDescriptor->ConfigVersion);
                     auto* protoInfo = response->add_cells_to_reconfigure();
                     ToProto(protoInfo->mutable_cell_descriptor(), *request.NewDescriptor);
                 }
 
                 for (const auto& request : syncResult.UnregisterRequests) {
-                    YT_LOG_DEBUG("Requesting cell unregistration (CellId: %v)",
-                        request.CellId);
+                    YT_TLOG_DEBUG("Requesting cell unregistration")
+                        .With("CellId", request.CellId);
                     auto* unregisterInfo = response->add_cells_to_unregister();
                     ToProto(unregisterInfo->mutable_cell_id(), request.CellId);
                 }
@@ -714,17 +709,13 @@ private:
         auto runtimeData = FindMailboxRuntimeData(srcEndpointId, /*throwIfUnavailable*/ true);
         if (!runtimeData) {
             if (IsAvenueEndpointType(TypeFromId(srcEndpointId))) {
-                YT_LOG_DEBUG(
-                    "Received a message to a non-registered avenue mailbox "
-                    "(SrcEndpointId: %v, DstEndpointId: %v)",
-                    srcEndpointId,
-                    GetSiblingAvenueEndpointId(srcEndpointId));
+                YT_TLOG_DEBUG("Received a message to a non-registered avenue mailbox")
+                    .With("SrcEndpointId", srcEndpointId)
+                    .With("DstEndpointId", GetSiblingAvenueEndpointId(srcEndpointId));
             } else {
-                YT_LOG_DEBUG(
-                    "Received a message to a non-registered cell mailbox "
-                    "(SrcCellId: %v, DstCellId: %v)",
-                    srcEndpointId,
-                    SelfCellId_);
+                YT_TLOG_DEBUG("Received a message to a non-registered cell mailbox")
+                    .With("SrcCellId", srcEndpointId)
+                    .With("DstCellId", SelfCellId_);
             }
             response->set_next_transient_incoming_message_id(-1);
             return false;
@@ -734,11 +725,9 @@ private:
 
         bool shouldCommit = runtimeData->NextTransientIncomingMessageId == firstMessageId && messageCount > 0;
         if (shouldCommit) {
-            YT_LOG_DEBUG("Committing reliable incoming messages (%v, "
-                "MessageIds: %v-%v)",
-                FormatIncomingMailboxEndpoints(srcEndpointId),
-                firstMessageId,
-                firstMessageId + messageCount - 1);
+            YT_TLOG_DEBUG("Committing reliable incoming messages")
+                .With(MakeIncomingMailboxEndpointsTags(srcEndpointId))
+                .WithFormat("MessageIds", "%v-%v", firstMessageId, firstMessageId + messageCount - 1);
 
             runtimeData->NextTransientIncomingMessageId += messageCount;
         }
@@ -756,18 +745,17 @@ private:
         auto srcCellId = FromProto<TCellId>(request->src_endpoint_id());
         auto firstMessageId = request->first_message_id();
         int messageCount = request->messages_size();
-        context->SetRequestInfo("SrcCellId: %v, DstCellId: %v, MessageIds: %v-%v",
-            srcCellId,
-            SelfCellId_,
-            firstMessageId,
-            firstMessageId + messageCount - 1);
+        context->AnnotateRequest()
+            .With("SrcCellId", srcCellId)
+            .With("DstCellId", SelfCellId_)
+            .WithFormat("MessageIds", "%v-%v", firstMessageId, firstMessageId + messageCount - 1);
 
         ValidatePeer(EPeerKind::Leader);
 
         if (IsEdgeFrozen({.SourceCellId = srcCellId, .DestinationCellId = SelfCellId_})) {
             context->Reply(TError("Edge is frozen; not posting messages along it")
-                << TErrorAttribute("self_cell_id", SelfCellId_)
-                << TErrorAttribute("src_endpoint_id", srcCellId));
+                .With("self_cell_id", SelfCellId_)
+                .With("src_endpoint_id", srcCellId));
             return;
         }
 
@@ -806,9 +794,9 @@ private:
 
         auto nextPersistentIncomingMessageId = cellRuntimeData->PersistentState->GetNextPersistentIncomingMessageId();
         auto nextTransientIncomingMessageId = cellRuntimeData->NextTransientIncomingMessageId;
-        context->SetResponseInfo("NextPersistentIncomingMessageId: %v, NextTransientIncomingMessageId: %v",
-            nextPersistentIncomingMessageId,
-            nextTransientIncomingMessageId);
+        context->AnnotateResponse()
+            .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId)
+            .With("NextTransientIncomingMessageId", nextTransientIncomingMessageId);
         context->Reply();
     }
 
@@ -819,18 +807,17 @@ private:
         auto srcCellId = FromProto<TCellId>(request->src_cell_id());
         int messageCount = request->messages_size();
 
-        context->SetRequestInfo("SrcCellId: %v, DstCellId: %v, MessageCount: %v",
-            srcCellId,
-            SelfCellId_,
-            messageCount);
+        context->AnnotateRequest()
+            .With("SrcCellId", srcCellId)
+            .With("DstCellId", SelfCellId_)
+            .With("MessageCount", messageCount);
 
         ValidatePeer(EPeerKind::Leader);
 
-        YT_LOG_DEBUG("Committing unreliable incoming messages (SrcCellId: %v, DstCellId: %v, "
-            "MessageCount: %v)",
-            srcCellId,
-            SelfCellId_,
-            messageCount);
+        YT_TLOG_DEBUG("Committing unreliable incoming messages")
+            .With("SrcCellId", srcCellId)
+            .With("DstCellId", SelfCellId_)
+            .With("MessageCount", messageCount);
 
         auto mutation = CreateSendMessagesMutation(context);
         mutation->SetCurrentTraceContext();
@@ -843,8 +830,8 @@ private:
 
         auto srcCellIds = FromProto<std::vector<TCellId>>(request->src_cell_ids());
 
-        context->SetRequestInfo("SrcCellIds: %v",
-            srcCellIds);
+        context->AnnotateRequest()
+            .With("SrcCellIds", srcCellIds);
 
         ValidatePeer(EPeerKind::Leader);
 
@@ -864,18 +851,18 @@ private:
             ? std::optional<TLogicalTime>(request->logical_time())
             : std::nullopt;
 
-        context->SetRequestInfo("LogicalTime: %v",
-            requestTime);
+        context->AnnotateRequest()
+            .With("LogicalTime", requestTime);
 
         auto [logicalTime, state] = LogicalTimeRegistry_->GetConsistentState(requestTime);
         response->set_logical_time(logicalTime.Underlying());
         response->set_sequence_number(state.SequenceNumber);
         response->set_segment_id(state.SegmentId);
 
-        context->SetResponseInfo("StateLogicalTime: %v, StateSequenceNumber: %v, StateSegmentId: %v",
-            logicalTime,
-            state.SequenceNumber,
-            state.SegmentId);
+        context->AnnotateResponse()
+            .With("StateLogicalTime", logicalTime)
+            .With("StateSequenceNumber", state.SequenceNumber)
+            .With("StateSegmentId", state.SegmentId);
         context->Reply();
     }
 
@@ -906,29 +893,27 @@ private:
         auto oldFirstOutcomingMessageId = outcomingMessageIdRange.Begin;
         auto acknowledgeCount = nextPersistentIncomingMessageId - oldFirstOutcomingMessageId;
         if (acknowledgeCount <= 0) {
-            YT_LOG_DEBUG("No messages acknowledged (%v, "
-                "NextPersistentIncomingMessageId: %v, FirstOutcomingMessageId: %v)",
-                FormatOutgoingMailboxEndpoints(cellId),
-                nextPersistentIncomingMessageId,
-                outcomingMessageIdRange.Begin);
+            YT_TLOG_DEBUG("No messages acknowledged")
+                .With(MakeOutgoingMailboxEndpointsTags(cellId))
+                .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId)
+                .With("FirstOutcomingMessageId", outcomingMessageIdRange.Begin);
             return;
         }
 
         if (acknowledgeCount > outcomingMessageIdRange.GetCount()) {
-            YT_LOG_ALERT("Requested to acknowledge too many messages (%v, "
-                "NextPersistentIncomingMessageId: %v, FirstOutcomingMessageId: %v, OutcomingMessageCount: %v)",
-                FormatOutgoingMailboxEndpoints(cellId),
-                nextPersistentIncomingMessageId,
-                outcomingMessageIdRange.Begin,
-                outcomingMessageIdRange.GetCount());
+            YT_TLOG_ALERT("Requested to acknowledge too many messages")
+                .With(MakeOutgoingMailboxEndpointsTags(cellId))
+                .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId)
+                .With("FirstOutcomingMessageId", outcomingMessageIdRange.Begin)
+                .With("OutcomingMessageCount", outcomingMessageIdRange.GetCount());
             return;
         }
 
         auto newFirstOutcomingMessageId = mailbox->GetPersistentState()->TrimLastestOutcomingMessages(acknowledgeCount);
-        YT_LOG_DEBUG("Messages acknowledged (%v, FirstOutcomingMessageId: %v -> %v)",
-            FormatOutgoingMailboxEndpoints(cellId),
-            oldFirstOutcomingMessageId,
-            newFirstOutcomingMessageId);
+        YT_TLOG_DEBUG("Messages acknowledged")
+            .With(MakeOutgoingMailboxEndpointsTags(cellId))
+            .With("OldFirstOutcomingMessageId", oldFirstOutcomingMessageId)
+            .With("NewFirstOutcomingMessageId", newFirstOutcomingMessageId);
 
         if (IsLeader() && mailbox->IsAvenue()) {
             BackgroundInvoker_->Invoke(
@@ -952,9 +937,9 @@ private:
         auto* mailbox = AsTyped(FindMailbox(srcCellId));
         if (!mailbox) {
             if (firstMessageId != 0) {
-                YT_LOG_ALERT("Received a non-initial message to a missing mailbox (SrcCellId: %v, MessageId: %v)",
-                    srcCellId,
-                    firstMessageId);
+                YT_TLOG_ALERT("Received a non-initial message to a missing mailbox")
+                    .With("SrcCellId", srcCellId)
+                    .With("MessageId", firstMessageId);
                 return;
             }
             mailbox = AsTyped(CreateCellMailbox(srcCellId));
@@ -966,10 +951,9 @@ private:
             auto srcId = FromProto<TAvenueEndpointId>(subrequest.src_endpoint_id());
             auto* mailbox = AsTyped(FindMailbox(srcId));
             if (!mailbox) {
-                YT_LOG_INFO(
-                    "Received a message to a missing avenue mailbox (SrcId: %v, MessageId: %v)",
-                    srcId,
-                    firstMessageId);
+                YT_TLOG_INFO("Received a message to a missing avenue mailbox")
+                    .With("SrcId", srcId)
+                    .With("MessageId", firstMessageId);
                 continue;
             }
             ApplyReliableIncomingMessages(mailbox, &subrequest);
@@ -994,9 +978,9 @@ private:
 
         auto cellId = FromProto<TCellId>(request->cell_id());
         if (UnregisteredCellIds_.contains(cellId)) {
-            YT_LOG_INFO("Mailbox is already unregistered (SrcCellId: %v, DstCellId: %v)",
-                SelfCellId_,
-                cellId);
+            YT_TLOG_INFO("Mailbox is already unregistered")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", cellId);
             return;
         }
 
@@ -1036,10 +1020,7 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(HasHydraContext());
 
-        TStringBuilder logMessageBuilder;
-        logMessageBuilder.AppendFormat("Reliable outcoming message added (MutationType: %v, SrcCellId: %v, DstIds: {",
-            message->Type,
-            SelfCellId_);
+        TCompactVector<std::pair<TEndpointId, TMessageId>, TypicalPostDestinationCount> dstIds;
 
         auto* traceContext = NTracing::TryGetCurrentTraceContext();
 
@@ -1075,12 +1056,7 @@ private:
                 mutationContext->CombineStateHash(messageId, mailbox->GetEndpointId());
             }
 
-            if (mailbox != AsTyped(mailboxes.Front())) {
-                logMessageBuilder.AppendString(TStringBuf(", "));
-            }
-            logMessageBuilder.AppendFormat("%v=>%v",
-                mailbox->GetEndpointId(),
-                messageId);
+            dstIds.emplace_back(mailbox->GetEndpointId(), messageId);
 
             if (IsLeader()) {
                 if (mailbox->IsAvenue()) {
@@ -1102,12 +1078,14 @@ private:
             }
         }
 
-        if (mutationContext) {
-            logMessageBuilder.AppendFormat("}, LogicalTime: %v, SequenceNumber: %v)",
-                logicalTime,
-                mutationContext->GetSequenceNumber());
-        }
-        YT_LOG_DEBUG(logMessageBuilder.Flush());
+        YT_TLOG_DEBUG("Reliable outcoming message added")
+            .With("MutationType", message->Type)
+            .With("SrcCellId", SelfCellId_)
+            .With("DstIds", MakeFormattableView(dstIds, [] (auto* builder, const auto& dstId) {
+                builder->AppendFormat("%v=>%v", dstId.first, dstId.second);
+            }))
+            .WithIf(mutationContext, "LogicalTime", logicalTime)
+            .WithIf(mutationContext, "SequenceNumber", YT_LAZY(mutationContext->GetSequenceNumber()));
     }
 
     void UnreliablePostMessage(TRange<TMailboxHandle> mailboxes, const TSerializedMessagePtr& message)
@@ -1115,17 +1093,13 @@ private:
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
         YT_VERIFY(!HasHydraContext());
 
-        TStringBuilder logMessageBuilder;
-        logMessageBuilder.AppendFormat("Sending unreliable outcoming message (MutationType: %v, SrcCellId: %v, DstCellIds: [",
-            message->Type,
-            SelfCellId_);
-
+        TCompactVector<TCellId, TypicalPostDestinationCount> dstCellIds;
         std::vector<TCellMailboxRuntimeDataPtr> cellRuntimeDatas;
         for (auto mailboxHandle : mailboxes) {
             auto* mailbox = AsTyped(mailboxHandle);
             if (!mailbox->IsCell()) {
-                YT_LOG_ALERT("Attempt to post unreliable message to a non-cell mailbox (EndpointId: %v)",
-                    mailbox->GetEndpointId());
+                YT_TLOG_ALERT("Attempt to post unreliable message to a non-cell mailbox")
+                    .With("EndpointId", mailbox->GetEndpointId());
                 continue;
             }
 
@@ -1135,16 +1109,15 @@ private:
                 continue;
             }
 
-            if (cellMailbox != AsTyped(mailboxes.Front())) {
-                logMessageBuilder.AppendString(TStringBuf(", "));
-            }
-            logMessageBuilder.AppendFormat("%v", cellMailbox->GetCellId());
+            dstCellIds.push_back(cellMailbox->GetCellId());
 
             cellRuntimeDatas.push_back(cellRuntimeData);
         }
 
-        logMessageBuilder.AppendString(TStringBuf("])"));
-        YT_LOG_DEBUG(logMessageBuilder.Flush());
+        YT_TLOG_DEBUG("Sending unreliable outcoming message")
+            .With("MutationType", message->Type)
+            .With("SrcCellId", SelfCellId_)
+            .With("DstCellIds", dstCellIds);
 
         BackgroundInvoker_->Invoke(
             BIND(&THiveManager::DoUnreliablePostMessage, MakeStrong(this), std::move(cellRuntimeDatas), message));
@@ -1213,9 +1186,9 @@ private:
             runtimeData->FirstInFlightOutcomingMessageId = runtimeData->PersistentState->GetOutcomingMessageIdRange().Begin;
             YT_VERIFY(runtimeData->InFlightOutcomingMessageCount == 0);
 
-            YT_LOG_INFO("Mailbox connected (%v, FirstInFlightOutcomingMessageId: %v)",
-                FormatOutgoingMailboxEndpoints(runtimeData->EndpointId),
-                runtimeData->FirstInFlightOutcomingMessageId);
+            YT_TLOG_INFO("Mailbox connected")
+                .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId))
+                .With("FirstInFlightOutcomingMessageId", runtimeData->FirstInFlightOutcomingMessageId);
         };
 
         doSetConnected(cellRuntimeData);
@@ -1260,7 +1233,7 @@ private:
             NRpc::EErrorCode::Unavailable,
             "Failed to synchronize with cell %v since it has disconnected",
             cellRuntimeData->EndpointId)
-            << error;
+            .With(error);
 
         {
             NTracing::TNullTraceContextGuard guard;
@@ -1277,8 +1250,8 @@ private:
             runtimeData->FirstInFlightOutcomingMessageId.reset();
             runtimeData->InFlightOutcomingMessageCount = 0;
 
-            YT_LOG_INFO("Mailbox disconnected (%v)",
-                FormatOutgoingMailboxEndpoints(runtimeData->EndpointId));
+            YT_TLOG_INFO("Mailbox disconnected")
+                .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId));
         };
 
         doSetDisconnected(cellRuntimeData);
@@ -1341,8 +1314,8 @@ private:
             if (Config_->AllowedForRemovalMasterCellTags.contains(CellTagFromId(cellId))) {
                 CellMailboxMap_.Remove(cellId);
 
-                YT_LOG_INFO("Master cell mailbox removed (CellTag: %v)",
-                    CellTagFromId(cellId));
+                YT_TLOG_INFO("Master cell mailbox removed")
+                    .With("CellTag", CellTagFromId(cellId));
             }
         }
 
@@ -1485,9 +1458,9 @@ private:
         }
 
         // The cell has a known endpoint but its mailbox is not connected, hence we ping it.
-        YT_LOG_DEBUG("Sending periodic ping (SrcCellId: %v, DstCellId: %v)",
-            SelfCellId_,
-            cellId);
+        YT_TLOG_DEBUG("Sending periodic ping")
+            .With("SrcCellId", SelfCellId_)
+            .With("DstCellId", cellId);
 
         THiveServiceProxy proxy(std::move(channel));
         auto req = proxy.Ping();
@@ -1514,9 +1487,10 @@ private:
 
         if (!rspOrError.IsOK()) {
             // Ping failed -- the cell mailbox will remain disconnected.
-            YT_LOG_DEBUG(rspOrError, "Periodic ping failed (SrcCellId: %v, DstCellId: %v)",
-                SelfCellId_,
-                cellRuntimeData->EndpointId);
+            YT_TLOG_DEBUG("Periodic ping failed")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", cellRuntimeData->EndpointId)
+                .With(rspOrError);
             return;
         }
 
@@ -1524,10 +1498,10 @@ private:
         const auto& rsp = rspOrError.Value();
         auto lastOutcomingMessageId = rsp->last_outcoming_message_id();
 
-        YT_LOG_DEBUG("Periodic ping succeeded (SrcCellId: %v, DstCellId: %v, LastOutcomingMessageId: %v)",
-            SelfCellId_,
-            cellRuntimeData->EndpointId,
-            lastOutcomingMessageId);
+        YT_TLOG_DEBUG("Periodic ping succeeded")
+            .With("SrcCellId", SelfCellId_)
+            .With("DstCellId", cellRuntimeData->EndpointId)
+            .With("LastOutcomingMessageId", lastOutcomingMessageId);
 
         SetMailboxConnected(cellRuntimeData);
     }
@@ -1605,9 +1579,9 @@ private:
                     cellId);
             }
 
-            YT_LOG_DEBUG("Synchronizing with another instance (SrcCellId: %v, DstCellId: %v)",
-                cellId,
-                SelfCellId_);
+            YT_TLOG_DEBUG("Synchronizing with another instance")
+                .With("SrcCellId", cellId)
+                .With("DstCellId", SelfCellId_);
 
             NTracing::TNullTraceContextGuard nullTraceContextGuard;
             TWallTimer timer;
@@ -1654,7 +1628,7 @@ private:
                     NRpc::EErrorCode::Unavailable,
                     "Failed to synchronize with cell %v",
                     cellId)
-                    << rspOrError;
+                    .With(rspOrError);
             }
 
             if (!cellRuntimeData->Connected.load()) {
@@ -1666,30 +1640,28 @@ private:
 
             const auto& rsp = rspOrError.Value();
             if (!rsp->has_last_outcoming_message_id()) {
-                YT_LOG_DEBUG("Remote instance has no mailbox; no synchronization needed (SrcCellId: %v, DstCellId: %v)",
-                    cellId,
-                    SelfCellId_);
+                YT_TLOG_DEBUG("Remote instance has no mailbox; no synchronization needed")
+                    .With("SrcCellId", cellId)
+                    .With("DstCellId", SelfCellId_);
                 return OKFuture;
             }
 
             auto messageId = rsp->last_outcoming_message_id();
             auto nextPersistentIncomingMessageId = cellRuntimeData->PersistentState->GetNextPersistentIncomingMessageId();
             if (messageId < nextPersistentIncomingMessageId) {
-                YT_LOG_DEBUG("Already synchronized with remote instance (SrcCellId: %v, DstCellId: %v, "
-                    "SyncMessageId: %v, NextPersistentIncomingMessageId: %v)",
-                    cellId,
-                    SelfCellId_,
-                    messageId,
-                    nextPersistentIncomingMessageId);
+                YT_TLOG_DEBUG("Already synchronized with remote instance")
+                    .With("SrcCellId", cellId)
+                    .With("DstCellId", SelfCellId_)
+                    .With("SyncMessageId", messageId)
+                    .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId);
                 return OKFuture;
             }
 
-            YT_LOG_DEBUG("Waiting for synchronization with remote instance (SrcCellId: %v, DstCellId: %v, "
-                "SyncMessageId: %v, NextPersistentIncomingMessageId: %v)",
-                cellId,
-                SelfCellId_,
-                messageId,
-                nextPersistentIncomingMessageId);
+            YT_TLOG_DEBUG("Waiting for synchronization with remote instance")
+                .With("SrcCellId", cellId)
+                .With("DstCellId", SelfCellId_)
+                .With("SyncMessageId", messageId)
+                .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId);
 
             auto it = cellRuntimeData->SyncRequests.find(messageId);
             if (it != cellRuntimeData->SyncRequests.end()) {
@@ -1716,10 +1688,10 @@ private:
                 break;
             }
 
-            YT_LOG_DEBUG("Synchronization complete (SrcCellId: %v, DstCellId: %v, MessageId: %v)",
-                SelfCellId_,
-                cellRuntimeData->EndpointId,
-                messageId);
+            YT_TLOG_DEBUG("Synchronization complete")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", cellRuntimeData->EndpointId)
+                .With("MessageId", messageId);
 
             it->second.Set();
             cellRuntimeData->SyncRequests.erase(it);
@@ -1895,24 +1867,26 @@ private:
 
         auto dstCellId = cellRuntimeData->EndpointId;
         if (messageCountToPost == 0) {
-            YT_LOG_DEBUG("Checking mailbox synchronization (SrcCellId: %v, DstCellId: %v, AvenueEndpointIds: %v)",
-                SelfCellId_,
-                dstCellId,
-                MakeFormattableView(
-                    avenueEnvelopes,
-                    [] (auto* builder, const auto& envelope) {
+            YT_TLOG_DEBUG("Checking mailbox synchronization")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", dstCellId)
+                .With(
+                    "AvenueEndpointIds",
+                    MakeFormattableView(avenueEnvelopes, [] (auto* builder, const auto& envelope) {
                         builder->AppendFormat("%v", GetSiblingAvenueEndpointId(envelope.SrcEndpointId));
                     }));
         } else {
-            YT_LOG_DEBUG("Posting reliable outcoming messages "
-                "(SrcCellId: %v, DstCellId: %v, MessageIds: %v-%v, Avenues: %v)",
-                SelfCellId_,
-                dstCellId,
-                cellEnvelope.FirstMessageId,
-                cellEnvelope.FirstMessageId + std::ssize(cellEnvelope.MessagesToPost) - 1,
-                MakeFormattableView(
-                    avenueEnvelopes,
-                    [] (auto* builder, const auto& envelope) {
+            YT_TLOG_DEBUG("Posting reliable outcoming messages")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", dstCellId)
+                .WithFormat(
+                    "MessageIds",
+                    "%v-%v",
+                    cellEnvelope.FirstMessageId,
+                    cellEnvelope.FirstMessageId + std::ssize(cellEnvelope.MessagesToPost) - 1)
+                .With(
+                    "Avenues",
+                    MakeFormattableView(avenueEnvelopes, [] (auto* builder, const auto& envelope) {
                         builder->AppendFormat("%v:", GetSiblingAvenueEndpointId(envelope.SrcEndpointId));
                         if (envelope.MessagesToPost.empty()) {
                             builder->AppendString("sync");
@@ -2004,9 +1978,9 @@ private:
             : TMailboxRuntimeDataPtr(cellRuntimeData);
 
         if (runtimeData->ConnectionEpoch != epoch) {
-            YT_LOG_DEBUG("Ignoring stale post messages response (SrcCellId: %v, DstCellId: %v)",
-                SelfCellId_,
-                runtimeData->EndpointId);
+            YT_TLOG_DEBUG("Ignoring stale post messages response")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", runtimeData->EndpointId);
             return;
         }
 
@@ -2020,14 +1994,16 @@ private:
             if (runtimeData == cellRuntimeData) {
                 auto dstCellId = cellRuntimeData->EndpointId;
                 if (rspOrError.GetCode() == NHiveClient::EErrorCode::MailboxNotCreatedYet) {
-                    YT_LOG_DEBUG(rspOrError, "Mailbox is not created yet; will retry (SrcCellId: %v, DstCellId: %v)",
-                        SelfCellId_,
-                        dstCellId);
+                    YT_TLOG_DEBUG("Mailbox is not created yet; will retry")
+                        .With("SrcCellId", SelfCellId_)
+                        .With("DstCellId", dstCellId)
+                        .With(rspOrError);
                     SchedulePostCellOutcomingMessages(cellRuntimeData);
                 } else {
-                    YT_LOG_DEBUG(rspOrError, "Failed to post reliable outcoming messages (SrcCellId: %v, DstCellId: %v)",
-                        SelfCellId_,
-                        dstCellId);
+                    YT_TLOG_DEBUG("Failed to post reliable outcoming messages")
+                        .With("SrcCellId", SelfCellId_)
+                        .With("DstCellId", dstCellId)
+                        .With(rspOrError);
                     MaybeDisconnectMailboxOnError(cellRuntimeData, rspOrError);
                 }
             }
@@ -2039,18 +2015,17 @@ private:
             : *rspOrError.Value();
 
         if (rsp.next_transient_incoming_message_id() == -1) {
-            YT_LOG_DEBUG("Destination mailbox does not exist, post cancelled (%v)",
-                FormatOutgoingMailboxEndpoints(runtimeData->EndpointId));
+            YT_TLOG_DEBUG("Destination mailbox does not exist, post cancelled")
+                .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId));
             return;
         }
 
         auto nextPersistentIncomingMessageId = rsp.next_persistent_incoming_message_id();
         auto nextTransientIncomingMessageId = rsp.next_transient_incoming_message_id();
-        YT_LOG_DEBUG("Outcoming reliable messages posted "
-            "(%v, NextPersistentIncomingMessageId: %v, NextTransientIncomingMessageId: %v)",
-            FormatOutgoingMailboxEndpoints(runtimeData->EndpointId),
-            nextPersistentIncomingMessageId,
-            nextTransientIncomingMessageId);
+        YT_TLOG_DEBUG("Outcoming reliable messages posted")
+            .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId))
+            .With("NextPersistentIncomingMessageId", nextPersistentIncomingMessageId)
+            .With("NextTransientIncomingMessageId", nextTransientIncomingMessageId);
 
         auto outcomingMessageIdRange = runtimeData->PersistentState->GetOutcomingMessageIdRange();
         if (!HandlePersistentIncomingMessages(runtimeData, outcomingMessageIdRange, nextPersistentIncomingMessageId)) {
@@ -2081,16 +2056,17 @@ private:
         auto dstCellId = cellRuntimeData->EndpointId;
 
         if (!rspOrError.IsOK()) {
-            YT_LOG_DEBUG(rspOrError, "Failed to send unreliable outcoming messages (SrcCellId: %v, DstCellId: %v)",
-                SelfCellId_,
-                dstCellId);
+            YT_TLOG_DEBUG("Failed to send unreliable outcoming messages")
+                .With("SrcCellId", SelfCellId_)
+                .With("DstCellId", dstCellId)
+                .With(rspOrError);
             MaybeDisconnectMailboxOnError(cellRuntimeData, rspOrError);
             return;
         }
 
-        YT_LOG_DEBUG("Outcoming unreliable messages sent successfully (SrcCellId: %v, DstCellId: %v)",
-            SelfCellId_,
-            dstCellId);
+        YT_TLOG_DEBUG("Outcoming unreliable messages sent successfully")
+            .With("SrcCellId", SelfCellId_)
+            .With("DstCellId", dstCellId);
     }
 
     std::unique_ptr<TMutation> CreateAcknowledgeMessagesMutation(const NHiveServer::NProto::TReqAcknowledgeMessages& req)
@@ -2155,23 +2131,21 @@ private:
         YT_ASSERT_INVOKER_AFFINITY(BackgroundInvoker_);
 
         if (requestedMessageId < outcomingMessageIdRange.Begin) {
-            YT_LOG_WARNING("Destination is out of sync: requested to receive already truncated messages (%v, "
-                "RequestedMessageId: %v, FirstOutcomingMessageId: %v)",
-                FormatOutgoingMailboxEndpoints(runtimeData->EndpointId),
-                requestedMessageId,
-                outcomingMessageIdRange.Begin);
+            YT_TLOG_WARNING("Destination is out of sync: requested to receive already truncated messages")
+                .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId))
+                .With("RequestedMessageId", requestedMessageId)
+                .With("FirstOutcomingMessageId", outcomingMessageIdRange.Begin);
             auto error = TError("Destination is out of sync: requested to receive already truncated messages");
             SetMailboxDisconnected(runtimeData->EndpointId, error);
             return false;
         }
 
         if (requestedMessageId > outcomingMessageIdRange.End) {
-            YT_LOG_WARNING("Destination is out of sync: requested to receive nonexisting messages (%v, "
-                "RequestedMessageId: %v, FirstOutcomingMessageId: %v, OutcomingMessageCount: %v)",
-                FormatOutgoingMailboxEndpoints(runtimeData->EndpointId),
-                requestedMessageId,
-                outcomingMessageIdRange.Begin,
-                outcomingMessageIdRange.GetCount());
+            YT_TLOG_WARNING("Destination is out of sync: requested to receive nonexisting messages")
+                .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId))
+                .With("RequestedMessageId", requestedMessageId)
+                .With("FirstOutcomingMessageId", outcomingMessageIdRange.Begin)
+                .With("OutcomingMessageCount", outcomingMessageIdRange.GetCount());
             auto error = TError("Destination is out of sync: requested to receive nonexisting messages");
             SetMailboxDisconnected(runtimeData->EndpointId, error);
             return false;
@@ -2200,11 +2174,9 @@ private:
             return true;
         }
 
-        YT_LOG_DEBUG("Committing reliable messages acknowledgement (%v, "
-            "MessageIds: %v-%v)",
-            FormatOutgoingMailboxEndpoints(runtimeData->EndpointId),
-            firstOutcomingMessageId,
-            nextPersistentIncomingMessageId - 1);
+        YT_TLOG_DEBUG("Committing reliable messages acknowledgement")
+            .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId))
+            .WithFormat("MessageIds", "%v-%v", firstOutcomingMessageId, nextPersistentIncomingMessageId - 1);
 
         NHiveServer::NProto::TReqAcknowledgeMessages req;
         ToProto(req.mutable_cell_id(), runtimeData->EndpointId);
@@ -2226,10 +2198,10 @@ private:
             return false;
         }
 
-        YT_LOG_TRACE("Updating first in-flight outcoming message id (%v, MessageId: %v -> %v)",
-            FormatOutgoingMailboxEndpoints(runtimeData->EndpointId),
-            runtimeData->FirstInFlightOutcomingMessageId,
-            nextTransientIncomingMessageId);
+        YT_TLOG_TRACE("Updating first in-flight outcoming message id")
+            .With(MakeOutgoingMailboxEndpointsTags(runtimeData->EndpointId))
+            .With("OldMessageId", runtimeData->FirstInFlightOutcomingMessageId)
+            .With("NewMessageId", nextTransientIncomingMessageId);
         runtimeData->FirstInFlightOutcomingMessageId = nextTransientIncomingMessageId;
         return true;
     }
@@ -2260,12 +2232,11 @@ private:
 
         auto nextPersistentIncomingMessageId = mailbox->GetPersistentState()->GetNextPersistentIncomingMessageId();
         if (messageId != nextPersistentIncomingMessageId) {
-            YT_LOG_ALERT("Attempt to apply an out-of-order message; ignored (%v, "
-                "ExpectedMessageId: %v, ActualMessageId: %v, MutationType: %v)",
-                FormatIncomingMailboxEndpoints(mailbox->GetEndpointId()),
-                nextPersistentIncomingMessageId,
-                messageId,
-                message.type());
+            YT_TLOG_ALERT("Attempt to apply an out-of-order message; ignored")
+                .With(MakeIncomingMailboxEndpointsTags(mailbox->GetEndpointId()))
+                .With("ExpectedMessageId", nextPersistentIncomingMessageId)
+                .With("ActualMessageId", messageId)
+                .With("MutationType", message.type());
             return;
         }
 
@@ -2279,14 +2250,13 @@ private:
         auto logicalTime = LamportClock_->Tick(TLogicalTime(message.logical_time()));
 
         auto* mutationContext = GetCurrentMutationContext();
-        YT_LOG_DEBUG("Applying reliable incoming message (%v, "
-            "MessageId: %v, MutationType: %v, SenderReign: %v, LogicalTime: %v, SequenceNumber: %v)",
-            FormatIncomingMailboxEndpoints(mailbox->GetEndpointId()),
-            messageId,
-            message.type(),
-            message.reign(),
-            logicalTime,
-            mutationContext->GetSequenceNumber());
+        YT_TLOG_DEBUG("Applying reliable incoming message")
+            .With(MakeIncomingMailboxEndpointsTags(mailbox->GetEndpointId()))
+            .With("MessageId", messageId)
+            .With("MutationType", message.type())
+            .With("SenderReign", message.reign())
+            .With("LogicalTime", logicalTime)
+            .With("SequenceNumber", mutationContext->GetSequenceNumber());
 
         ApplyMessage(std::move(message), mailbox->GetEndpointId());
 
@@ -2311,10 +2281,10 @@ private:
     {
         YT_ASSERT_THREAD_AFFINITY(AutomatonThread);
 
-        YT_LOG_DEBUG("Applying unreliable incoming message (SrcCellId: %v, DstCellId: %v, MutationType: %v)",
-            mailbox->GetCellId(),
-            SelfCellId_,
-            message.type());
+        YT_TLOG_DEBUG("Applying unreliable incoming message")
+            .With("SrcCellId", mailbox->GetCellId())
+            .With("DstCellId", SelfCellId_)
+            .With("MutationType", message.type());
         ApplyMessage(std::move(message), mailbox->GetCellId());
     }
 
@@ -2375,18 +2345,16 @@ private:
         if (formerCellRuntimeData) {
             EraseOrCrash(formerCellRuntimeData->RegisteredAvenues, avenueRuntimeData);
             formerCellRuntimeData->ActiveAvenues.erase(avenueRuntimeData);
-            YT_LOG_DEBUG(
-                "Avenue disconnected from cell (AvenueEndpointId: %v, CellId: %v)",
-                avenueRuntimeData->EndpointId,
-                formerCellRuntimeData ? formerCellRuntimeData->EndpointId : NullObjectId);
+            YT_TLOG_DEBUG("Avenue disconnected from cell")
+                .With("AvenueEndpointId", avenueRuntimeData->EndpointId)
+                .With("CellId", formerCellRuntimeData ? formerCellRuntimeData->EndpointId : NullObjectId);
         }
 
         if (cellRuntimeData && !avenueOutcomingMessageIdRange.IsEmpty()) {
             if (cellRuntimeData->ActiveAvenues.insert(avenueRuntimeData).second) {
-                YT_LOG_DEBUG(
-                    "Active avenue registered at cell (AvenueEndpointId: %v, CellId: %v)",
-                    avenueRuntimeData->EndpointId,
-                    cellRuntimeData->EndpointId);
+                YT_TLOG_DEBUG("Active avenue registered at cell")
+                    .With("AvenueEndpointId", avenueRuntimeData->EndpointId)
+                    .With("CellId", cellRuntimeData->EndpointId);
             }
 
             if (cellRuntimeData->IsLeader) {
@@ -2398,9 +2366,9 @@ private:
 
         if (cellRuntimeData) {
             EmplaceOrCrash(cellRuntimeData->RegisteredAvenues, avenueRuntimeData);
-            YT_LOG_DEBUG("Avenue connected to cell (AvenueEndpointId: %v, CellId: %v)",
-                avenueRuntimeData->EndpointId,
-                cellRuntimeData->EndpointId);
+            YT_TLOG_DEBUG("Avenue connected to cell")
+                .With("AvenueEndpointId", avenueRuntimeData->EndpointId)
+                .With("CellId", cellRuntimeData->EndpointId);
         }
     }
 
@@ -2418,36 +2386,34 @@ private:
 
         if (active) {
             if (cellRuntimeData->ActiveAvenues.insert(avenueRuntimeData).second) {
-                YT_LOG_DEBUG(
-                    "Avenue became active at cell (AvenueEndpointId: %v, CellId: %v)",
-                    avenueRuntimeData->EndpointId,
-                    cellRuntimeData->EndpointId);
+                YT_TLOG_DEBUG("Avenue became active at cell")
+                    .With("AvenueEndpointId", avenueRuntimeData->EndpointId)
+                    .With("CellId", cellRuntimeData->EndpointId);
             }
         } else {
             if (cellRuntimeData->ActiveAvenues.erase(avenueRuntimeData) != 0) {
-                YT_LOG_DEBUG(
-                    "Avenue became inactive at cell (AvenueEndpointId: %v, CellId: %v)",
-                    avenueRuntimeData->EndpointId,
-                    cellRuntimeData->EndpointId);
+                YT_TLOG_DEBUG("Avenue became inactive at cell")
+                    .With("AvenueEndpointId", avenueRuntimeData->EndpointId)
+                    .With("CellId", cellRuntimeData->EndpointId);
             }
         }
     }
 
-    std::string FormatIncomingMailboxEndpoints(TEndpointId endpointId) const
+    NLogging::TLoggingTagList MakeIncomingMailboxEndpointsTags(TEndpointId endpointId) const
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        return FormatMailboxEndpoints(endpointId, /*outgoing*/ false);
+        return MakeMailboxEndpointsTags(endpointId, /*outgoing*/ false);
     }
 
-    std::string FormatOutgoingMailboxEndpoints(TEndpointId endpointId) const
+    NLogging::TLoggingTagList MakeOutgoingMailboxEndpointsTags(TEndpointId endpointId) const
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        return FormatMailboxEndpoints(endpointId, /*outgoing*/ true);
+        return MakeMailboxEndpointsTags(endpointId, /*outgoing*/ true);
     }
 
-    std::string FormatMailboxEndpoints(TEndpointId endpointId, bool outgoing) const
+    NLogging::TLoggingTagList MakeMailboxEndpointsTags(TEndpointId endpointId, bool outgoing) const
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
@@ -2460,7 +2426,9 @@ private:
                 std::swap(srcId, dstId);
             }
 
-            return Format("SrcCellId: %v, DstCellId: %v", srcId, dstId);
+            return NLogging::TLoggingTagList()
+                .With("SrcCellId", srcId)
+                .With("DstCellId", dstId);
         } else if (IsAvenueEndpointType(type)) {
             auto dstId = endpointId;
             auto srcId = GetSiblingAvenueEndpointId(dstId);
@@ -2469,7 +2437,9 @@ private:
                 std::swap(srcId, dstId);
             }
 
-            return Format("SrcEndpointId: %v, DstEndpointId: %v", srcId, dstId);
+            return NLogging::TLoggingTagList()
+                .With("SrcEndpointId", srcId)
+                .With("DstEndpointId", dstId);
         } else {
             YT_ABORT();
         }
@@ -2493,7 +2463,7 @@ private:
             BIND([this, this_ = MakeStrong(this), cellRuntimeDatas = std::move(cellRuntimeDatas)] {
                 YT_ASSERT_INVOKER_AFFINITY(BackgroundInvoker_);
 
-                YT_LOG_DEBUG("Hydra is read-only; canceling all synchronization requests");
+                YT_TLOG_DEBUG("Hydra is read-only; canceling all synchronization requests");
                 auto error = TError(NHydra::EErrorCode::ReadOnly, "Cannot synchronize with remote instance since Hydra is read-only");
                 for (const auto& cellRuntimeData : cellRuntimeDatas) {
                     SetMailboxDisconnected(cellRuntimeData, error);
@@ -2556,6 +2526,7 @@ private:
         CellMailboxMap_.Clear();
         AvenueMailboxMap_.Clear();
         UnregisteredCellIds_.clear();
+        LogicalTimeRegistry_->Clear();
 
         RuntimeData_.Store(THiveRuntimeData{});
     }
@@ -2616,7 +2587,7 @@ private:
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
         auto automatonInvoker = HydraManager_->CreateGuardedAutomatonInvoker(AutomatonInvoker_);
-        return New<TCompositeMapService>()
+        return CreateCompositeMapService()
             ->AddChild("cell_mailboxes", New<TMailboxOrchidService<TCellMailboxRuntimeData, &THiveRuntimeData::CellIdToCellRuntimeData>>(
                 MakeWeak(this))
                 ->Via(BackgroundInvoker_))

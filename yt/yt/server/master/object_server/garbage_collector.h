@@ -1,6 +1,6 @@
 #pragma once
 
-#include "public.h"
+#include "private.h"
 #include "object.h"
 
 #include <yt/yt/server/master/cell_master/public.h>
@@ -57,6 +57,7 @@ public:
     void DestroyZombie(TObject* object);
     bool IsRegisteredZombie(TObject* object) const;
     bool IsEphemeralGhost(TObject* object) const;
+    bool IsWeakGhost(TObject* object) const;
 
     void RegisterRemovalAwaitingCellsSyncObject(TObject* object, const NObjectClient::TCellTagSet& cellTags);
     void UnregisterRemovalAwaitingCellsSyncObject(TObject* object);

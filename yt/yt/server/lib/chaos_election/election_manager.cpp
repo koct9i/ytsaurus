@@ -1,6 +1,7 @@
 #include "election_manager.h"
 
 #include "private.h"
+#include "chaos_lease.h"
 #include "config.h"
 
 #include <yt/yt/client/api/transaction.h>
@@ -20,7 +21,7 @@
 #include <yt/yt/core/concurrency/serialized_invoker.h>
 #include <yt/yt/core/concurrency/context_switch.h>
 
-#include <library/cpp/yt/threading/atomic_object.h>
+#include <library/cpp/yt/system/atomic_object.h>
 
 namespace NYT::NChaosElection {
 
@@ -43,13 +44,61 @@ inline static constexpr TStringBuf LastPingTimeColumn = "last_ping_time";
 
 TTableSchemaPtr GetChaosElectionLockTableSchema()
 {
-    return New<TTableSchema>(std::vector<TColumnSchema>{
-        TColumnSchema(TString(LockKeyColumn), EValueType::String).SetSortOrder(ESortOrder::Ascending),
-        TColumnSchema(TString(LeaderLeaseIdColumn), EValueType::String),
-        TColumnSchema(TString(LeaderNameColumn), EValueType::String),
-        TColumnSchema(TString(LeaseTimeoutColumn), EValueType::Uint64),
-        TColumnSchema(TString(LastPingTimeColumn), EValueType::Uint64),
+    return New<TTableSchema>(
+        std::vector<TColumnSchema>{
+            TColumnSchema(LockKeyColumn, EValueType::String).SetSortOrder(ESortOrder::Ascending),
+            TColumnSchema(LeaderLeaseIdColumn, EValueType::String),
+            TColumnSchema(LeaderNameColumn, EValueType::String),
+            TColumnSchema(LeaseTimeoutColumn, EValueType::Uint64),
+            TColumnSchema(LastPingTimeColumn, EValueType::Uint64),
+        },
+        /*strict*/ true,
+        /*uniqueKeys*/ true);
+}
+
+std::optional<std::string> FindChaosElectionLeader(
+    const IClientPtr& client,
+    const NYPath::TYPath& lockTablePath,
+    TStringBuf groupName)
+{
+    auto nameTable = New<TNameTable>();
+    auto lockKeyColumnId = nameTable->RegisterName(LockKeyColumn);
+
+    TLookupRowsOptions options;
+    options.ColumnFilter = TColumnFilter({
+        nameTable->RegisterName(LeaderNameColumn),
+        nameTable->RegisterName(LeaderLeaseIdColumn),
+        nameTable->RegisterName(LeaseTimeoutColumn),
+        nameTable->RegisterName(LastPingTimeColumn),
     });
+
+    auto rowBuffer = New<TRowBuffer>();
+    TUnversionedRowBuilder keyBuilder;
+    keyBuilder.AddValue(MakeUnversionedStringValue(groupName, lockKeyColumnId));
+    auto key = rowBuffer->CaptureRow(keyBuilder.GetRow());
+
+    auto lookupResult = WaitFor(client->LookupRows(
+        lockTablePath,
+        nameTable,
+        MakeSharedRange(std::vector<TUnversionedRow>{key}, rowBuffer),
+        options))
+        .ValueOrThrow();
+
+    auto rows = lookupResult.Rowset->GetRows();
+    if (rows.Empty()) {
+        return std::nullopt;
+    }
+
+    std::optional<std::string> leaderName;
+    TChaosLeaseId leaseId;
+    std::optional<TDuration> leaseTimeout;
+    std::optional<TInstant> lastPingTime;
+    FromUnversionedRow(rows[0], &leaderName, &leaseId, &leaseTimeout, &lastPingTime);
+    if (!leaseId || !leaseTimeout || !lastPingTime || TInstant::Now() >= *lastPingTime + *leaseTimeout) {
+        return std::nullopt;
+    }
+
+    return leaderName;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -73,10 +122,10 @@ public:
                 {"group", Options_->GroupName},
                 {"path", Config_->LockTablePath},
             })))
-        , Logger(ChaosElectionLogger().WithTag(
-            "GroupName: %v, Path: %v",
-            Options_->GroupName,
-            Config_->LockTablePath))
+        , Logger(ChaosElectionLogger()
+            .WithTag("GroupName", Options_->GroupName)
+            .WithTag("Path", Config_->LockTablePath))
+        , LeaseFactory_(New<TChaosLeaseFactory>(Client_, Config_->ChaosCellBundle))
         , LockAcquisitionExecutor_(New<TPeriodicExecutor>(
             Invoker_,
             BIND(&TChaosElectionManager::TryAcquireLock, MakeWeak(this)),
@@ -91,7 +140,7 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG("Starting chaos election manager");
+        YT_TLOG_DEBUG("Starting chaos election manager");
 
         IsActive_ = true;
 
@@ -102,7 +151,7 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG("Stopping chaos election manager");
+        YT_TLOG_DEBUG("Stopping chaos election manager");
 
         return BIND(&TChaosElectionManager::DoStop, MakeWeak(this))
             .AsyncVia(Invoker_)
@@ -120,7 +169,7 @@ public:
     {
         YT_ASSERT_THREAD_AFFINITY_ANY();
 
-        YT_LOG_DEBUG("Stopping leading");
+        YT_TLOG_DEBUG("Stopping leading");
 
         return BIND(&TChaosElectionManager::DoStopLeading, MakeWeak(this))
             .AsyncVia(Invoker_)
@@ -151,12 +200,13 @@ private:
     const IInvokerPtr Invoker_;
     const TLogger Logger;
 
+    const TChaosLeaseFactoryPtr LeaseFactory_;
     const TPeriodicExecutorPtr LockAcquisitionExecutor_;
     const TPeriodicExecutorPtr LeasePingExecutor_;
 
     IPrerequisitePtr Lease_;
 
-    NThreading::TAtomicObject<NPrerequisiteClient::TPrerequisiteId> PrerequisiteId_;
+    TAtomicObject<NPrerequisiteClient::TPrerequisiteId> PrerequisiteId_;
 
     std::atomic<bool> IsActive_ = false;
 
@@ -181,7 +231,8 @@ private:
         try {
             GuardedTryAcquireLock();
         } catch (const std::exception& ex) {
-            YT_LOG_INFO(ex, "Lock acquisition iteration failed");
+            YT_TLOG_INFO("Lock acquisition iteration failed")
+                .With(ex);
         }
     }
 
@@ -231,23 +282,25 @@ private:
                   && TInstant::Now() < *lastPingTime + *leaseTimeout;
 
                 if (timeoutIsActive) {
-                    YT_LOG_DEBUG(
-                        "Existing leader lease timeout is still active, backing off "
-                        "(LeaseId: %v, LastPingTime: %v, LeaseTimeout: %v)",
-                        existingLeaseId,
-                        lastPingTime,
-                        leaseTimeout);
+                    YT_TLOG_DEBUG("Existing leader lease timeout is still active, backing off")
+                        .With("LeaseId", existingLeaseId)
+                        .With("LastPingTime", lastPingTime)
+                        .With("LeaseTimeout", leaseTimeout);
                     WaitFor(transaction->Abort())
                         .ThrowOnError();
                     return;
                 }
 
                 try {
-                    auto existingLease = WaitFor(Client_->AttachChaosLease(*existingLeaseId))
+                    // NB: Probing must not prolong what it probes: attaching pings by default, and
+                    // a ping keeps the dead leader's lease alive while probes outrun its timeout.
+                    TChaosLeaseAttachOptions probeOptions;
+                    probeOptions.Ping = false;
+                    auto existingLease = WaitFor(Client_->AttachChaosLease(*existingLeaseId, probeOptions))
                         .ValueOrThrow();
 
-                    YT_LOG_DEBUG("Existing leader lease is alive (LeaseId: %v)",
-                        existingLeaseId);
+                    YT_TLOG_DEBUG("Existing leader lease is alive")
+                        .With("LeaseId", existingLeaseId);
 
                     WaitFor(transaction->Abort())
                         .ThrowOnError();
@@ -255,8 +308,8 @@ private:
                     return;
                 } catch (const TErrorException& ex) {
                     if (ex.Error().FindMatching(NYTree::EErrorCode::ResolveError)) {
-                        YT_LOG_DEBUG("Existing leader lease is dead, attempting takeover (LeaseId: %v)",
-                            existingLeaseId);
+                        YT_TLOG_INFO("Existing leader lease is dead, attempting takeover")
+                            .With("LeaseId", existingLeaseId);
                     } else {
                         throw;
                     }
@@ -264,9 +317,11 @@ private:
             }
         }
 
-        auto chaosLeaseId = CreateLeaseOnEnabledCell();
+        auto chaosLeaseId = WaitFor(LeaseFactory_->CreateLease(Config_->LeaseTimeout))
+            .ValueOrThrow();
 
-        YT_LOG_DEBUG("Created chaos lease (LeaseId: %v)", chaosLeaseId);
+        YT_TLOG_DEBUG("Created chaos lease")
+            .With("LeaseId", chaosLeaseId);
 
         TChaosLeaseAttachOptions leaseAttachOptions;
         leaseAttachOptions.Ping = true;
@@ -293,12 +348,13 @@ private:
 
         auto commitResultOrError = WaitFor(transaction->Commit());
         if (!commitResultOrError.IsOK()) {
-            YT_LOG_DEBUG(commitResultOrError, "Lock acquisition commit failed, will retry");
+            YT_TLOG_INFO("Lock acquisition commit failed, will retry")
+                .With(commitResultOrError);
             return;
         }
 
-        YT_LOG_DEBUG("Lock acquisition committed successfully (LeaseId: %v)",
-            lease->GetId());
+        YT_TLOG_INFO("Lock acquisition committed successfully")
+            .With("LeaseId", lease->GetId());
 
         Lease_ = std::move(lease);
 
@@ -310,43 +366,6 @@ private:
         LeasePingExecutor_->Start();
 
         OnLeadingStarted();
-    }
-
-    std::vector<TCellId> FetchMetadataCellIds()
-    {
-        auto path = Format("//sys/chaos_cell_bundles/%v/@metadata_cell_ids",
-            Config_->ChaosCellBundle);
-        auto result = WaitFor(Client_->GetNode(path))
-            .ValueOrThrow();
-        return ConvertTo<std::vector<TCellId>>(result);
-    }
-
-    TChaosLeaseId CreateLeaseOnEnabledCell()
-    {
-        auto cellIds = FetchMetadataCellIds();
-
-        for (auto cellId : cellIds) {
-            try {
-                auto leaseAttributes = CreateEphemeralAttributes();
-                leaseAttributes->Set("chaos_cell_id", cellId);
-                leaseAttributes->Set("timeout", Config_->LeaseTimeout);
-
-                TCreateObjectOptions createLeaseOptions;
-                createLeaseOptions.Attributes = std::move(leaseAttributes);
-                return WaitFor(Client_->CreateObject(EObjectType::ChaosLease, createLeaseOptions))
-                    .ValueOrThrow();
-            } catch (const TErrorException& ex) {
-                if (ex.Error().FindMatching(NChaosClient::EErrorCode::ChaosCellIsNotEnabled)) {
-                    YT_LOG_DEBUG("Chaos cell is not enabled, trying next (CellId: %v)",
-                        cellId);
-                    continue;
-                }
-                throw;
-            }
-        }
-
-        THROW_ERROR_EXCEPTION("No enabled chaos cell found in bundle %Qv",
-            Config_->ChaosCellBundle);
     }
 
     void PingLease()
@@ -364,9 +383,10 @@ private:
 
             UpdateLastPingTime(pingTime);
 
-            YT_LOG_DEBUG("Chaos lease pinged successfully");
+            YT_TLOG_DEBUG("Chaos lease pinged successfully");
         } catch (const std::exception& ex) {
-            YT_LOG_WARNING(ex, "Failed to ping chaos lease");
+            YT_TLOG_WARNING("Failed to ping chaos lease")
+                .With(ex);
         }
     }
 
@@ -407,11 +427,9 @@ private:
             }
 
             if (!rowLeaseId || *rowLeaseId != leaseId) {
-                YT_LOG_WARNING(
-                    "Lock row no longer references our lease, dropping leadership "
-                    "(OurLeaseId: %v, RowLeaseId: %v)",
-                    leaseId,
-                    rowLeaseId);
+                YT_TLOG_WARNING("Lock row no longer references our lease, dropping leadership")
+                    .With("OurLeaseId", leaseId)
+                    .With("RowLeaseId", rowLeaseId);
                 WaitFor(transaction->Abort())
                     .ThrowOnError();
                 YT_UNUSED_FUTURE(Lease_->Abort());
@@ -438,7 +456,8 @@ private:
             WaitFor(transaction->Commit())
                 .ThrowOnError();
         } catch (const std::exception& ex) {
-            YT_LOG_WARNING(ex, "Failed to update last ping time in lock table");
+            YT_TLOG_WARNING("Failed to update last ping time in lock table")
+                .With(ex);
         }
     }
 
@@ -446,8 +465,9 @@ private:
     {
         YT_ASSERT_INVOKER_AFFINITY(Invoker_);
 
-        YT_LOG_DEBUG(error, "Chaos lease aborted (LeaseId: %v)",
-            leaseId);
+        YT_TLOG_DEBUG("Chaos lease aborted")
+            .With("LeaseId", leaseId)
+            .With(error);
 
         if (!Lease_ || Lease_->GetId() != leaseId) {
             return;
@@ -464,14 +484,15 @@ private:
 
         PrerequisiteId_.Store(Lease_->GetId());
 
-        YT_LOG_DEBUG("Leading started (LeaseId: %v)",
-            Lease_->GetId());
+        YT_TLOG_DEBUG("Leading started")
+            .With("LeaseId", Lease_->GetId());
 
         try {
             TForbidContextSwitchGuard guard;
             LeadingStarted_.Fire();
         } catch (const std::exception& ex) {
-            YT_LOG_ALERT(ex, "Unexpected error occurred during leading start");
+            YT_TLOG_ALERT("Unexpected error occurred during leading start")
+                .With(ex);
         }
     }
 
@@ -488,7 +509,7 @@ private:
 
         IsActive_ = false;
 
-        YT_LOG_DEBUG("Election manager stopped");
+        YT_TLOG_DEBUG("Election manager stopped");
     }
 
     void DoStopLeading()
@@ -505,7 +526,7 @@ private:
         YT_ASSERT_INVOKER_AFFINITY(Invoker_);
 
         if (IsLeader()) {
-            YT_LOG_DEBUG("Leading ended");
+            YT_TLOG_DEBUG("Leading ended");
 
             PrerequisiteId_.Store(NPrerequisiteClient::TPrerequisiteId{});
 
@@ -513,7 +534,8 @@ private:
                 TForbidContextSwitchGuard guard;
                 LeadingEnded_.Fire();
             } catch (const std::exception& ex) {
-                YT_LOG_ALERT(ex, "Unexpected error occurred during leading end");
+                YT_TLOG_ALERT("Unexpected error occurred during leading end")
+                    .With(ex);
             }
         }
 

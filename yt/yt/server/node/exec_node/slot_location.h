@@ -20,7 +20,7 @@
 
 #include <yt/yt/library/profiling/producer.h>
 
-#include <library/cpp/yt/threading/atomic_object.h>
+#include <library/cpp/yt/system/atomic_object.h>
 
 namespace NYT::NExecNode {
 
@@ -39,8 +39,11 @@ public:
         IJobDirectoryManagerPtr jobDirectoryManager,
         int slotCount,
         std::function<int(int)> slotIndexToUserId);
+    ~TSlotLocation();
 
     TFuture<void> Initialize(IVolumeManagerPtr volumeManager = nullptr);
+
+    TFuture<void> BuildSlotRootDirectory(int slotIndex);
 
     TFuture<void> CreateFakeNonRootVolumes(
         const IVolumePtr& rootVolume,
@@ -50,11 +53,10 @@ public:
     //! Apply disk quotas.
     TFuture<void> PrepareSandboxDirectories(
         int slotIndex,
-        TUserSandboxOptions options,
-        bool ignoreQuota);
+        TUserSandboxOptions options);
 
-    //! Inform slot location about tmpfses to be used.
-    void TakeIntoAccountTmpfsVolumes(
+    //! Inform slot location about non-root volumes to be used.
+    void TakeIntoAccountNonRootVolumes(
         int slotIndex,
         const IVolumePtr& rootVolume,
         const std::vector<TVolumeResultPtr>& volumeResults,
@@ -100,7 +102,7 @@ public:
 
     TFuture<void> MakeConfig(int slotIndex, NYTree::INodePtr config);
 
-    TFuture<void> CleanSandboxes(int slotIndex);
+    TFuture<void> CleanSandboxes(int slotIndex, bool initializing = false);
 
     TFuture<void> CleanPortoPlace(int slotIndex);
 
@@ -122,7 +124,7 @@ public:
 
     NNodeTrackerClient::NProto::TSlotLocationStatistics GetSlotLocationStatistics() const;
 
-    void Disable(const TError& error);
+    void Disable(const TError& error, bool ignoreOutOfSpace = true);
 
     //! Returns the error that caused this location to be disabled,
     //! or OK if the location is enabled.
@@ -161,10 +163,11 @@ public:
     void RemoveVolumesFromPortoPlace(
         int slotIndex,
         const IVolumeManagerPtr& volumeManager,
-        const THashSet<std::string>& preservedVolumePaths = {});
+        const THashSet<std::string>& preservedVolumePaths = {},
+        bool initializing = false);
 
     //! Remove layers from porto place for a specific slot.
-    void RemoveLayersFromPortoPlace(int slotIndex, const IVolumeManagerPtr& volumeManager);
+    void RemoveLayersFromPortoPlace(int slotIndex, const IVolumeManagerPtr& volumeManager, bool initializing = false);
 
 private:
     const TSlotLocationConfigPtr Config_;
@@ -198,12 +201,12 @@ private:
 
     TAtomicIntrusivePtr<NChunkClient::TMediumDescriptor> MediumDescriptor_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SlotsLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SlotsLock_);
 
-    class TSandboxTmpfsData
+    class TNonRootVolumeRegistry
     {
     public:
-        bool IsInsideTmpfs(const std::string& path, const NLogging::TLogger& Logger) const;
+        std::optional<EVolumeType> IsInsideNonRootVolume(const std::string& path, const NLogging::TLogger& Logger) const;
         void AddSandboxPath(TAbsoluteNormalizedPath&& sandboxPath);
         void AddVolumeInfo(TAbsoluteNormalizedPath&& volumePath, EVolumeType volumeType);
 
@@ -212,33 +215,38 @@ private:
         std::map<TAbsoluteNormalizedPath, EVolumeType> VolumePathToType_;
     };
 
-    THashMap<int, TSandboxTmpfsData> SandboxTmpfsData_;
+    THashMap<int, TNonRootVolumeRegistry> NonRootVolumeRegistryPerSlot_;
     THashSet<int> SlotsWithQuota_;
     THashMap<int, TUserSandboxOptions> SandboxOptionsPerSlot_;
     THashMap<int, TDiskStatistics> DiskStatisticsPerSlot_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, DiskResourcesLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, DiskResourcesLock_);
     NNodeTrackerClient::NProto::TDiskLocationResources DiskResources_;
     THashMap<int, i64> ReservedDiskSpacePerSlot_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SlotLocationStatisticsLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SlotLocationStatisticsLock_);
     NNodeTrackerClient::NProto::TSlotLocationStatistics SlotLocationStatistics_;
 
     //! If location is disabled, this error contains the reason.
-    NThreading::TAtomicObject<TError> Error_;
+    TAtomicObject<TError> Error_;
 
-    NThreading::TAtomicObject<TError> Alert_;
+    TAtomicObject<TError> Alert_;
 
     const NProfiling::TProfiler Profiler_;
 
     const NProfiling::TGauge CopyRate_;
     const NProfiling::TGauge CopyRateEma_;
+    const NProfiling::TCounter EnospcRate_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, CopyRateAggregatorLock_);
+    class TGaugeGrid;
+    const std::unique_ptr<TGaugeGrid> CopyRateGrid_;
+
+    YT_DECLARE_SPIN_LOCK(TSpinLock, CopyRateAggregatorLock_);
     TAverageAdjustedExponentialMovingAverage CopyRateAggregator_;
 
     static void ValidateNotExists(const std::string& path);
 
+    std::optional<NExecNode::EVolumeType> IsInsideNonRootVolume(int slotIndex, const std::string& path) const;
     bool IsInsideTmpfs(int slotIndex, const std::string& path) const;
 
     void EnsureNotInUse(const std::string& path) const;
@@ -270,10 +278,9 @@ private:
     void DoPrepareSandboxDirectories(
         int slotIndex,
         TUserSandboxOptions options,
-        bool ignoreQuota,
         bool sandboxInsideNonRootVolume);
 
-    void BuildSlotRootDirectory(int slotIndex);
+    void DoBuildSlotRootDirectory(int slotIndex);
 
     NTools::TRootDirectoryConfigPtr CreateDefaultRootDirectoryConfig(
         int slotIndex,

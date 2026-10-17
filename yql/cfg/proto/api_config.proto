@@ -21,6 +21,15 @@ message TClickHouseConfig {
     optional TClickHouseRunnerConfig Runner = 6;
 }
 
+message TKikimrMvpConfig {
+    optional uint32 CacheTtlSeconds = 1 [default = 30];
+    // Age of accepted data after which a valid response bypasses the size check; errors never replace data.
+    // Zero disables size-based rejection.
+    optional uint32 CacheUpdateHardLimitSeconds = 2 [default = 900];
+    // Minimum new database count as a percentage of the cached count, within [0, 100].
+    optional uint32 CacheUpdateMinSizePercent = 3 [default = 50];
+}
+
 message THttpServerConfig {
     optional string Bind = 1;
     optional uint32 Port = 2;
@@ -295,6 +304,8 @@ message TQtRunnerConfig {
     optional uint32 QtTaskPollingIntervalMs = 11;
     optional uint32 QtTaskStatusUpdateIntervalMs = 12;
     optional uint32 QtTaskAbortTimeoutMs = 13;
+    optional uint32 YtClientPoolIdleTtlSeconds = 14 [default = 127];
+    optional uint32 YtClientPoolMaxIdleClients = 15 [default = 256];
 
 }
 
@@ -318,6 +329,7 @@ message TApiConfig {
     optional TAbcSyncConfig Abc = 16;
     optional TTvmConfig DelegationTvm = 17;
     optional TQtRunnerConfig QtRunner = 18;
+    optional TKikimrMvpConfig KikimrMvp = 19;
 
     // misc options
     optional string SystemYqlUsername = 100;
@@ -389,4 +401,5 @@ message TFeatureFlagsConfig {
     optional bool SpytEnabled = 22 [default = true];
     optional bool ChytExecuteInQt = 23 [default = false];
     optional bool TablesIssuesErrors = 24 [default = false];
+    optional bool QuerySoftDelete = 25 [default = false];
 }

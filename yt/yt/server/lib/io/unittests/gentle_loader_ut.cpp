@@ -22,7 +22,7 @@ using namespace NConcurrency;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "GentleLoadTest");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, Logger, "GentleLoadTest");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -35,21 +35,21 @@ public:
         auto tmpName = MakeTempName();
         NFs::Remove(tmpName);
         Name_ = tmpName;
-        Y_ENSURE(NFs::MakeDirectory(TString(Name_)));
+        Y_ENSURE(NFs::MakeDirectory(Name_));
     }
 
     ~TTempDirectory()
     {
-        NFs::RemoveRecursive(TString(Name_));
+        NFs::RemoveRecursive(Name_);
     }
 
-    const std::string& GetName() const
+    std::string GetName() const
     {
-        return Name_;
+        return std::string(Name_);
     }
 
 private:
-    std::string Name_;
+    TString Name_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -256,6 +256,11 @@ public:
         return EDirectIOPolicy::Never;
     }
 
+    EDirectIOPolicy UseDirectIOForWrites() const override
+    {
+        return EDirectIOPolicy::Never;
+    }
+
     bool IsInFlightRequestLimitExceeded() const override
     {
         return false;
@@ -371,9 +376,9 @@ protected:
             auto roundResult = WaitForFast(queue->Dequeue())
                 .ValueOrThrow();
             result.push_back(roundResult);
-            YT_LOG_INFO("Next congested step (Index: %v, IOPS: %v)",
-                index,
-                roundResult);
+            YT_TLOG_INFO("Next congested step")
+                .With("Index", index)
+                .With("IOPS", roundResult);
         }
 
         gentleLoader->Stop();

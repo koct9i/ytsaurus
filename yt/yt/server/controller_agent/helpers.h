@@ -198,10 +198,42 @@ void ValidateAndEnrichVolumeSpec(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void ToProto(
+void BuildVolumeSpec(
     NControllerAgent::NProto::TVolume* volumeProto,
     const NScheduler::TVolume& volume,
     const THashMap<TStringBuf, const NControllerAgent::TUserFile*>& layerPathToUserFile);
+
+void BuildTmpfsVolumeSpec(
+    NControllerAgent::NProto::TTmpfsVolume* protoTmpfsVolume,
+    const NScheduler::TTmpfsVolumeConfig& tmpfsVolumeConfig);
+
+void BuildChunkNbdDiskSpec(
+    NScheduler::NProto::TChunkNbdDisk* protoChunkNbdDisk,
+    const NScheduler::TNbdDiskConfig& nbdDiskConfig);
+
+void BuildNbdDiskRequestSpec(
+    NScheduler::NProto::TNbdDiskRequest* protoDiskRequestConfig,
+    const NScheduler::TNbdDiskRequest& diskRequestConfig);
+
+void BuildLocalDiskRequestSpec(
+    NScheduler::NProto::TLocalDiskRequest* protoDiskRequestConfig,
+    const NScheduler::TLocalDiskRequest& diskRequestConfig);
+
+void BuildCommonDiskRequestSpec(
+    NScheduler::NProto::TDiskRequest* protoDiskRequestConfig,
+    const NScheduler::TDiskRequestConfig& diskRequestConfig);
+
+void BuildTmpfsStorageRequestSpec(
+    NScheduler::NProto::TTmpfsStorageRequest* protoDiskRequestConfig,
+    const NScheduler::TTmpfsStorageRequest& diskRequestConfig);
+
+void BuildCommonStorageRequestSpec(
+    NScheduler::NProto::TStorageRequestCommonParameters* protoDiskRequestConfig,
+    const NScheduler::TStorageRequestBase& diskRequestConfig);
+
+////////////////////////////////////////////////////////////////////////////////
+
+bool IsDiskRequestTmpfs(const std::optional<NScheduler::TStorageRequestConfig>& diskRequest);
 
 ////////////////////////////////////////////////////////////////////////////////
 

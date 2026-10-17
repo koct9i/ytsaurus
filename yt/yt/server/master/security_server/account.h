@@ -15,7 +15,7 @@
 
 #include <yt/yt/core/yson/public.h>
 
-#include <yt/yt/core/misc/property.h>
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NSecurityServer {
 
@@ -29,6 +29,8 @@ struct TAccountStatistics
     void Persist(const NCellMaster::TPersistenceContext& context);
 
     bool operator==(const TAccountStatistics&) const = default;
+
+    bool IsPersistentlyEmpty() const;
 
     static const TAccountStatistics Empty;
 };

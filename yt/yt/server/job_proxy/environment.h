@@ -153,9 +153,11 @@ struct TUserJobEnvironmentOptions
 
     NContainers::EEnablePorto EnablePorto = NContainers::EEnablePorto::None;
 
-    i64 ThreadLimit;
+    //! Non-root UID to which the trusted executor switches before executing
+    //! user code. Its presence also requires starting the executor as root.
+    std::optional<int> TargetUserId;
 
-    bool EnableRootVolumeDiskQuota = false;
+    i64 ThreadLimit;
 
     //! Allowed places for creation of volumes and layers. "***" means any place.
     std::vector<std::string> Places;
@@ -236,6 +238,7 @@ DEFINE_REFCOUNTED_TYPE(IJobProxyEnvironment)
 IJobProxyEnvironmentPtr CreateJobProxyEnvironment(
     const TJobProxyInternalConfigPtr& config,
     IInvokerPtr invoker,
+    const std::string& jobProxyPreparationPath,
     const std::string& jobProxySlotPath,
     std::function<void(TError)> failedSidecarCallback);
 

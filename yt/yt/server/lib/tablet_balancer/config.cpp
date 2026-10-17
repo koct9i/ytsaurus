@@ -10,6 +10,8 @@ void TFeatureFlagConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("enable_smooth_movement", &TThis::EnableSmoothMovement)
         .Default();
+    registrar.Parameter("enable_smooth_movement_for_ordered", &TThis::EnableSmoothMovementForOrdered)
+        .Default();
     registrar.Parameter("enable_inplace_split", &TThis::EnableInplaceSplit)
         .Default();
     registrar.Parameter("enable_inplace_merge", &TThis::EnableInplaceMerge)
@@ -77,6 +79,11 @@ TComponentFactorConfigPtr TComponentFactorConfig::MergeWith(
 
 ////////////////////////////////////////////////////////////////////////////////
 
+std::vector<std::string> TParameterizedBalancingConfig::GetMetrics() const
+{
+    return !Metrics.empty() || Metric.empty() ? Metrics : std::vector{Metric};
+}
+
 void TParameterizedBalancingConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("enable_reshard", &TThis::EnableReshard)
@@ -84,6 +91,8 @@ void TParameterizedBalancingConfig::Register(TRegistrar registrar)
     registrar.Parameter("per_table_uniform", &TThis::PerTableUniform)
         .Default();
     registrar.Parameter("metric", &TThis::Metric)
+        .Default();
+    registrar.Parameter("metrics", &TThis::Metrics)
         .Default();
     registrar.Parameter("max_action_count", &TThis::MaxActionCount)
         .Default()
@@ -100,6 +109,9 @@ void TParameterizedBalancingConfig::Register(TRegistrar registrar)
     registrar.Parameter("min_relative_metric_improvement", &TThis::MinRelativeMetricImprovement)
         .Default()
         .GreaterThanOrEqual(0);
+    registrar.Parameter("min_tablets_per_move_recomputation_worker", &TThis::MinTabletsPerMoveRecomputationWorker)
+        .Default()
+        .GreaterThan(0);
     registrar.Parameter("replica_clusters", &TThis::ReplicaClusters)
         .Default();
     registrar.Parameter("factors", &TThis::Factors)
@@ -115,6 +127,11 @@ void TParameterizedBalancingConfig::Register(TRegistrar registrar)
         auto replicaClustersUnique = THashSet<TClusterName>(config->ReplicaClusters.begin(), config->ReplicaClusters.end());
         if (std::ssize(replicaClustersUnique) != std::ssize(config->ReplicaClusters)) {
             THROW_ERROR_EXCEPTION("\"replica_clusters\" must contain unique cluster names");
+        }
+
+        if (config->Metrics.size() > MaxMetricCount) {
+            THROW_ERROR_EXCEPTION("At most %v metrics can be set",
+                MaxMetricCount);
         }
     });
 }

@@ -16,14 +16,15 @@
 #include <yt/yt/server/master/object_server/type_handler_detail.h>
 
 #include <yt/yt/server/master/security_server/account.h>
-#include <yt/yt/server/master/security_server/detailed_master_memory.h>
 #include <yt/yt/server/master/security_server/security_manager.h>
 
 #include <yt/yt/server/master/tablet_server/tablet_cell_bundle.h>
 
 #include <yt/yt/server/lib/misc/interned_attributes.h>
 
-#include <yt/yt/ytlib/sequoia_client/transaction.h>
+#include <yt/yt/server/lib/security_server/public.h>
+
+#include <yt/yt/ytlib/sequoia_client/public.h>
 
 #include <yt/yt/ytlib/sequoia_client/records/path_to_node_id.record.h>
 
@@ -175,9 +176,8 @@ public:
     void SetReachable(TCypressNode* node) override
     {
         const auto& Logger = CypressServerLogger;
-        YT_LOG_ALERT_IF(node->GetReachable(),
-            "Node is already reachable (NodeId: %v)",
-            node->GetVersionedId());
+        YT_TLOG_ALERT_IF(node->GetReachable(), "Node is already reachable")
+            .With("NodeId", node->GetVersionedId());
 
         node->SetReachable(true);
 
@@ -192,9 +192,8 @@ public:
     void SetUnreachable(TCypressNode* node) override
     {
         const auto& Logger = CypressServerLogger;
-        YT_LOG_ALERT_IF(!node->GetReachable(),
-            "Node is already unreachable (NodeId: %v)",
-            node->GetVersionedId());
+        YT_TLOG_ALERT_IF(!node->GetReachable(), "Node is already unreachable")
+            .With("NodeId", node->GetVersionedId());
 
         node->SetReachable(false);
 
@@ -430,12 +429,11 @@ protected:
         const TLockRequest& lockRequest)
     {
         const auto& Logger = CypressServerLogger;
-        YT_LOG_DEBUG(
-            "Node branched (OriginatingNodeId: %v, BranchedNodeId: %v, Mode: %v, LockTimestamp: %v)",
-            originatingNode->GetVersionedId(),
-            branchedNode->GetVersionedId(),
-            lockRequest.Mode,
-            lockRequest.Timestamp);
+        YT_TLOG_DEBUG("Node branched")
+            .With("OriginatingNodeId", originatingNode->GetVersionedId())
+            .With("BranchedNodeId", branchedNode->GetVersionedId())
+            .With("Mode", lockRequest.Mode)
+            .With("LockTimestamp", lockRequest.Timestamp);
     }
 
     virtual void DoMerge(TImpl* /*originatingNode*/, TImpl* /*branchedNode*/)
@@ -450,10 +448,9 @@ protected:
         TImpl* branchedNode)
     {
         const auto& Logger = CypressServerLogger;
-        YT_LOG_DEBUG(
-            "Node merged (OriginatingNodeId: %v, BranchedNodeId: %v)",
-            originatingNode->GetVersionedId(),
-            branchedNode->GetVersionedId());
+        YT_TLOG_DEBUG("Node merged")
+            .With("OriginatingNodeId", originatingNode->GetVersionedId())
+            .With("BranchedNodeId", branchedNode->GetVersionedId());
     }
 
     virtual void DoUnbranch(
@@ -791,6 +788,8 @@ public:
 
     // Potentially does the 'copy' part of CoW.
     TChildren& MutableChildren();
+
+    const TChildren* GetChildren() const;
 
     NYTree::ENodeType GetNodeType() const override;
 

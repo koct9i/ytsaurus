@@ -552,19 +552,19 @@ class YtClient(ClientState):
         self,
         source_path: Union[str, YPath],
         destination_path: Union[str, YPath],
-        recursive: bool = None,
-        force: bool = None,
-        ignore_existing: bool = None,
-        lock_existing: bool = None,
-        preserve_account: bool = None,
-        preserve_owner: bool = None,
-        preserve_acl: bool = None,
-        preserve_expiration_time: bool = None,
-        preserve_expiration_timeout: bool = None,
-        preserve_creation_time: bool = None,
-        preserve_modification_time: bool = None,
-        pessimistic_quota_check: bool = None,
-        enable_cross_cell_copying: bool = None
+        recursive: Optional[bool] = None,
+        force: Optional[bool] = None,
+        ignore_existing: Optional[bool] = None,
+        lock_existing: Optional[bool] = None,
+        preserve_account: Optional[bool] = None,
+        preserve_owner: Optional[bool] = None,
+        preserve_acl: Optional[bool] = None,
+        preserve_expiration_time: Optional[bool] = None,
+        preserve_expiration_timeout: Optional[bool] = None,
+        preserve_creation_time: Optional[bool] = None,
+        preserve_modification_time: Optional[bool] = None,
+        pessimistic_quota_check: Optional[bool] = None,
+        enable_cross_cell_copying: Optional[bool] = None
     ):
         """
         Copies Cypress node.
@@ -605,8 +605,8 @@ class YtClient(ClientState):
         path: Union[str, YPath, None] = None,
         recursive: bool = False,
         ignore_existing: bool = False,
-        lock_existing: bool = None,
-        force: bool = None,
+        lock_existing: Optional[bool] = None,
+        force: Optional[bool] = None,
         attributes: Optional[Dict[str, Any]] = None,
         ignore_type_mismatch: bool = False
     ):
@@ -951,8 +951,8 @@ class YtClient(ClientState):
         self,
         path: Union[str, YPath],
         read_from: str = None,
-        cache_sticky_group_size: int = None,
-        suppress_transaction_coordinator_sync: bool = None
+        cache_sticky_group_size: Optional[int] = None,
+        suppress_transaction_coordinator_sync: Optional[bool] = None
     ):
         """
         Checks if Cypress node exists.
@@ -1757,7 +1757,7 @@ class YtClient(ClientState):
         link_path: Union[str, YPath],
         recursive: bool = False,
         ignore_existing: bool = False,
-        lock_existing: bool = None,
+        lock_existing: Optional[bool] = None,
         force: bool = False,
         attributes: Optional[Dict[str, Any]] = None
     ):
@@ -1787,13 +1787,13 @@ class YtClient(ClientState):
         path: Union[str, YPath],
         max_size: Optional[int] = None,
         format: Optional[Format] = None,
-        absolute: bool = None,
+        absolute: Optional[bool] = None,
         attributes: Union[List[str], Tuple, None] = None,
         sort: bool = True,
         read_from=None,
-        cache_sticky_group_size: int = None,
-        suppress_transaction_coordinator_sync: bool = None,
-        suppress_upstream_sync: bool = None
+        cache_sticky_group_size: Optional[int] = None,
+        suppress_transaction_coordinator_sync: Optional[bool] = None,
+        suppress_upstream_sync: Optional[bool] = None
     ):
         """
         Lists directory (map_node) content. Node type must be "map_node".
@@ -2003,7 +2003,7 @@ class YtClient(ClientState):
         table, input_stream,
         timestamp=None, column_names=None, keep_missing_rows=None, enable_partial_result=None, use_lookup_cache=None,
         format=None, raw=None, versioned=None, retention_timestamp=None, versioned_read_options=None,
-        with_timestamps=None, read_from=None
+        with_timestamps=None, read_from=None, replica_consistency=None
     ):
         """
         Lookups rows in dynamic table.
@@ -2014,6 +2014,8 @@ class YtClient(ClientState):
         :type format: str or descendant of :class:`Format <yt.wrapper.format.Format>`
         :param bool raw: don't parse response to rows.
         :param bool versioned: return all versions of the requested rows.
+        :param replica_consistency: requested read consistency for chaos replicas.
+        :type replica_consistency: EReplicaConsistency
         """
         return client_api.lookup_rows(
             table, input_stream,
@@ -2021,13 +2023,13 @@ class YtClient(ClientState):
             timestamp=timestamp, column_names=column_names, keep_missing_rows=keep_missing_rows,
             enable_partial_result=enable_partial_result, use_lookup_cache=use_lookup_cache, format=format,
             raw=raw, versioned=versioned, retention_timestamp=retention_timestamp, versioned_read_options=versioned_read_options,
-            with_timestamps=with_timestamps, read_from=read_from
+            with_timestamps=with_timestamps, read_from=read_from, replica_consistency=replica_consistency
         )
 
     def mkdir(
         self,
         path: Union[str, YPath],
-        recursive: bool = None
+        recursive: Optional[bool] = None
     ):
         """
         Makes directory (Cypress node of map_node type).
@@ -2072,17 +2074,17 @@ class YtClient(ClientState):
         self,
         source_path: Union[str, YPath],
         destination_path: Union[str, YPath],
-        recursive: bool = None,
-        force: bool = None,
-        preserve_account: bool = None,
-        preserve_owner: bool = None,
-        preserve_acl: bool = None,
-        preserve_expiration_time: bool = None,
-        preserve_expiration_timeout: bool = None,
-        preserve_creation_time: bool = None,
-        preserve_modification_time: bool = None,
-        pessimistic_quota_check: bool = None,
-        enable_cross_cell_copying: bool = None
+        recursive: Optional[bool] = None,
+        force: Optional[bool] = None,
+        preserve_account: Optional[bool] = None,
+        preserve_owner: Optional[bool] = None,
+        preserve_acl: Optional[bool] = None,
+        preserve_expiration_time: Optional[bool] = None,
+        preserve_expiration_timeout: Optional[bool] = None,
+        preserve_creation_time: Optional[bool] = None,
+        preserve_modification_time: Optional[bool] = None,
+        pessimistic_quota_check: Optional[bool] = None,
+        enable_cross_cell_copying: Optional[bool] = None
     ):
         """
         Moves (renames) Cypress node.
@@ -2520,7 +2522,7 @@ class YtClient(ClientState):
         self,
         cookie: bytes,
         format: Union[str, Format, None] = None,
-        raw: bool = None
+        raw: Optional[bool] = None
     ):
         """
         Read table partition by cookie.
@@ -2737,7 +2739,7 @@ class YtClient(ClientState):
         self,
         path,
         pivot_keys=None, tablet_count=None, first_tablet_index=None, last_tablet_index=None, uniform=None,
-        enable_slicing=None, slicing_accuracy=None, trimmed_row_counts=None, sync=False
+        enable_slicing=None, slicing_accuracy=None, trimmed_row_counts=None, sync=False, cumulative_data_weights=None
     ):
         """
         Changes pivot keys separating tablets of a given table.
@@ -2759,13 +2761,15 @@ class YtClient(ClientState):
         :param List[int] trimmed_row_counts: new initial tirmmed row counts
         for the new tablets of the ordered table.
         :param bool sync: wait for completion.
+        :param List[int] cumulative_data_weights: new initial cumulative data weights
+        for the new tablets of the ordered table.
         """
         return client_api.reshard_table(
             path,
             client=self,
             pivot_keys=pivot_keys, tablet_count=tablet_count, first_tablet_index=first_tablet_index,
             last_tablet_index=last_tablet_index, uniform=uniform, enable_slicing=enable_slicing, slicing_accuracy=slicing_accuracy,
-            trimmed_row_counts=trimmed_row_counts, sync=sync
+            trimmed_row_counts=trimmed_row_counts, sync=sync, cumulative_data_weights=cumulative_data_weights
         )
 
     def reshard_table_automatic(
@@ -3330,8 +3334,8 @@ class YtClient(ClientState):
         object_filter: Callable[[Any], bool] = None, subtree_filter: Callable[[str, Any], bool] = None,
         map_node_order: Callable[[str, List[Any]], List[int]] = _MapOrderSorted(), list_node_order: Callable[[str, List[Any]], List[int]] = None,  # noqa
         attributes: Union[List[str], Tuple, None] = None, exclude: Union[List[str], Tuple, None] = None,
-        depth_bound: int = None, follow_links: bool = False, read_from: Literal["cache"] = None, cache_sticky_group_size: int = None,  # noqa
-        enable_batch_mode: bool = None
+        depth_bound: Optional[int] = None, follow_links: bool = False, read_from: Literal["cache"] = None,
+        cache_sticky_group_size: Optional[int] = None, enable_batch_mode: Optional[bool] = None
     ):
         """
         Searches for some nodes in Cypress subtree.
@@ -3372,7 +3376,7 @@ class YtClient(ClientState):
         raw=None, execution_pool=None, response_parameters=None, retention_timestamp=None, placeholder_values=None,
         use_canonical_null_relations=None, merge_versioned_rows=None, syntax_version=None, versioned_read_options=None,
         with_timestamps=None, udf_registry_path=None, use_lookup_cache=None, execution_backend=None,
-        expression_builder_version=None, read_from=None
+        expression_builder_version=None, read_from=None, replica_consistency=None
     ):
         """
         Executes a SQL-like query on dynamic table.
@@ -3384,6 +3388,8 @@ class YtClient(ClientState):
         :param format: output format.
         :type format: str or descendant of :class:`Format <yt.wrapper.format.Format>`
         :param bool raw: don't parse response to rows.
+        :param replica_consistency: requested read consistency for chaos replicas.
+        :type replica_consistency: EReplicaConsistency
         """
         return client_api.select_rows(
             query,
@@ -3397,7 +3403,7 @@ class YtClient(ClientState):
             merge_versioned_rows=merge_versioned_rows, syntax_version=syntax_version, versioned_read_options=versioned_read_options,
             with_timestamps=with_timestamps, udf_registry_path=udf_registry_path, use_lookup_cache=use_lookup_cache,
             execution_backend=execution_backend, expression_builder_version=expression_builder_version,
-            read_from=read_from
+            read_from=read_from, replica_consistency=replica_consistency
         )
 
     def set(
@@ -3406,9 +3412,9 @@ class YtClient(ClientState):
         value,
         format=None,
         recursive: bool = False,
-        force: bool = None,
-        suppress_transaction_coordinator_sync: bool = None,
-        suppress_upstream_sync: bool = None
+        force: Optional[bool] = None,
+        suppress_transaction_coordinator_sync: Optional[bool] = None,
+        suppress_upstream_sync: Optional[bool] = None
     ):
         """
         Sets new value to Cypress node.

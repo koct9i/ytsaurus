@@ -3,7 +3,7 @@
 #include <util/system/file.h>
 
 #include <contrib/ydb/library/actors/core/actor.h>
-#include <contrib/ydb/library/yql/providers/dq/config/config.pb.h>
+#include <yt/yql/providers/dq/config/config.pb.h>
 
 #include <contrib/ydb/library/yql/providers/dq/task_runner/file_cache.h>
 #include <yql/essentials/providers/common/metrics/metrics_registry.h>
@@ -15,13 +15,16 @@
 namespace NYql {
     namespace NCommonJobVars {
         extern const TString ACTOR_PORT;
+        extern const TString GRPC_PORT;
         extern const TString ACTOR_NODE_ID;
+        extern const TString LOG_LEVEL;
         extern const TString ADDRESS_RESOLVER_CONFIG;
         extern const TString UDFS_PATH;
         extern const TString OPERATION_SIZE;
         extern const TString YT_COORDINATOR;
         extern const TString YT_BACKEND;
         extern const TString YT_FORCE_IPV4;
+        extern const TString DQ_CLIQUE_ALIAS;
     }
 
     class ICoordinationHelper;
@@ -30,6 +33,7 @@ namespace NYql {
     {
         TString ObjectId;
         TString LocalFileName;
+        TString ContentMd5;
         TMaybe<TString> RemoteFileName;
         THashMap<TString, TString> Attributes;
         TFile File;
@@ -84,10 +88,13 @@ namespace NYql {
         TMaybe<TString> KeepFilter;
 
         TMaybe<TString> AnnounceClusterName;
+
+        TDuration TickInterval = TDuration::Seconds(5);
     };
 
     NActors::IActor* CreateResourceManager(const TResourceManagerOptions& options, const TIntrusivePtr<ICoordinationHelper>& coordinator);
 
+    // Clique-only clients can use CreateUploadCoordinationHelper.
     NActors::IActor* CreateResourceUploader(const TResourceManagerOptions& options, const TIntrusivePtr<ICoordinationHelper>& coordinator);
 
     NActors::IActor* CreateResourceDownloader(const TResourceManagerOptions& options, const TIntrusivePtr<ICoordinationHelper>& coordinator);

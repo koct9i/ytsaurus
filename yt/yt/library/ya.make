@@ -12,6 +12,7 @@ RECURSE(
     coredumper
     cypress_election
     decimal
+    discovery_client
     disk_manager
     dns_over_rpc
     dynamic_config
@@ -28,6 +29,7 @@ RECURSE(
     lock_election
     min_hash_digest
     monitoring
+    nbd
     numeric
     oom
     orchid
@@ -43,6 +45,7 @@ RECURSE(
     safe_assert
     server_program
     signals
+    signature
     skiff_ext
     sparse_coredump
     stockpile
@@ -54,7 +57,6 @@ RECURSE(
     vector_hdrf
     web_assembly
     xor_filter
-    yaml_helpers
 )
 
 IF (OS_LINUX)

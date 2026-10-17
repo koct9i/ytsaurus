@@ -135,7 +135,20 @@ func DoClickhouseHTTPRequestWithRedirectAndPreserveAuthorization(urlStr string, 
 	return
 }
 
-func DoClickhouseQuery[T any](chytCluster, chytAlias, query string, settings map[string]string, ytTokenEnvVariable string) (result []T, err error) {
+func buildChytUrl(chytClusterProxy, chytAlias, paramsStr string) (string, error) {
+	ytConfig := yt.Config{
+		Proxy: chytClusterProxy,
+	}
+	clusterUrl, err := ytConfig.GetClusterURL()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve CHYT cluster URL: %w", err)
+	}
+
+	return fmt.Sprintf("%s://%s/query?database=*%s&%s",
+		clusterUrl.Scheme, clusterUrl.Address, chytAlias, paramsStr), nil
+}
+
+func DoClickhouseQuery[T any](chytCluster, chytAlias, query string, settings map[string]string, ytTokenEnvVariable string) ([]T, error) {
 	var params []string
 	for k, v := range settings {
 		param := fmt.Sprintf("%s=%s", k, url.QueryEscape(v))
@@ -145,10 +158,13 @@ func DoClickhouseQuery[T any](chytCluster, chytAlias, query string, settings map
 	params = append(params, "output_format_json_quote_64bit_integers=0")
 	paramsStr := strings.Join(params, "&")
 
-	url := buildChytUrl(chytCluster, chytAlias, paramsStr)
+	url, err := buildChytUrl(chytCluster, chytAlias, paramsStr)
+	if err != nil {
+		return nil, err
+	}
 	body, err := DoClickhouseHTTPRequestWithRedirectAndPreserveAuthorization(url, []byte(query), ytTokenEnvVariable)
 	if err != nil {
-		return
+		return nil, err
 	}
 	return ReadClickhouseResponse[T](body)
 }
@@ -421,13 +437,10 @@ func RunServer(cmd *cobra.Command, args []string) {
 
 	port := ytmsvc.Must(cmd.Flags().GetUint16("port"))
 
-	corsConfig := ytmsvc.CORSConfig{
-		AllowedHosts:        ytmsvc.Must(cmd.Flags().GetStringSlice("allowed-hosts")),
-		AllowedHostSuffixes: ytmsvc.Must(cmd.Flags().GetStringSlice("allowed-host-suffixes")),
-	}
+	corsConfig := newCORSConfigFromCmd(cmd)
 
 	addr := fmt.Sprintf(":%v", port)
-	router := GetRouterHandler(chytCluster, chytAlias, snapshotRoot, ytTokenEnvVariable, logsTimezone, authorizer, &corsConfig)
+	router := GetRouterHandler(chytCluster, chytAlias, snapshotRoot, ytTokenEnvVariable, logsTimezone, authorizer, corsConfig)
 
 	ytmsvc.Must0(http.ListenAndServe(addr, router))
 }

@@ -31,6 +31,7 @@
 
 #include <yt/yt/core/logging/log.h>
 
+#include <yt/yt/core/rpc/response_keeper.h>
 #include <yt/yt/core/rpc/roaming_channel.h>
 
 #include <yt/yt/core/ytree/convert.h>
@@ -64,11 +65,7 @@ namespace NDetail {
 
 constexpr int MaxAccessControlObjectsPerQuery = 10;
 
-// Path to access control object namespace for QT.
-const NYPath::TYPath QueriesAcoNamespacePath = "//sys/access_control_object_namespaces/queries";
-
 static const TYsonString EmptyMap = TYsonString(TString("{}"));
-static const std::string CompressedEmptyMap = Compress(EmptyMap.ToString(), MaxDyntableStringSize);
 
 //! Lookup one of query tracker state tables by query id.
 template <class TRecordDescriptor>
@@ -114,7 +111,7 @@ TFuture<typename TRecordDescriptor::TRecordPartial> LookupQueryTrackerRecord(
     return asyncRecord;
 };
 
-ESecurityAction CheckAccessControl(
+ESecurityAction CheckQueryAccessControl(
     const std::string& user,
     const std::optional<TYsonString>& accessControlObjects,
     const std::string& queryAuthor,
@@ -125,35 +122,7 @@ ESecurityAction CheckAccessControl(
         return ESecurityAction::Allow;
     }
 
-    auto userSubjects = GetUserSubjects(user, client);
-    if (userSubjects.contains(NSecurityClient::SuperusersGroupName)) {
-        return NSecurityClient::ESecurityAction::Allow;
-    }
-
-    auto accessControlObjectList = ConvertTo<std::optional<std::vector<std::string>>>(accessControlObjects);
-    if (!accessControlObjectList) {
-        return NSecurityClient::ESecurityAction::Deny;
-    }
-
-    TCheckPermissionOptions checkPermissionOptions;
-    checkPermissionOptions.ReadFrom = EMasterChannelKind::Cache;
-    checkPermissionOptions.SuccessStalenessBound = TDuration::Minutes(1);
-    for (const auto& accessControlObject : *accessControlObjectList) {
-        auto path = Format(
-            "%v/%v/principal",
-            QueriesAcoNamespacePath,
-            NYPath::ToYPathLiteral(accessControlObject));
-
-        auto securityAction = WaitFor(client->CheckPermission(user, path, permission, checkPermissionOptions))
-            .ValueOrThrow()
-            .Action;
-
-        if (securityAction == NSecurityClient::ESecurityAction::Allow) {
-            return NSecurityClient::ESecurityAction::Allow;
-        }
-    }
-
-    return NSecurityClient::ESecurityAction::Deny;
+    return CheckAccessControl(user, accessControlObjects, client, permission);
 }
 
 void ThrowAccessDeniedException(
@@ -167,9 +136,53 @@ void ThrowAccessDeniedException(
         "Access denied to query %v due to missing %Qv permission",
         queryId,
         permission)
-        << TErrorAttribute("user", user)
-        << TErrorAttribute("access_control_objects", accessControlObjects)
-        << TErrorAttribute("query_author", queryAuthor);
+        .With("user", user)
+        .With("access_control_objects", accessControlObjects)
+        .With("query_author", queryAuthor);
+}
+
+TYsonString GetQueryProgressFromParts(
+    TQueryId queryId,
+    const IClientPtr& client,
+    const NYPath::TYPath& root,
+    TTimestamp timestamp,
+    const std::vector<std::string>& progressParts,
+    std::optional<ui32> minRevision)
+{
+    NQueryClient::TQueryBuilder builder;
+    auto placeholdersFluentMap = BuildYsonNodeFluently().BeginMap();
+
+    builder.SetSource(root + "/query_progresses");
+    builder.AddSelectExpression("[part_name]");
+    builder.AddSelectExpression("[part_value]");
+
+    builder.AddWhereConjunct("[query_id] = {QueryId}");
+    placeholdersFluentMap.Item("QueryId").Value(queryId);
+
+    if (minRevision && *minRevision > 0) {
+        builder.AddWhereConjunct("[revision] >= {MinRevision}");
+        placeholdersFluentMap.Item("MinRevision").Value(*minRevision);
+    }
+
+    if (!progressParts.empty()) {
+        builder.AddWhereConjunct("[part_name] IN {ProgressParts}");
+        placeholdersFluentMap.Item("ProgressParts").Value(progressParts);
+    }
+
+    auto query = builder.Build();
+    TSelectRowsOptions options;
+    options.Timestamp = timestamp;
+    options.PlaceholderValues = ConvertToYsonString(placeholdersFluentMap.EndMap());
+    auto selectResult = WaitFor(client->SelectRows(query, options))
+        .ValueOrThrow();
+    auto parts = ToRecords<TQueryProgressPartial>(selectResult.Rowset);
+
+    return BuildYsonStringFluently()
+        .BeginMap()
+            .DoFor(parts, [&] (TFluentMap fluent, const TQueryProgressPartial& part) {
+                fluent.Item(part.Key.PartName).Value(TYsonString(Decompress(*part.PartValue)));
+            })
+        .EndMap();
 }
 
 //! Lookup a query in active_queries and finished_queries tables by query id.
@@ -177,10 +190,24 @@ TQuery LookupQuery(
     TQueryId queryId,
     const IClientPtr& client,
     const NYPath::TYPath& root,
-    const std::optional<std::vector<std::string>>& lookupKeys,
+    std::optional<std::vector<std::string>> lookupKeys,
     TTimestamp timestamp,
-    const TLogger& logger)
+    const TLogger& logger,
+    const std::vector<std::string>& progressParts = {},
+    std::optional<ui32> minProgressRevision = std::nullopt)
 {
+    bool progressRequested = !lookupKeys ||
+        std::find(lookupKeys->begin(), lookupKeys->end(), "progress") != lookupKeys->end();
+    bool clearEngine = false;
+
+    if (progressRequested &&
+        lookupKeys &&
+        std::find(lookupKeys->begin(), lookupKeys->end(), "engine") == lookupKeys->end())
+    {
+        lookupKeys->emplace_back("engine");
+        clearEngine = true;
+    }
+
     auto asyncActiveRecord = LookupQueryTrackerRecord<TActiveQueryDescriptor>(
         queryId,
         client,
@@ -201,24 +228,49 @@ TQuery LookupQuery(
         THROW_ERROR_EXCEPTION(NQueryTrackerClient::EErrorCode::QueryNotFound,
             "Query %v is not found neither in active nor in finished query tables",
             queryId)
-            << error;
+            .With(error);
     }
     bool isActive = asyncActiveRecord.IsSet() && asyncActiveRecord.GetOrCrash().IsOK();
     bool isFinished = asyncFinishedRecord.IsSet() && asyncFinishedRecord.GetOrCrash().IsOK();
     YT_VERIFY(isActive || isFinished);
     if (isActive && isFinished) {
         const auto& Logger = logger;
-        YT_LOG_ALERT(
-            "Query is found in both active and finished query tables "
-            "(QueryId: %v, Timestamp: %v)",
-            queryId,
-            timestamp);
+        YT_TLOG_ALERT("Query is found in both active and finished query tables")
+            .With("QueryId", queryId)
+            .With("Timestamp", timestamp);
     }
+
+    TQuery query;
     if (isActive) {
-        return PartialRecordToQuery(asyncActiveRecord.GetOrCrash().Value());
+        query = PartialRecordToQuery(asyncActiveRecord.GetOrCrash().Value());
     } else {
-        return PartialRecordToQuery(asyncFinishedRecord.GetOrCrash().Value());
+        query = PartialRecordToQuery(asyncFinishedRecord.GetOrCrash().Value());
     }
+
+    {
+        if (progressRequested &&
+            query.Progress == EmptyMap &&
+            query.Engine && *query.Engine == EQueryEngine::Yql)
+        {
+            query.Progress = GetQueryProgressFromParts(
+                queryId,
+                client,
+                root,
+                timestamp,
+                progressParts,
+                minProgressRevision);
+        } else if (progressRequested && (!progressParts.empty() || minProgressRevision)) {
+            THROW_ERROR_EXCEPTION(
+                "Query %v stores progress in compact form; progress_parts and min_progress_revision are not supported for it",
+                queryId);
+        }
+    }
+
+    if (clearEngine) {
+        query.Engine.reset();
+    }
+
+    return query;
 }
 
 void ValidateQueryPermissions(
@@ -235,7 +287,7 @@ void ValidateQueryPermissions(
         "access_control_objects",
     };
     auto query = LookupQuery(queryId, client, root, lookupKeys, timestamp, logger);
-    if (CheckAccessControl(user, query.AccessControlObjects, *query.User, client, permission) == ESecurityAction::Deny) {
+    if (CheckQueryAccessControl(user, query.AccessControlObjects, *query.User, client, permission) == ESecurityAction::Deny) {
         ThrowAccessDeniedException(queryId, permission, user, query.AccessControlObjects, *query.User);
     }
 }
@@ -252,7 +304,7 @@ void VerifyAllAccessControlObjectsExist(const std::vector<std::string>& accessCo
             .Apply(BIND([accessControlObject] (const TErrorOr<bool>& rspOrError) {
                 if (!rspOrError.IsOK()) {
                     THROW_ERROR_EXCEPTION("Failed to check whether access control object %Qv exists", accessControlObject)
-                        << rspOrError;
+                        .With(rspOrError);
                 }
 
                 if (!rspOrError.Value()) {
@@ -326,6 +378,38 @@ std::optional<std::vector<std::string>> ValidateAccessControlObjects(
     return accessControlObjects;
 }
 
+TQueryId FindQueryStartedByMutation(
+    const IClientPtr& client,
+    const TYPath& root,
+    const std::string& user,
+    const TStartQueryOptions& options,
+    TTimestamp timestamp)
+{
+    auto rowBuffer = New<TRowBuffer>();
+    TLookupRowsOptions lookupOptions;
+    lookupOptions.Timestamp = timestamp;
+    lookupOptions.KeepMissingRows = true;
+    std::vector keys{
+        TQueryByUserAndMutationIdKey{.User = user, .MutationId = options.MutationId}.ToKey(rowBuffer),
+    };
+    auto asyncLookupResult = client->LookupRows(
+        root + "/queries_by_user_and_mutation_id",
+        TQueryByUserAndMutationIdDescriptor::Get()->GetNameTable(),
+        MakeSharedRange(std::move(keys), rowBuffer),
+        lookupOptions);
+    auto rowset = WaitFor(asyncLookupResult)
+        .ValueOrThrow()
+        .Rowset;
+    auto optionalRecords = ToOptionalRecords<TQueryByUserAndMutationId>(rowset);
+    YT_VERIFY(optionalRecords.size() == 1);
+    if (!optionalRecords[0]) {
+        return {};
+    }
+
+    NRpc::ValidateRetry(options.MutationId, options.Retry);
+    return optionalRecords[0]->QueryId;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NDetail
@@ -337,49 +421,46 @@ using namespace NDetail;
 TQueryTrackerProxy::TQueryTrackerProxy(
     IClientPtr stateClient,
     TYPath stateRoot,
-    TQueryTrackerProxyConfigPtr config,
+    TQueryTrackerDynamicConfigPtr config,
     std::unordered_map<EQueryEngine, IProxyEngineProviderPtr> engineProviders,
     int expectedTablesVersion)
     : StateClient_(std::move(stateClient))
     , StateRoot_(std::move(stateRoot))
-    , ProxyConfig_(std::move(config))
+    , DynamicConfig_(std::move(config))
     , EngineProviders_(std::move(engineProviders))
     , ExpectedTablesVersion_(expectedTablesVersion)
     , TimeBasedIndex_(CreateTimeBasedIndex(StateClient_, StateRoot_))
     , TokenBasedIndex_(CreateTokenBasedIndex(StateClient_, StateRoot_))
 { }
 
-void TQueryTrackerProxy::Reconfigure(
-    const TQueryTrackerProxyConfigPtr& config,
-    const TDuration notIndexedQueriesTTL)
+void TQueryTrackerProxy::Reconfigure(const TQueryTrackerDynamicConfigPtr& config)
 {
-    ProxyConfig_ = config;
-    NotIndexedQueriesTTL_ = notIndexedQueriesTTL;
+    DynamicConfig_ = config;
 }
 
-void TQueryTrackerProxy::StartQuery(
+TQueryId TQueryTrackerProxy::StartQuery(
     const TQueryId queryId,
     const EQueryEngine engine,
     const std::string& query,
     const TStartQueryOptions& options,
     const std::string& user)
 {
-    if (ssize(options.Files) > ProxyConfig_->MaxQueryFileCount) {
+    if (ssize(options.Files) > DynamicConfig_->ProxyConfig->MaxQueryFileCount) {
         THROW_ERROR_EXCEPTION("Too many files: limit is %v, actual count is %v",
-            ProxyConfig_->MaxQueryFileCount,
+            DynamicConfig_->ProxyConfig->MaxQueryFileCount,
             options.Files.size());
     }
     for (const auto& file : options.Files) {
-        if (ssize(file->Name) > ProxyConfig_->MaxQueryFileNameSizeBytes) {
+        if (ssize(file->Name) > DynamicConfig_->ProxyConfig->MaxQueryFileNameSizeBytes) {
             THROW_ERROR_EXCEPTION("Too large file %v name: limit is %v, actual size is %v",
                 file->Name,
-                ProxyConfig_->MaxQueryFileNameSizeBytes,
+                DynamicConfig_->ProxyConfig->MaxQueryFileNameSizeBytes,
                 file->Name.size());
         }
-        if (ssize(file->Content) > ProxyConfig_->MaxQueryFileContentSizeBytes) {
+        if (ssize(file->Content) > DynamicConfig_->ProxyConfig->MaxQueryFileContentSizeBytes) {
             THROW_ERROR_EXCEPTION("Too large file %v content: limit is %v, actual size is %v",
                 file->Name,
-                ProxyConfig_->MaxQueryFileContentSizeBytes,
+                DynamicConfig_->ProxyConfig->MaxQueryFileContentSizeBytes,
                 file->Content.size());
         }
     }
@@ -390,14 +471,37 @@ void TQueryTrackerProxy::StartQuery(
         options.Settings->AsMap()->RemoveChild("is_indexed");
     }
 
-    YT_LOG_DEBUG("Starting query (QueryId: %v, Draft: %v, IsIndexed: %v)",
-        queryId,
-        options.Draft,
-        isIndexed);
+    YT_TLOG_DEBUG("Starting query")
+        .With("QueryId", queryId)
+        .With("MutationId", options.MutationId)
+        .With("Draft", options.Draft)
+        .With("IsIndexed", isIndexed);
 
     auto rowBuffer = New<TRowBuffer>();
     auto transaction = WaitFor(StateClient_->StartTransaction(ETransactionType::Tablet, {}))
         .ValueOrThrow();
+
+    if (options.MutationId) {
+        if (auto startedQueryId = FindQueryStartedByMutation(StateClient_, StateRoot_, user, options, transaction->GetStartTimestamp())) {
+            YT_TLOG_DEBUG("Query is already started by this mutation")
+                .With("QueryId", startedQueryId)
+                .With("MutationId", options.MutationId);
+            return startedQueryId;
+        }
+
+        TQueryByUserAndMutationIdPartial mutationRecord{
+            .Key = {.User = user, .MutationId = options.MutationId},
+            .QueryId = queryId,
+            .Ttl = DynamicConfig_->ProxyConfig->QueriesByMutationIdTtl.MilliSeconds(),
+        };
+        std::vector mutationRows{
+            mutationRecord.ToUnversionedRow(rowBuffer, TQueryByUserAndMutationIdDescriptor::Get()->GetPartialIdMapping()),
+        };
+        transaction->WriteRows(
+            StateRoot_ + "/queries_by_user_and_mutation_id",
+            TQueryByUserAndMutationIdDescriptor::Get()->GetNameTable(),
+            MakeSharedRange(std::move(mutationRows), rowBuffer));
+    }
 
     auto accessControlObjects = ValidateAccessControlObjects(options.AccessControlObject, options.AccessControlObjects).value_or(std::vector<std::string>{});
     VerifyAllAccessControlObjectsExist(accessControlObjects, StateClient_);
@@ -414,7 +518,8 @@ void TQueryTrackerProxy::StartQuery(
         auto annotationsMap = options.Annotations->AsMap();
         if (annotationsMap->GetChildValueOrDefault("is_tutorial", false)) {
             if (!GetUserSubjects(user, StateClient_).contains(SuperusersGroupName)) {
-                YT_LOG_DEBUG("Attempt to create a tutorial failed. User is not a superuser (User: %v)", user);
+                YT_TLOG_DEBUG("Attempt to create a tutorial failed; user is not a superuser")
+                    .With("User", user);
                 THROW_ERROR_EXCEPTION("Non-superusers cannot create tutorial queries. To create one contact your cluster administrator");
             }
             if (!options.Draft) {
@@ -446,7 +551,9 @@ void TQueryTrackerProxy::StartQuery(
                 .IsTutorial = isTutorial,
             };
             if (!isIndexed) {
-                newRecord.TTL = NotIndexedQueriesTTL_.MilliSeconds();
+                if (auto ttl = GetConfigByEngine(DynamicConfig_, engine)->NotIndexedQueriesTtl) {
+                    newRecord.Ttl = ttl->MilliSeconds();
+                }
             }
 
             filterFactors = GetFilterFactors(newRecord);
@@ -509,8 +616,15 @@ void TQueryTrackerProxy::StartQuery(
         .Force2PC = true,
     };
 
-    WaitFor(transaction->Commit(commitOptions))
-        .ThrowOnError();
+    auto commitError = WaitFor(transaction->Commit(commitOptions));
+    if (options.MutationId && commitError.FindMatching(NTabletClient::EErrorCode::TransactionLockConflict)) {
+        if (auto startedQueryId = FindQueryStartedByMutation(StateClient_, StateRoot_, user, options, SyncLastCommittedTimestamp)) {
+            return startedQueryId;
+        }
+    }
+    commitError.ThrowOnError();
+
+    return queryId;
 }
 
 void TQueryTrackerProxy::AbortQuery(
@@ -538,7 +652,9 @@ void TQueryTrackerProxy::AbortQuery(
 
     ValidateQueryPermissions(queryId, StateRoot_, transaction->GetStartTimestamp(), user, StateClient_, EPermission::Administer, Logger);
 
-    YT_LOG_DEBUG("Aborting query (QueryId: %v, AbortMessage: %v)", queryId, options.AbortMessage);
+    YT_TLOG_DEBUG("Aborting query")
+        .With("QueryId", queryId)
+        .With("AbortMessage", options.AbortMessage);
 
     TActiveQuery record;
     {
@@ -585,7 +701,7 @@ void TQueryTrackerProxy::AbortQuery(
         if (error.FindMatching(NTabletClient::EErrorCode::TransactionLockConflict)) {
             // TODO(max42): retry such errors automatically?
             THROW_ERROR_EXCEPTION("Cannot abort query because its state is being changed at the moment; please try again")
-                << error;
+                .With(error);
         }
         THROW_ERROR error;
     }
@@ -613,7 +729,9 @@ TQueryResult TQueryTrackerProxy::GetQueryResult(
     auto timestamp = WaitFor(StateClient_->GetTimestampProvider()->GenerateTimestamps())
         .ValueOrThrow();
 
-    YT_LOG_DEBUG("Getting query result (QueryId: %v, ResultIndex: %v)", queryId, resultIndex);
+    YT_TLOG_DEBUG("Getting query result")
+        .With("QueryId", queryId)
+        .With("ResultIndex", resultIndex);
 
     TQueryResult queryResult;
     {
@@ -665,12 +783,11 @@ IUnversionedRowsetPtr TQueryTrackerProxy::ReadQueryResult(
     const TReadQueryResultOptions& options,
     const std::string& user)
 {
-    YT_LOG_DEBUG(
-        "Reading query result (QueryId: %v, ResultIndex: %v, LowerRowIndex: %v, UpperRowIndex: %v)",
-        queryId,
-        resultIndex,
-        options.LowerRowIndex,
-        options.UpperRowIndex);
+    YT_TLOG_DEBUG("Reading query result")
+        .With("QueryId", queryId)
+        .With("ResultIndex", resultIndex)
+        .With("LowerRowIndex", options.LowerRowIndex)
+        .With("UpperRowIndex", options.UpperRowIndex);
 
     auto timestamp = WaitFor(StateClient_->GetTimestampProvider()->GenerateTimestamps())
         .ValueOrThrow();
@@ -750,18 +867,35 @@ TQuery TQueryTrackerProxy::GetQuery(
         : WaitFor(StateClient_->GetTimestampProvider()->GenerateTimestamps())
             .ValueOrThrow();
 
-    YT_LOG_DEBUG("Getting query (QueryId: %v, Timestamp: %v, Attributes: %v)",
-        queryId,
-        timestamp,
-        options.Attributes);
+    YT_TLOG_DEBUG("Getting query")
+        .With("QueryId", queryId)
+        .With("Timestamp", timestamp)
+        .With("Attributes", options.Attributes)
+        .With("ProgressParts", options.ProgressParts)
+        .With("MinProgressRevision", options.MinProgressRevision);
 
     options.Attributes.ValidateKeysOnly();
 
     ValidateQueryPermissions(queryId, StateRoot_, timestamp, user, StateClient_, EPermission::Use, Logger);
 
     auto lookupKeys = options.Attributes ? std::make_optional(options.Attributes.Keys()) : std::nullopt;
+    if ((!options.ProgressParts.empty() || options.MinProgressRevision) &&
+        !options.Attributes.AdmitsKeySlow("progress"))
+    {
+        THROW_ERROR_EXCEPTION(
+            "Options progress_parts and min_progress_revision require the %Qv attribute to be requested",
+            "progress");
+    }
 
-    auto query = LookupQuery(queryId, StateClient_, StateRoot_, lookupKeys, timestamp, Logger);
+    auto query = LookupQuery(
+        queryId,
+        StateClient_,
+        StateRoot_,
+        lookupKeys,
+        timestamp,
+        Logger,
+        options.ProgressParts,
+        options.MinProgressRevision);
 
     if (!lookupKeys || std::find(lookupKeys->begin(), lookupKeys->end(), "access_control_object") != lookupKeys->end()) {
         ConvertAcoToOldFormat(query);
@@ -774,22 +908,20 @@ TListQueriesResult TQueryTrackerProxy::ListQueries(
     const TListQueriesOptions& options,
     const std::string& user)
 {
-    YT_LOG_DEBUG(
-        "Listing queries (State: %v, CursorDirection: %v, FromTime: %v, ToTime: %v, CursorTime: %v,"
-        "Substr: %v, User: %v, Engine: %v, Limit: %v, Attributes: %v, TutorialFilter: %v, SearchByTokenPrefix: %v, UseFullTextSearch: %v)",
-        options.StateFilter,
-        options.CursorDirection,
-        options.FromTime,
-        options.ToTime,
-        options.CursorTime,
-        options.SubstrFilter,
-        options.UserFilter,
-        options.EngineFilter,
-        options.Limit,
-        options.Attributes,
-        options.TutorialFilter,
-        options.SearchByTokenPrefix,
-        options.UseFullTextSearch);
+    YT_TLOG_DEBUG("Listing queries")
+        .With("State", options.StateFilter)
+        .With("CursorDirection", options.CursorDirection)
+        .With("FromTime", options.FromTime)
+        .With("ToTime", options.ToTime)
+        .With("CursorTime", options.CursorTime)
+        .With("Substr", options.SubstrFilter)
+        .With("User", options.UserFilter)
+        .With("Engine", options.EngineFilter)
+        .With("Limit", options.Limit)
+        .With("Attributes", options.Attributes)
+        .With("TutorialFilter", options.TutorialFilter)
+        .With("SearchByTokenPrefix", options.SearchByTokenPrefix)
+        .With("UseFullTextSearch", options.UseFullTextSearch);
 
     if (options.SubstrFilter && !options.SubstrFilter->empty() && options.UseFullTextSearch) {
         return TokenBasedIndex_->ListQueries(options, user);
@@ -847,12 +979,11 @@ void TQueryTrackerProxy::AlterQuery(
         }
     }
 
-    YT_LOG_DEBUG(
-        "Altering query (QueryId: %v, State: %v, HasAnnotations: %v, HasAccessControlObjects: %v)",
-        queryId,
-        *query.State,
-        static_cast<bool>(options.Annotations),
-        static_cast<bool>(accessControlObjects));
+    YT_TLOG_DEBUG("Altering query")
+        .With("QueryId", queryId)
+        .With("State", *query.State)
+        .With("HasAnnotations", static_cast<bool>(options.Annotations))
+        .With("HasAccessControlObjects", static_cast<bool>(accessControlObjects));
 
     if (!options.Annotations && !accessControlObjects) {
         WaitFor(transaction->Commit())
@@ -993,9 +1124,8 @@ void TQueryTrackerProxy::AlterQuery(
 TGetQueryTrackerInfoResult TQueryTrackerProxy::GetQueryTrackerInfo(
     const TGetQueryTrackerInfoOptions& options)
 {
-    YT_LOG_DEBUG(
-        "Getting query tracker information (Attributes: %v)",
-        options.Attributes);
+    YT_TLOG_DEBUG("Getting query tracker information")
+        .With("Attributes", options.Attributes);
 
     auto settingsMap = options.Settings ? options.Settings->AsMap() : ConvertToNode(EmptyMap)->AsMap();
 
@@ -1006,7 +1136,7 @@ TGetQueryTrackerInfoResult TQueryTrackerProxy::GetQueryTrackerInfo(
     std::string clusterName = "";
 
     if (attributes.AdmitsKeySlow("cluster_name")) {
-        YT_LOG_DEBUG("Getting cluster name");
+        YT_TLOG_DEBUG("Getting cluster name");
         clusterName = WaitFor(StateClient_->GetClusterName())
             .ValueOrDefault("")
             .value_or("");
@@ -1032,7 +1162,7 @@ TGetQueryTrackerInfoResult TQueryTrackerProxy::GetQueryTrackerInfo(
 
     std::vector<std::string> accessControlObjects;
     if (attributes.AdmitsKeySlow("access_control_objects")) {
-        YT_LOG_DEBUG("Getting access control objects");
+        YT_TLOG_DEBUG("Getting access control objects");
         TListNodeOptions listOptions;
         listOptions.ReadFrom = EMasterChannelKind::Cache;
         listOptions.SuccessStalenessBound = TDuration::Minutes(1);
@@ -1043,7 +1173,7 @@ TGetQueryTrackerInfoResult TQueryTrackerProxy::GetQueryTrackerInfo(
 
     std::vector<std::string> clusters;
     if (attributes.AdmitsKeySlow("clusters")) {
-        YT_LOG_DEBUG("Getting list of available clusters");
+        YT_TLOG_DEBUG("Getting list of available clusters");
         TListNodeOptions listOptions;
         listOptions.ReadFrom = EMasterChannelKind::Cache;
         listOptions.SuccessStalenessBound = TDuration::Minutes(1);
@@ -1062,7 +1192,9 @@ TGetQueryTrackerInfoResult TQueryTrackerProxy::GetQueryTrackerInfo(
                     enginesInfoMap->AddChild(engineName, ConvertToNode(engineInfo));
                 }
             } catch (const std::exception& ex) {
-                YT_LOG_ERROR(ex, "Failed to get engine info (Engine: %v)", engineName);
+                YT_TLOG_ERROR("Failed to get engine info")
+                    .With("Engine", engineName)
+                    .With(ex);
             }
         }
     }
@@ -1104,7 +1236,7 @@ TGetQueryDeclaredParametersInfoResult TQueryTrackerProxy::GetQueryDeclaredParame
 TQueryTrackerProxyPtr CreateQueryTrackerProxy(
     IClientPtr stateClient,
     TYPath stateRoot,
-    TQueryTrackerProxyConfigPtr config,
+    TQueryTrackerDynamicConfigPtr config,
     std::unordered_map<EQueryEngine, IProxyEngineProviderPtr> engineProviders,
     int expectedTablesVersion)
 {

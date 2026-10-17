@@ -1,3 +1,4 @@
+../../yt/styleguide/cpp.md
 # YTsaurus C++ Style Guide
 
 <!--================================================================================-->
@@ -217,8 +218,8 @@ Very common standard includes (like `<vector>` or `<util/string.h>`) are collect
 // Example for yt/yt/server/foo/bar.cpp.
 #include "bar.h"
 
-#include "helpers.h"
 #include "config.h"
+#include "helpers.h"
 
 #include <yt/yt/server/foo/baz/baz.h>
 
@@ -333,9 +334,15 @@ for (size_t tableIndex = 0; tableIndex < InputTables_.size(); ++tableIndex) {
 for (auto it = InputTables_.begin(); it != InputTables_.end(); ++it) {
     ...
 }
-```
 
-</details>
+// This is ok.
+for (const auto& table : InputTables_) {
+    ...
+}
+for (auto&& table : InputTables_) {
+    ...
+}
+```
 
 <!------------------------------------------------------------------------------------>
 
@@ -382,6 +389,19 @@ BuildYsonFluently(consumer)
 
 <!------------------------------------------------------------------------------------>
 
+### std::optional
+
+Prefer the implicit bool conversion and `*opt` over `opt.has_value()` and `opt.value()`. `has_value()` is fine where the implicit conversion is ambiguous (e.g. `std::optional<bool>`); `value_or` is fine for defaults.
+
+```cpp
+std::optional<int> optionalValue = DoSomething();
+if (optionalValue) {
+    ProcessResult(*optionalValue);
+}
+```
+
+<!------------------------------------------------------------------------------------>
+
 ### Forward Declarations
 
 We strongly rely on forward declarations, preferring them over includes whenever possible. We extract them into separate files named `public.h`/`private.h` which serve as a collection of forward declarations for the whole directory. Forward declarations that may be used outside of the directory are placed into `public.h`, the rest are placed into `private.h` (which usually includes `public.h`).
@@ -398,8 +418,8 @@ void DoSomething(TBarPtr bar);
 
 // something.cpp
 
-#include <foorbar/foo.h>
-#include <foorbar/bar.h>
+#include <foobar/foo.h>
+#include <foobar/bar.h>
 
 void DoSomethingElse(const TFoo& foo)
 {
@@ -458,7 +478,7 @@ void DoSomething(TSomethingPtr something)
 
 Weak pointers (`TWeakPtr<T>`) accompany intrusive pointers in asynchronous contexts to mitigate lifetime issues. Their use outside of asynchronous code is usually not justified.
 
-Unique pointers are frequently used with non-refcounted or standard classes. Shared pointers or somewhat rare, but may occur when interoperability with standard library is required, or the ownership promotion from the unique pointer is used.
+Unique pointers are frequently used with non-refcounted or standard classes. Shared pointers are somewhat rare, but may occur when interoperability with standard library is required, or the ownership promotion from the unique pointer is used.
 
 Raw pointers are quite often used when the ownership is guaranteed to be somewhere else, and the pointer is used as a non-owning reference. Raw pointers are never used for memory allocation (except deep inside some low-level libraries).
 
@@ -560,7 +580,7 @@ YT_LOG_DEBUG("Tables fetched (tableCount: %v)", tableCount);
 
 All error and exception text must be written as if they were dedicated to an end user. They must also be written in a grammatically correct English; typically they also do not contain dots, having semicolons instead.
 
-In contrast to the log messages, variable parts of an error are encouraged to be in included directly in the error text. In general, we assume that the end user will read the error text and will not read the attributes of an error.
+In contrast to the log messages, variable parts of an error are encouraged to be included directly in the error text. In general, we assume that the end user will read the error text and will not read the attributes of an error.
 
 Finally, the attributes of an error are machine readable, and may contain wider debug information, such as the faulty key range, guids or string contexts.
 
@@ -571,11 +591,11 @@ THROW_ERROR_EXCEPTION(
     EErrorCode::MaxDataWeightPerJobExceeded, "Maximum allowed data weight per sorted job exceeds the limit: %v > %v",
     job->GetDataWeight(),
     JobSizeConstraints_->GetMaxDataWeightPerJob())
-    << TErrorAttribute("lower_key", job->LowerPrimaryKey())
-    << TErrorAttribute("upper_key", job->UpperPrimaryKey());
+    .With("lower_key", job->LowerPrimaryKey())
+    .With("upper_key", job->UpperPrimaryKey());
 
 RequestAttachmentsStream_->Abort(TError("Client request control is finalized")
-    << TErrorAttribute("request_id", GetRequestId()));
+    .With("request_id", GetRequestId()));
 ```
 
 <!--================================================================================-->
@@ -609,7 +629,7 @@ for (int tableIndex = 0; tableIndex < tableCount; ++tableIndex) {
 
 Well-known acronyms are ok (e.g. TCP, IP, IO, MPSC, CH for ClickHouse). YT is not an acronym, but works like a two-letter acronym.
 
- Two-letter acronyms are treated as acronyms (e.g. both letters are capitalized or not capitalized simultaneously), three-letter acronyms are treated as words (e.g. only the first letter is capitalized).
+ Two-letter acronyms are treated as acronyms (e.g. both letters are capitalized or not capitalized simultaneously), three-and-more-letter acronyms are treated as words (e.g. only the first letter is capitalized).
 
 ```cpp
 namespace NYT;

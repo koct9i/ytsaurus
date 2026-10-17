@@ -19,7 +19,7 @@
 
 #include <library/cpp/cgiparam/cgiparam.h>
 
-#include <library/cpp/yt/threading/traceless_guard.h>
+#include <library/cpp/yt/system/traceless_guard.h>
 
 #include <util/system/mutex.h>
 
@@ -43,11 +43,11 @@ public:
     void HandleRequest(const IRequestPtr& req, const IResponseWriterPtr& rsp) override
     {
         try {
-            auto guard = NThreading::TracelessTryGuard(Lock_);
+            auto guard = TracelessTryGuard(Lock_);
 
             if (!guard) {
                 rsp->SetStatus(EStatusCode::TooManyRequests);
-                WaitFor(rsp->WriteBody(TSharedRef::FromString("Profile fetch already running")))
+                WaitFor(rsp->WriteBody(TSharedRef::FromString(std::string("Profile fetch already running"))))
                     .ThrowOnError();
                 return;
             }
@@ -75,7 +75,7 @@ public:
             }
 
             rsp->SetStatus(EStatusCode::InternalServerError);
-            WaitFor(rsp->WriteBody(TSharedRef::FromString(ex.what())))
+            WaitFor(rsp->WriteBody(TSharedRef::FromString(std::string(ex.what()))))
                 .ThrowOnError();
 
             throw;
@@ -86,7 +86,7 @@ protected:
     const TBuildInfo BuildInfo_;
 
 private:
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, Lock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, Lock_);
 };
 
 class TCpuProfilerHandler
@@ -247,7 +247,7 @@ public:
             }
 
             rsp->SetStatus(EStatusCode::InternalServerError);
-            WaitFor(rsp->WriteBody(TSharedRef::FromString(ex.what())))
+            WaitFor(rsp->WriteBody(TSharedRef::FromString(std::string(ex.what()))))
                 .ThrowOnError();
 
             throw;
@@ -262,7 +262,7 @@ public:
     void HandleRequest(const IRequestPtr& /*req*/, const IResponseWriterPtr& rsp) override
     {
         rsp->SetStatus(EStatusCode::OK);
-        WaitFor(rsp->WriteBody(TSharedRef::FromString(GetVersion())))
+        WaitFor(rsp->WriteBody(TSharedRef::FromString(std::string(GetVersion()))))
             .ThrowOnError();
     }
 };
@@ -274,7 +274,7 @@ public:
     void HandleRequest(const IRequestPtr& /*req*/, const IResponseWriterPtr& rsp) override
     {
         rsp->SetStatus(EStatusCode::OK);
-        WaitFor(rsp->WriteBody(TSharedRef::FromString(GetVersion())))
+        WaitFor(rsp->WriteBody(TSharedRef::FromString(std::string(GetVersion()))))
             .ThrowOnError();
     }
 };

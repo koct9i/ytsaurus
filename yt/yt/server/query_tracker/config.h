@@ -33,6 +33,8 @@ struct TEngineConfigBase
     // Wire protocol reader validates that rowset doesn't contain values above this limit.
     i64 ResultingRowsetValueLengthLimit;
 
+    std::optional<TDuration> NotIndexedQueriesTtl;
+
     REGISTER_YSON_STRUCT(TEngineConfigBase);
 
     static void Register(TRegistrar registrar);
@@ -138,6 +140,7 @@ struct TQueryTrackerProxyConfig
     i64 MaxQueryFileCount;
     i64 MaxQueryFileNameSizeBytes;
     i64 MaxQueryFileContentSizeBytes;
+    TDuration QueriesByMutationIdTtl;
 
     REGISTER_YSON_STRUCT(TQueryTrackerProxyConfig);
 
@@ -157,7 +160,7 @@ struct TQueryTrackerDynamicConfig
     TDuration ActiveQueryPingPeriod;
     TDuration QueryFinishBackoff;
     TDuration HealthCheckPeriod;
-    TDuration NotIndexedQueriesTTL;
+    TDuration NotIndexedQueriesTtl;
 
     TEngineConfigBasePtr MockEngine;
     TQLEngineConfigPtr QLEngine;

@@ -1,5 +1,5 @@
 from yt_env_setup import (
-    YTEnvSetup, Restarter, MASTERS_SERVICE, with_additional_threads)
+    YTEnvSetup, Restarter, MASTERS_SERVICE, with_additional_threads, with_portals_dir)
 
 from yt_sequoia_helpers import not_implemented_in_sequoia
 
@@ -16,7 +16,7 @@ from yt_commands import (
     get_active_primary_master_follower_address, sync_mount_table, sync_create_cells, check_permission,
     get_driver, create_access_control_object_namespace, create_chaos_cell_bundle)
 
-from yt_helpers import get_current_time, profiler_factory, account_usage_all_zero
+from yt_helpers import parse_yt_time, get_current_time, profiler_factory, account_usage_all_zero
 
 from yt.common import YtError, YtResponseError, WaitFailed
 from yt.environment.helpers import assert_items_equal
@@ -722,7 +722,7 @@ class TestCypress(YTEnvSetup):
         create("file", "//tmp/p1/f", attributes={"account": "a"})
         wait(lambda: get("//sys/accounts/a/@resource_usage/master_memory/total") > 0)
 
-        with raises_yt_error("Cannot remove an account .* because its usage is not zero"):
+        with raises_yt_error("Cannot remove account .* because its usage is not zero"):
             remove("//sys/accounts/a")
         assert get("//sys/accounts/a/@life_stage") == "creation_committed"
 
@@ -2294,6 +2294,40 @@ class TestCypress(YTEnvSetup):
         assert not exists("//tmp/t/@expiration_timeout")
         assert exists("//tmp/t/@expiration_timeout_last_reset_time")
 
+    @authors("theevilbird")
+    def test_expiration_arming_time(self):
+        create("table", "//tmp/t1")
+        assert not exists("//tmp/t1/@expiration_time_arming_time")
+        assert not exists("//tmp/t1/@expiration_timeout_arming_time")
+
+        current_time1 = get_current_time()
+        set("//tmp/t1/@expiration_time", str(get_current_time() + timedelta(seconds=20)))
+        assert current_time1 < parse_yt_time(get("//tmp/t1/@expiration_time_arming_time")) < current_time1 + timedelta(seconds=2)
+
+        create("table", "//tmp/t2")
+        current_time2 = get_current_time()
+        set("//tmp/t2/@expiration_timeout", 20000)
+        assert current_time2 < parse_yt_time(get("//tmp/t2/@expiration_timeout_arming_time")) < current_time2 + timedelta(seconds=2)
+
+        current_time3 = get_current_time()
+        create("table", "//tmp/t3", attributes={"expiration_time": str(get_current_time() + timedelta(seconds=20000))})
+        assert current_time3 < parse_yt_time(get("//tmp/t3/@expiration_time_arming_time")) < current_time3 + timedelta(seconds=2)
+
+        current_time4 = get_current_time()
+        create("table", "//tmp/t4", attributes={"expiration_timeout": 20000})
+        assert current_time4 < parse_yt_time(get("//tmp/t4/@expiration_timeout_arming_time")) < current_time4 + timedelta(seconds=2)
+
+        time.sleep(3)
+        current_time1_2 = get_current_time()
+        set("//tmp/t1/@expiration_timeout", 10000)
+        assert current_time1 < parse_yt_time(get("//tmp/t1/@expiration_time_arming_time")) < current_time1 + timedelta(seconds=2)
+        assert current_time1_2 < parse_yt_time(get("//tmp/t1/@expiration_timeout_arming_time")) < current_time1_2 + timedelta(seconds=2)
+
+        current_time2_2 = get_current_time()
+        set("//tmp/t2/@expiration_time", str(get_current_time() + timedelta(seconds=10)))
+        assert current_time2 < parse_yt_time(get("//tmp/t2/@expiration_timeout_arming_time")) < current_time2 + timedelta(seconds=2)
+        assert current_time2_2 < parse_yt_time(get("//tmp/t2/@expiration_time_arming_time")) < current_time2_2 + timedelta(seconds=2)
+
     @authors("shakurov")
     @pytest.mark.parametrize("authorized", [False, True])
     def test_expiration_time_versioning1(self, authorized):
@@ -2492,7 +2526,6 @@ class TestCypress(YTEnvSetup):
         assert not exists("//tmp/t2")
 
     @authors("koloshmet")
-    @not_implemented_in_sequoia
     def test_copy_preserve_expiration_time_authorized(self):
         auth_user1, auth_user2 = ("u1", "u2")
         create_user(auth_user1)
@@ -2527,7 +2560,6 @@ class TestCypress(YTEnvSetup):
         assert exists("//tmp/t2")
 
     @authors("koloshmet")
-    @not_implemented_in_sequoia
     def test_copy_dont_preserve_expiration_time_authorized(self):
         auth_user1, auth_user2 = ("u1", "u2")
         create_user(auth_user1)
@@ -2561,7 +2593,6 @@ class TestCypress(YTEnvSetup):
         assert not exists("//tmp/t2")
 
     @authors("koloshmet")
-    @not_implemented_in_sequoia
     def test_copy_preserve_expiration_timeout_authorized(self):
         auth_user1, auth_user2 = ("u1", "u2")
         create_user(auth_user1)
@@ -4740,11 +4771,18 @@ class TestCypress(YTEnvSetup):
         with raises_yt_error("No such transaction .*"):
             get(f"#{object_id}", tx=tx)
 
-    @authors("kivedernikov")
+    @authors("h0pless")
     def test_touch_time_without_expiration_timeout(self):
-        create("table", "//tmp/t")
+        path = "//tmp/node"
+        create("map_node", path)
+
         with raises_yt_error("Attribute .* is not found"):
-            get("//tmp/t/@touch_time")
+            get(f"{path}/@touch_time")
+
+        tx = start_transaction()
+        lock(path, tx=tx)
+        with raises_yt_error("Attribute .* is not found"):
+            get(f"{path}/@touch_time", tx=tx)
 
     @authors("kivedernikov")
     @pytest.mark.parametrize(
@@ -4943,7 +4981,6 @@ class TestCypressMulticell(TestCypress):
         assert not exists("//tmp/t/@external_cell_bias")
 
     @authors("shakurov")
-    @not_implemented_in_sequoia
     @pytest.mark.parametrize("use_offloading", [False, True])
     def test_virtual_map_read_authenticated_user_propagation(self, use_offloading):
         if use_offloading:
@@ -4978,7 +5015,21 @@ class TestCypressPortal(TestCypressMulticell):
         "13": {"roles": ["chunk_host"]},
     }
 
+    @authors("kvk1920")
+    def test_cross_cell_prerequisite_revision(self):
+        tx = start_transaction()
+
+        create("map_node", "//tmp/m")
+        m_revision = get("//tmp/m/@revision")
+        root_revision = get("//@revision")
+        with raises_yt_error("Request is cross-cell"):
+            exists("//tmp/m/@type", tx=tx, prerequisite_revisions=[{"path": "/", "revision": root_revision}])
+
+        with raises_yt_error("Prerequisite check failed"):
+            exists("//@type", tx=tx, prerequisite_revisions=[{"path": "//tmp/m", "revision": m_revision}])
+
     @authors("h0pless")
+    @with_portals_dir
     def test_cyclic_link_through_portal(self):
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 12})
 
@@ -4992,6 +5043,7 @@ class TestCypressPortal(TestCypressMulticell):
             link("//portals/p/r/l2", "//portals/p/r/l2", force=True)
 
     @authors("h0pless")
+    @with_portals_dir
     def test_node_copy_rollback(self):
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 12})
         create("table", "//tmp/t", attributes={"external_cell_tag": 13})
@@ -5004,6 +5056,7 @@ class TestCypressPortal(TestCypressMulticell):
         remove("//sys/@config/cypress_manager/max_locks_per_transaction_subtree")
 
     @authors("shakurov")
+    @with_portals_dir
     def test_cross_shard_copy_inheritable_attributes(self):
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 12})
 
@@ -5029,6 +5082,7 @@ class TestCypressPortal(TestCypressMulticell):
         assert get("//portals/p/d2/@tablet_cell_bundle") == "b"
 
     @authors("aleksandra-zh")
+    @with_portals_dir
     def test_cross_shard_copy_builtin_attributes(self):
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 12})
 
@@ -5062,6 +5116,7 @@ class TestCypressPortal(TestCypressMulticell):
         assert get("//tmp/t2/@enable_skynet_sharing")
 
     @authors("shakurov")
+    @with_portals_dir
     def test_cross_shard_copy_w_tx(self):
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 12})
 
@@ -5075,6 +5130,7 @@ class TestCypressPortal(TestCypressMulticell):
         move("//tmp/t2", "//portals/p/t2_copy", tx=tx)
 
     @authors("cherepashka")
+    @with_portals_dir
     def test_access_time_in_shard_copy(self):
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 11})
         create("table", "//tmp/t1")
@@ -5084,6 +5140,7 @@ class TestCypressPortal(TestCypressMulticell):
         assert get("//tmp/t1/@access_time") > creation_time
 
     @authors("avmatrosov")
+    @with_portals_dir
     def test_annotation_portal(self):
         set("//sys/@config/cypress_manager/graft_synchronization_period", 1000)
         set("//portals/@annotation", "test")
@@ -5105,6 +5162,7 @@ class TestCypressPortal(TestCypressMulticell):
         pass
 
     @authors("avmatrosov")
+    @with_portals_dir
     def test_preserve_owner(self):
         create_user("u1")
         create("document", "//tmp/doc", authenticated_user="u1")
@@ -5115,6 +5173,7 @@ class TestCypressPortal(TestCypressMulticell):
         assert get("//tmp/doc/@owner") == get("//portals/p/doc/@owner") == "u1"
 
     @authors("avmatrosov")
+    @with_portals_dir
     def test_preserve_acl(self):
         create("document", "//tmp/t1")
         create("portal_entrance", "//portals/p", attributes={"exit_cell_tag": 12})
@@ -5761,6 +5820,7 @@ class TestCypressSequoia(TestCypressMulticell):
         "11": {"roles": ["chunk_host", "cypress_node_host"]},
         "12": {"roles": ["sequoia_node_host"]},
         "13": {"roles": ["chunk_host"]},
+        "14": {"roles": ["sequoia_node_host"]},
     }
 
     @authors("theevilbird")
@@ -5792,4 +5852,17 @@ class TestCypressSequoia(TestCypressMulticell):
             for cell, ids in branched_node_ids.items():
                 assert len(ids) == 0
 
-################################################################################
+    @authors("kvk1920")
+    def test_cross_cell_revision(self):
+        last_revision = 0
+        for i in range(20):
+            node_id = create("document", f"//tmp/doc{i}", attributes={"value": {}})
+            new_revision = get(f"#{node_id}/@revision")
+            assert last_revision < new_revision
+            last_revision = new_revision
+
+        for i in range(20):
+            set(f"//tmp/doc{i}/value", 123)
+            new_revision = get(f"//tmp/doc{i}/@revision")
+            assert last_revision < new_revision
+            last_revision = new_revision

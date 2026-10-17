@@ -8,7 +8,7 @@
 
 #include <yt/yt/server/master/cypress_server/public.h>
 
-#include <yt/yt/server/master/object_server/object_detail.h>
+#include <yt/yt/server/master/object_server/object.h>
 
 #include <yt/yt/server/master/security_server/acl.h>
 #include <yt/yt/server/master/security_server/cluster_resources.h>
@@ -26,9 +26,9 @@
 
 #include <yt/yt/core/concurrency/async_barrier.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <library/cpp/yt/memory/ref_tracked.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 #include <library/cpp/containers/absl/flat_hash_map.h>
 
@@ -136,9 +136,15 @@ public:
     DEFINE_BYREF_RW_PROPERTY(THashSet<TTransactionRawPtr>, DependentTransactions);
     DEFINE_BYVAL_RW_PROPERTY(std::optional<TInstant>, Deadline);
     DEFINE_BYVAL_RW_PROPERTY(int, Depth);
+
+    struct TNativeCommitRevision
+    {
+        NHydra::TRevision Mutation = NHydra::NullRevision;
+        NHydra::TRevision Sequoia = NHydra::NullRevision;
+    };
     // Only set when transaction commit is in progress that has been initiated via an Hive message.
     // There's no strong reason for this field to be persistent, but it may ease future debugging.
-    DEFINE_BYVAL_RW_PROPERTY(NHydra::TRevision, NativeCommitMutationRevision, NHydra::NullRevision);
+    DEFINE_BYREF_RW_PROPERTY(TNativeCommitRevision, NativeCommitRevision);
 
     DEFINE_BYREF_RW_PROPERTY(THashSet<NHydra::TCellId>, LeaseCellIds);
 
@@ -171,6 +177,8 @@ public:
     using TAccountResourcesMap = THashMap<NSecurityServer::TAccountPtr, NSecurityServer::TClusterResources>;
     DEFINE_BYREF_RW_PROPERTY(TAccountResourcesMap, AccountResourceUsage);
     DEFINE_BYREF_RW_PROPERTY(NSecurityServer::TAccessControlDescriptor, Acd);
+
+    DEFINE_BYVAL_RW_PROPERTY(NSecurityClient::TUserId, InitiatorId);
 
     using TAccountResourceUsageLeaseSet = THashSet<NSecurityServer::TAccountResourceUsageLeaseRawPtr>;
     DEFINE_BYREF_RW_PROPERTY(TAccountResourceUsageLeaseSet, AccountResourceUsageLeases);

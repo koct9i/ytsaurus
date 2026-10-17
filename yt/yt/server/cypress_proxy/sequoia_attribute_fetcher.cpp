@@ -4,15 +4,13 @@
 #include "sequoia_session.h"
 #include "sequoia_tree_visitor.h"
 
-#include <yt/yt/server/master/security_server/detailed_master_memory.h>
+#include <yt/yt/server/lib/security_server/detailed_master_memory.h>
 
 #include <yt/yt/server/lib/security_server/helpers.h>
 
 #include <yt/yt/server/lib/misc/interned_attributes.h>
 
 #include <yt/yt/ytlib/api/native/connection.h>
-
-#include <yt/yt/ytlib/cypress_client/rpc_helpers.h>
 
 #include <yt/yt/core/ytree/attribute_filter.h>
 #include <yt/yt/core/ytree/ypath_proxy.h>
@@ -811,7 +809,7 @@ public:
         if (auto* req = std::get_if<TReqGetComposite>(&Request_);
             !AttributeRequest_.ShouldFetchAttributes() &&
             !std::holds_alternative<TReqGet>(Request_) &&
-            (!req || req->ScalarNodeIds_->empty()))
+            (!req || req->ScalarNodeIds->empty()))
         {
             return MakeFuture<TNodeIdToAttributes>({});
         }
@@ -889,7 +887,7 @@ private:
     struct TReqGetComposite
     {
         const TNodeIdToChildDescriptors* NodeIdToChildren = nullptr;
-        const std::vector<TNodeId>* ScalarNodeIds_ = nullptr;
+        const std::vector<TNodeId>* ScalarNodeIds = nullptr;
     };
 
     using TRequest = std::variant<TReqGetAttributes, TReqGet, TReqList, TReqGetComposite>;
@@ -911,8 +909,6 @@ private:
         if (auto attributeFilter = AttributeRequest_.GetBaseAttributeFilter(scope)) {
             ToProto(req->mutable_attributes(), attributeFilter);
         }
-        SetSuppressAccessTracking(req, true);
-        SetSuppressExpirationTimeoutRenewal(req, true);
         return SequoiaSession_->CreateGetBatcher(req, nodeIds, scope);
     }
 
@@ -923,7 +919,7 @@ private:
     {
         for (auto nodeId : nodeIdsToValidateNotMissing) {
             const auto& rspOrError = GetOrCrash(nodeIdToRspOrError, nodeId);
-            if (rspOrError.IsOK()) {
+            if (!rspOrError.IsOK()) {
                 if (auto error = WrapRetriableResolveError(rspOrError, nodeId); !error.IsOK()) {
                     // A race on the target node should be retried.
                     THROW_ERROR error;
@@ -938,7 +934,7 @@ private:
                 if (auto error = WrapRetriableResolveError(rspOrError, nodeId); error.IsOK()) {
                     // Not a resolve error. Pass it through.
                     THROW_ERROR_EXCEPTION("Error getting requested information from master")
-                        << rspOrError;
+                        .With(rspOrError);
                 }
 
                 // A race on a nested node should lead to that node being omitted silently.
@@ -1071,7 +1067,7 @@ private:
                 return rootNodeHolder;
             },
             [&] (const TReqGetComposite& req) -> TRange<TNodeId> {
-                return *(req.ScalarNodeIds_);
+                return *(req.ScalarNodeIds);
             },
             [&] <class TReq>(const TReq&) -> TRange<TNodeId>
                 requires std::same_as<TReq, TReqGetAttributes> || std::same_as<TReq, TReqList>

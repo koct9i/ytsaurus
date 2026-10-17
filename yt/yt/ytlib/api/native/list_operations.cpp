@@ -437,9 +437,9 @@ void ParseOperationToConsumer(TYsonPullParserCursor* cursor, TConsumer* consumer
 }
 
 template <typename TFunction, typename ...TArgs>
-auto RunYsonPullParser(TStringBuf yson, TFunction function, TArgs&&... args)
+auto RunYsonPullParser(TYsonStringBuf yson, TFunction function, TArgs&&... args)
 {
-    TMemoryInput input(yson);
+    TMemoryInput input(yson.AsStringBuf());
     TYsonPullParser parser(&input, EYsonType::Node);
     TYsonPullParserCursor cursor(&parser);
     return function(&cursor, std::forward<TArgs>(args)...);
@@ -794,7 +794,7 @@ private:
             {
                 Annotations_.clear();
                 TStdStringOutput output(Annotations_);
-                TYsonWriter writer(&output, EYsonFormat::Binary);
+                TYsonWriter writer(&output, EYsonFormat::Text);
                 cursor->TransferComplexValue(&writer);
             }
             SearchSubstring(Annotations_);
@@ -818,7 +818,7 @@ TListOperationsFilter::TListOperationsFilter(
 
 std::vector<TOperation> TListOperationsFilter::BuildOperations(const THashSet<std::string>& attributes) const
 {
-    YT_LOG_DEBUG("Building final operations result");
+    YT_TLOG_DEBUG("Building final operations result");
 
     std::vector<TOperation> operations;
     operations.reserve(LightOperations_.size());
@@ -827,7 +827,8 @@ std::vector<TOperation> TListOperationsFilter::BuildOperations(const THashSet<st
         RunYsonPullParser(lightOperation.Yson, ParseOperationToConsumer<TConstructingOperationConsumer>, &consumer);
     }
 
-    YT_LOG_DEBUG("Operations result built (OperationCount: %v)", operations.size());
+    YT_TLOG_DEBUG("Operations result built")
+        .With("OperationCount", operations.size());
 
     return operations;
 }
@@ -839,7 +840,8 @@ i64 TListOperationsFilter::GetCount() const
 
 void TListOperationsFilter::ParseResponses(std::vector<TYsonString> operationsResponses)
 {
-    YT_LOG_DEBUG("Parsing Cypress responses (ResponseCount: %v)", operationsResponses.size());
+    YT_TLOG_DEBUG("Parsing Cypress responses")
+        .With("ResponseCount", operationsResponses.size());
 
     std::vector<TFuture<TParseResult>> asyncResults;
 
@@ -888,7 +890,8 @@ void TListOperationsFilter::ParseResponses(std::vector<TYsonString> operationsRe
         LightOperations_.resize(operationsToRetain);
     }
 
-    YT_LOG_DEBUG("Cypress responses parsed (OperationCount: %v)", LightOperations_.size());
+    YT_TLOG_DEBUG("Cypress responses parsed")
+        .With("OperationCount", LightOperations_.size());
 }
 
 TListOperationsFilter::TParseResult TListOperationsFilter::ParseOperationsYson(TYsonString operationsYson) const
@@ -900,26 +903,26 @@ TListOperationsFilter::TParseResult TListOperationsFilter::ParseOperationsYson(T
     TListOperationsCountingFilter countingFilter(Options_);
     TFilteringConsumer filteringConsumer(&countingFilter, Options_, Context_);
 
-    TString singleOperationYson;
+    std::string singleOperationYsonString;
 
-    RunYsonPullParser(operationsYson.AsStringBuf(), [&operations, &filteringConsumer, &singleOperationYson] (TYsonPullParserCursor* cursor) {
+    RunYsonPullParser(operationsYson, [&operations, &filteringConsumer, &singleOperationYsonString] (TYsonPullParserCursor* cursor) {
         cursor->ParseList([&] (TYsonPullParserCursor* cursor) {
-            singleOperationYson.clear();
+            singleOperationYsonString.clear();
             {
-                TStringOutput output(singleOperationYson);
+                TStdStringOutput output(singleOperationYsonString);
                 TCheckedInDebugYsonTokenWriter writer(&output);
                 cursor->TransferComplexValue(&writer);
                 writer.Finish();
             }
+            auto singleOperationYson = TYsonString(singleOperationYsonString);
             RunYsonPullParser(
                 singleOperationYson,
                 ParseOperationToConsumer<TFilteringConsumer>,
                 &filteringConsumer);
             auto operation = filteringConsumer.ExtractCurrent();
             if (operation.FilterPassed) {
-                // Copy without COW (it is faster: otherwise on the next iteration
-                // |singleOperationYson| will be incrementally reallocated during |TransferComplexValue}).
-                operation.Yson = singleOperationYson.copy();
+                // Copy the buffer: it is reused (cleared and rewritten) on the next iteration.
+                operation.Yson = TYsonString(singleOperationYsonString);
                 operations.push_back(std::move(operation));
             }
         });

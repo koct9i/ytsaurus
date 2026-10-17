@@ -103,7 +103,7 @@ NYTree::EPermissionSet ExtendReadPermission(NYTree::EPermissionSet original);
 // The subject can be a user name, user alias, group name, or group alias.
 // Returns the matched subject id, or |NullObjectId| otherwise.
 template <class T, class TAccessControlEntry>
-concept CSubjectMatchCallback = CInvocable<
+concept CSubjectMatchCallback = NMpl::CInvocable<
     T,
     NSecurityClient::TSubjectId(const TAccessControlEntry&)>;
 
@@ -196,7 +196,7 @@ public:
 
 protected:
     const NYTree::EPermission Permission_;
-    const TPermissionCheckBasicOptions* Options_;
+    const TPermissionCheckBasicOptions* const Options_;
     const bool CheckAllAceColumnsFullRead_;
 
     TCallback MatchAceSubjectCallback_;

@@ -358,6 +358,7 @@ class Drop(Expression):
         "concurrently": False,
         "sync": False,
         "iceberg": False,
+        "force": False,
     }
 
     @property
@@ -368,6 +369,14 @@ class Drop(Expression):
 
 class DropPrimaryKey(Expression):
     arg_types = {}
+
+
+class Undrop(Expression):
+    arg_types = {"this": True, "kind": True, "rename": False}
+
+    @property
+    def kind(self) -> str:
+        return self.args["kind"].upper()
 
 
 class Command(Expression):
@@ -424,7 +433,7 @@ class NextValueFor(Expression, Func):
 
 
 class Execute(Expression):
-    arg_types = {"this": True, "expressions": False}
+    arg_types = {"this": True, "expressions": False, "return_status": False}
 
     @property
     def name(self) -> str:

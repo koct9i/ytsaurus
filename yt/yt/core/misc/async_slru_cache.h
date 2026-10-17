@@ -10,10 +10,11 @@
 
 #include <yt/yt/library/profiling/sensor.h>
 
-#include <library/cpp/yt/threading/atomic_object.h>
-#include <library/cpp/yt/threading/rw_spin_lock.h>
+#include <library/cpp/yt/system/atomic_object.h>
+#include <library/cpp/yt/system/rw_spin_lock.h>
 
 #include <atomic>
+#include <utility>
 
 namespace NYT {
 
@@ -45,7 +46,7 @@ protected:
 private:
     friend TCache;
 
-    NThreading::TAtomicObject<TWeakPtr<TCache>> Cache_;
+    TAtomicObject<TWeakPtr<TCache>> Cache_;
 
     TKey Key_;
     typename TCache::TItem* Item_ = nullptr;
@@ -86,6 +87,8 @@ public:
     void UpdateCookie(TItem* item, i64 countDelta, i64 weightDelta);
 
     TIntrusiveListWithAutoDelete<TItem, TDelete> TrimNoDelete();
+
+    bool IsOversized(i64 weight, i64 cookieWeight) const;
 
     bool TouchItem(TItem* item);
 
@@ -146,6 +149,9 @@ private:
 //! pointer to this value), it returns back to the cache. This behavior may be overloaded by
 //! overriding IsResurrectionSupported() function.
 //!
+//! When oversized-item rejection is enabled, a value that cannot survive cache trimming is not
+//! admitted or resurrected. It is still returned to the caller or delivered to concurrent waiters.
+//!
 //! This cache is quite complex and has many invariants. Read about them below and change the
 //! code carefully.
 template <class TKey, class TValue, class THash = THash<TKey>>
@@ -176,6 +182,7 @@ public:
         void UpdateWeight(i64 newWeight);
 
         void Cancel(const TError& error);
+
         void EndInsert(TValuePtr value);
 
     private:
@@ -272,9 +279,14 @@ protected:
         NProfiling::TCounter SyncHitCounter;
         NProfiling::TCounter AsyncHitCounter;
         NProfiling::TCounter MissedCounter;
+        NProfiling::TCounter RejectedOversizedCounter;
+        NProfiling::TCounter RejectedOversizedWeightCounter;
+        NProfiling::TCounter EvictedCounter;
+        NProfiling::TCounter EvictedWeightCounter;
     };
 
     //! For testing purposes only.
+    const TCounters& GetMainCounters() const;
     const TCounters& GetSmallGhostCounters() const;
     const TCounters& GetLargeGhostCounters() const;
 
@@ -367,20 +379,21 @@ private:
 
         using TAsyncSlruCacheListManager<TGhostItem, TGhostShard>::SetTouchBufferCapacity;
 
-        void Reconfigure(i64 capacity, double youngerSizeFraction);
+        void Reconfigure(i64 capacity, double youngerSizeFraction, bool rejectOversizedItems);
 
         DEFINE_BYVAL_RW_PROPERTY(TCounters*, Counters);
 
     private:
         friend class TAsyncSlruCacheListManager<TGhostItem, TGhostShard>;
 
-        YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SpinLock_);
+        YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SpinLock_);
 
         THashMap<TKey, TGhostItem*, THash> ItemMap_;
+        bool RejectOversizedItems_ = false;
 
         template <class THeterogenousKey>
         bool DoLookup(const THeterogenousKey& key, bool allowAsyncHits);
-        void Trim(NThreading::TWriterGuard<NThreading::TReaderWriterSpinLock>& guard);
+        void Trim(TWriterGuard<TReaderWriterSpinLock>& guard);
     };
 
     //! Cache shard. Each shard is a small cache that can store a subset of keys. It consists of lists (see
@@ -409,7 +422,7 @@ private:
         : public TAsyncSlruCacheListManager<TItem, TShard>
     {
     public:
-        YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, SpinLock);
+        YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, SpinLock);
 
         //! Holds pointers to values for any given key. They are stored to allow resurrection. When the value
         //! is freed, it will be removed from ValueMap. When the value is in Destroying state, the value will still
@@ -442,7 +455,7 @@ private:
     std::atomic<int> Size_ = 0;
     std::atomic<i64> Capacity_;
 
-    TCounters Counters_;
+    TCounters MainCounters_;
     TCounters SmallGhostCounters_;
     TCounters LargeGhostCounters_;
 
@@ -455,12 +468,15 @@ private:
     std::atomic<i64> CookieWeightCounter_ = 0;
 
     std::atomic<bool> GhostCachesEnabled_;
+    std::atomic<bool> RejectOversizedItems_;
 
     template <class THeterogenousKey>
     TShard* GetShardByKey(const THeterogenousKey& key) const;
 
+    //! Returns the value future and indicates whether the value was found in ValueMap
+    //! and needs to be resurrected in ghost caches.
     template <class THeterogenousKey>
-    TValueFuture DoLookup(TShard* shard, const THeterogenousKey& key);
+    std::pair<TValueFuture, bool> DoLookup(TShard* shard, const THeterogenousKey& key);
 
     void DoTryRemove(const TKey& key, const TValuePtr& value, bool forbidResurrection);
 
@@ -469,7 +485,7 @@ private:
     //! If the trim was causes by weight update or weighted cookie, then weightDelta represents weight changes.
     std::vector<TValuePtr> TrimWithNotify(
         TShard* shard,
-        NThreading::TWriterGuard<NThreading::TReaderWriterSpinLock>& guard,
+        TWriterGuard<TReaderWriterSpinLock>& guard,
         const TValuePtr& insertedValue,
         i64 weightDelta = 0);
 

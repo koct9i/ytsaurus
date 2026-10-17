@@ -12,7 +12,7 @@ using namespace NRpc;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, CoverageLogger, "Coverage");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, CoverageLogger, "Coverage");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -35,7 +35,7 @@ private:
 
 DEFINE_RPC_SERVICE_METHOD(TCoverageService, Collect)
 {
-    context->SetRequestInfo();
+    context->AnnotateRequest();
 
     ToProto(response->mutable_coverage_map(), ReadCoverageOrThrow());
 

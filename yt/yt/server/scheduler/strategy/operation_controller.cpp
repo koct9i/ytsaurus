@@ -22,7 +22,7 @@ TOperationController::TOperationController(
     const std::vector<IInvokerPtr>& nodeShardInvokers)
     : Controller_(operation->GetControllerStrategyHost())
     , OperationId_(operation->GetId())
-    , Logger(StrategyLogger().WithTag("OperationId: %v", OperationId_))
+    , Logger(StrategyLogger().WithTag("OperationId", OperationId_))
     , Config_(config)
     , NodeShardInvokers_(nodeShardInvokers)
     , ScheduleAllocationControllerThrottlingBackoff_(
@@ -49,15 +49,11 @@ void TOperationController::OnScheduleAllocationStarted(const ISchedulingHeartbea
 
     schedulingHeartbeatContext->StoreScheduleAllocationExecDurationEstimate(shard.ScheduleAllocationExecDurationEstimate);
 
-    YT_LOG_DEBUG_IF(
-        DetailedLogsEnabled_,
-        "Controller schedule allocation started "
-        "(ConcurrentScheduleAllocationCalls: %v, ConcurrentScheduleAllocationExecDuration: %v, "
-        "ScheduleAllocationExecDurationEstimate: %v, NodeShardId: %v)",
-        shard.ConcurrentScheduleAllocationCalls,
-        shard.ConcurrentScheduleAllocationExecDuration,
-        shard.ScheduleAllocationExecDurationEstimate,
-        nodeShardId);
+    YT_TLOG_DEBUG_IF(DetailedLogsEnabled_, "Controller schedule allocation started")
+        .With("ConcurrentScheduleAllocationCalls", shard.ConcurrentScheduleAllocationCalls)
+        .With("ConcurrentScheduleAllocationExecDuration", shard.ConcurrentScheduleAllocationExecDuration)
+        .With("ScheduleAllocationExecDurationEstimate", shard.ScheduleAllocationExecDurationEstimate)
+        .With("NodeShardId", nodeShardId);
 }
 
 void TOperationController::OnScheduleAllocationFinished(const ISchedulingHeartbeatContextPtr& schedulingHeartbeatContext)
@@ -67,15 +63,11 @@ void TOperationController::OnScheduleAllocationFinished(const ISchedulingHeartbe
     --shard.ConcurrentScheduleAllocationCalls;
     shard.ConcurrentScheduleAllocationExecDuration -= schedulingHeartbeatContext->ExtractScheduleAllocationExecDurationEstimate();
 
-    YT_LOG_DEBUG_IF(
-        DetailedLogsEnabled_,
-        "Controller schedule allocation finished "
-        "(ConcurrentScheduleAllocationCalls: %v, ConcurrentScheduleAllocationExecDuration: %v, "
-        "ScheduleAllocationExecDurationEstimate: %v, NodeShardId: %v)",
-        shard.ConcurrentScheduleAllocationCalls,
-        shard.ConcurrentScheduleAllocationExecDuration,
-        shard.ScheduleAllocationExecDurationEstimate,
-        nodeShardId);
+    YT_TLOG_DEBUG_IF(DetailedLogsEnabled_, "Controller schedule allocation finished")
+        .With("ConcurrentScheduleAllocationCalls", shard.ConcurrentScheduleAllocationCalls)
+        .With("ConcurrentScheduleAllocationExecDuration", shard.ConcurrentScheduleAllocationExecDuration)
+        .With("ScheduleAllocationExecDurationEstimate", shard.ScheduleAllocationExecDurationEstimate)
+        .With("NodeShardId", nodeShardId);
 }
 
 TCompositeNeededResources TOperationController::GetNeededResources() const
@@ -180,12 +172,10 @@ bool TOperationController::IsMaxConcurrentScheduleAllocationCallsPerNodeShardVio
     auto& shard = StateShards_[nodeShardId];
     bool limitViolated = shard.ConcurrentScheduleAllocationCalls >= shard.MaxConcurrentControllerScheduleAllocationCalls;
 
-    YT_LOG_DEBUG_IF(
-        limitViolated && DetailedLogsEnabled_,
-        "Max concurrent schedule allocation calls per node shard violated (ConcurrentScheduleAllocationCalls: %v, Limit: %v, NodeShardId: %v)",
-        shard.ConcurrentScheduleAllocationCalls,
-        shard.MaxConcurrentControllerScheduleAllocationCalls,
-        nodeShardId);
+    YT_TLOG_DEBUG_IF(limitViolated && DetailedLogsEnabled_, "Max concurrent schedule allocation calls per node shard violated")
+        .With("ConcurrentScheduleAllocationCalls", shard.ConcurrentScheduleAllocationCalls)
+        .With("Limit", shard.MaxConcurrentControllerScheduleAllocationCalls)
+        .With("NodeShardId", nodeShardId);
 
     return limitViolated;
 }
@@ -200,15 +190,11 @@ bool TOperationController::IsMaxConcurrentScheduleAllocationExecDurationPerNodeS
     auto& shard = StateShards_[nodeShardId];
     bool limitViolated = shard.ConcurrentScheduleAllocationExecDuration >= shard.MaxConcurrentControllerScheduleAllocationExecDuration;
 
-    YT_LOG_DEBUG_IF(
-        limitViolated && DetailedLogsEnabled_,
-        "Max concurrent schedule allocation exec duration per node shard violated "
-        "(ConcurrentScheduleAllocationExecDuration: %v, Limit: %v, "
-        "ScheduleAllocationExecDurationEstimate: %v, NodeShardId: %v)",
-        shard.ConcurrentScheduleAllocationExecDuration,
-        shard.MaxConcurrentControllerScheduleAllocationExecDuration,
-        shard.ScheduleAllocationExecDurationEstimate,
-        nodeShardId);
+    YT_TLOG_DEBUG_IF(limitViolated && DetailedLogsEnabled_, "Max concurrent schedule allocation exec duration per node shard violated")
+        .With("ConcurrentScheduleAllocationExecDuration", shard.ConcurrentScheduleAllocationExecDuration)
+        .With("Limit", shard.MaxConcurrentControllerScheduleAllocationExecDuration)
+        .With("ScheduleAllocationExecDurationEstimate", shard.ScheduleAllocationExecDurationEstimate)
+        .With("NodeShardId", nodeShardId);
 
     return limitViolated;
 }
@@ -243,7 +229,8 @@ TControllerScheduleAllocationResultPtr TOperationController::ScheduleAllocation(
     const std::string& treeId,
     const NYPath::TYPath& poolPath,
     std::optional<TDuration> waitingForResourcesOnNodeTimeout,
-    std::optional<std::string> allocationGroupName)
+    std::optional<std::string> allocationGroupName,
+    TAllocationId allocationId)
 {
     auto scheduleAllocationResultFuture = Controller_->ScheduleAllocation(
         context,
@@ -252,7 +239,8 @@ TControllerScheduleAllocationResultPtr TOperationController::ScheduleAllocation(
         treeId,
         poolPath,
         waitingForResourcesOnNodeTimeout,
-        std::move(allocationGroupName));
+        std::move(allocationGroupName),
+        allocationId);
 
     auto scheduleAllocationResultFutureWithTimeout = scheduleAllocationResultFuture
         .ToUncancelable()
@@ -270,10 +258,9 @@ TControllerScheduleAllocationResultPtr TOperationController::ScheduleAllocation(
         ] (const TError& /*error*/) {
             auto now = TInstant::Now();
             if (startTime + longScheduleAllocationThreshold < now) {
-                YT_LOG_DEBUG(
-                    "Schedule allocation takes too long (Duration: %v ms, LongScheduleAllocationThreshold: %v ms)",
-                    (now - startTime).MilliSeconds(),
-                    longScheduleAllocationThreshold.MilliSeconds());
+                YT_TLOG_DEBUG("Schedule allocation takes too long")
+                    .With("Duration", now - startTime)
+                    .With("LongScheduleAllocationThreshold", longScheduleAllocationThreshold);
             }
         }));
 
@@ -303,9 +290,8 @@ TControllerScheduleAllocationResultPtr TOperationController::ScheduleAllocation(
                     const auto& scheduleAllocationResult = scheduleAllocationResultOrError.Value();
                     if (scheduleAllocationResult->StartDescriptor) {
                         auto allocationId = scheduleAllocationResult->StartDescriptor->Id;
-                        YT_LOG_WARNING(
-                            "Aborting late allocation (AllocationId: %v)",
-                            allocationId);
+                        YT_TLOG_WARNING("Aborting late allocation")
+                            .With("AllocationId", allocationId);
                         AbortAllocation(
                             allocationId,
                             EAbortReason::SchedulingTimeout,
@@ -356,9 +342,9 @@ void TOperationController::OnScheduleAllocationFailed(
     }
 
     if (backoffDeadline > 0) {
-        YT_LOG_DEBUG("Failed to schedule allocation, backing off (Duration: %v, Reasons: %v)",
-            backoffDeadline - now,
-            MakeFormatterWrapper([&] (auto* builder) {
+        YT_TLOG_DEBUG("Failed to schedule allocation, backing off")
+            .With("Duration", backoffDeadline - now)
+            .With("Reasons", MakeFormatterWrapper([&] (auto* builder) {
                 // NB(bystrovserg): Log only non-zero fail reasons.
                 builder->AppendChar('{');
                 TDelimitedStringBuilderWrapper delimitedBuilder(builder);

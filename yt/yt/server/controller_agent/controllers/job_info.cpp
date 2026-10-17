@@ -8,6 +8,8 @@
 
 #include <yt/yt/server/lib/scheduler/job_metrics.h>
 
+#include <yt/yt/server/lib/controller_agent/structs.h>
+
 #include <yt/yt/core/profiling/timing.h>
 
 #include <util/generic/cast.h>
@@ -104,7 +106,7 @@ TJoblet::TJoblet(
 
 TJobMetrics TJoblet::UpdateJobMetrics(const TJobSummary& jobSummary, bool isJobFinished)
 {
-    const auto Logger = ControllerLogger().WithTag("JobId: %v", JobId);
+    const auto Logger = ControllerLogger().WithTag("JobId", JobId);
 
     if (!jobSummary.Statistics) {
         // Return empty delta if job has no statistics.
@@ -122,9 +124,9 @@ TJobMetrics TJoblet::UpdateJobMetrics(const TJobSummary& jobSummary, bool isJobF
     bool monotonicityViolated = !Dominates(newJobMetrics, JobMetrics);
     if (monotonicityViolated) {
         if (!HasLoggedJobMetricsMonotonicityViolation) {
-            YT_LOG_WARNING("Job metrics monotonicity violated (Previous: %v, Current: %v)",
-                ConvertToYsonString(JobMetrics, EYsonFormat::Text),
-                ConvertToYsonString(newJobMetrics, EYsonFormat::Text));
+            YT_TLOG_WARNING("Job metrics monotonicity violated")
+                .With("Previous", ConvertToYsonString(JobMetrics, EYsonFormat::Text))
+                .With("Current", ConvertToYsonString(newJobMetrics, EYsonFormat::Text));
 
             HasLoggedJobMetricsMonotonicityViolation = true;
         }
@@ -197,7 +199,9 @@ void TJoblet::RegisterMetadata(auto&& registrar)
     PHOENIX_REGISTER_FIELD(13, BriefStatistics);
     PHOENIX_REGISTER_FIELD(14, Progress);
     PHOENIX_REGISTER_FIELD(15, StderrSize);
-    PHOENIX_REGISTER_FIELD(16, Phase);
+    PHOENIX_REGISTER_FIELD(16, Phase,
+        // COMPAT(pogorelov)
+        .template Serializer<TJobPhaseSerializer>());
     PHOENIX_REGISTER_FIELD(17, CompetitionIds);
     PHOENIX_REGISTER_FIELD(18, HasCompetitors);
     PHOENIX_REGISTER_FIELD(19, TaskName);

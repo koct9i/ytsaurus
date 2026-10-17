@@ -21,12 +21,14 @@
 #include <yt/yt/ytlib/security_client/proto/account_ypath.pb.h>
 
 #include <yt/yt/ytlib/object_client/config.h>
+#include <yt/yt/ytlib/object_client/object_service_proxy.h>
 
 #include <yt/yt/core/yson/async_writer.h>
 
 #include <yt/yt/core/ytree/fluent.h>
 #include <yt/yt/core/ytree/node_detail.h>
 #include <yt/yt/core/ytree/virtual.h>
+#include <yt/yt/core/ytree/ypath_proxy.h>
 
 namespace NYT::NSecurityServer {
 
@@ -143,10 +145,11 @@ private:
                 account->GetName());
         }
 
-        if (account->ClusterStatistics() != TAccountStatistics::Empty) {
-            THROW_ERROR_EXCEPTION("Cannot remove an account %Qv because its usage is not zero (AccountUsage: %v)",
-                account->GetName(),
-                account->ClusterStatistics());
+        // Master memory usage is eventually consistent and may be stale, so do not check it here.
+        if (!account->ClusterStatistics().IsPersistentlyEmpty()) {
+            THROW_ERROR_EXCEPTION("Cannot remove account %Qv because its usage is not zero",
+                account->GetName())
+                .With("current_usage", ToString(account->ClusterStatistics()));
         }
 
         const auto& securityManager = Bootstrap_->GetSecurityManager();
@@ -505,6 +508,9 @@ private:
             multicellManager->GetMasterChannelOrThrow(cellTag, NHydra::EPeerKind::Follower));
         auto batchReq = proxy.ExecuteBatch();
 
+        const auto& securityManager = Bootstrap_->GetSecurityManager();
+        batchReq->SetUser(securityManager->GetAuthenticatedUserNameToForward());
+
         auto accountId = GetId();
 
         auto req = TYPathProxy::Get(account->GetObjectPath() + "/@chunk_merger_usage");
@@ -689,9 +695,9 @@ private:
             Bootstrap_,
             /*zeroByDefault*/ true);
 
-        context->SetRequestInfo("SrcAccount: %v, DstAccount: %v",
-            srcAccount->GetName(),
-            impl->GetName());
+        context->AnnotateRequest()
+            .With("SrcAccount", srcAccount->GetName())
+            .With("DstAccount", impl->GetName());
 
         securityManager->TransferAccountResources(srcAccount, impl, resourceDelta);
 

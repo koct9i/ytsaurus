@@ -16,10 +16,11 @@ Most of the options are available starting with version 1.23.0, unless otherwis
 | `spark.yt.write.typeV3.enabled` (`spark.yt.write.writingTypeV3.enabled` before 1.75.2) | `true` | Writing of tables with a schema in [type_v3](../../../../../user-guide/storage/data-types.md) format instead of `type_v1`. | 1.75.3 |
 | `spark.yt.read.vectorized.capacity` | `1000` | Maximum number of rows in a batch for reading via the `wire` protocol. | - |
 | `spark.yt.read.arrow.enabled` | `true` | Use the `arrow` format to read data (if possible). | - |
-| `spark.hadoop.yt.timeout` | `300 seconds` | Timeout on reads from {{product-name}}. | - |
+| `spark.hadoop.yt.timeout` | `30 seconds` | Timeout on reads from {{product-name}}. | - |
 | `spark.yt.read.typeV3.enabled` (`spark.yt.read.parsingTypeV3.enabled` before 1.75.2) | `true` | Reading of tables with a schema in [type_v3](../../../../../user-guide/storage/data-types.md) format instead of `type_v1`. | 1.75.3 |
 | `spark.yt.read.keyColumnsFilterPushdown.enabled` | `true` | Use Spark query filters to selectively read from {{product-name}}. | - |
 | `spark.yt.read.keyColumnsFilterPushdown.union.enabled` | `false` | Combine all filters into a continuous range for selective reading. | - |
+| `spark.yt.read.keyColumnsFilterPushdown.mergeAdjacent.enabled` | `false` | Merge ranges over consecutive integer key values into a single range. | 2.12.0 |
 | `spark.yt.read.keyColumnsFilterPushdown.ytPathCount.limit` | `100` | Maximum number of table ranges for selective reading. | - |
 | `spark.yt.transaction.timeout` | `5 minutes` | Write operation transaction timeout. | - |
 | `spark.yt.transaction.pingInterval` | `30 seconds` | Pinging interval of a write operation transaction. | - |
@@ -30,22 +31,26 @@ Most of the options are available starting with version 1.23.0, unless otherwis
 | `spark.hadoop.yt.user` | - | {{product-name}} user name. | - |
 | `spark.hadoop.yt.token` | - | {{product-name}} user token. | - |
 | `spark.yt.read.ytPartitioning.enabled` | `true` | Use table partitioning by {{product-name}}. | 1.72.0 |
-| `spark.yt.read.ytPartitioning.compressedSize.enabled` | `false` | Enable data partitioning when reading by the compressed size of the table. | 2.9.1 | - |
+| `spark.yt.read.ytPartitioning.compressedSize.enabled` | `false` | Enable data partitioning when reading by the compressed size of the table. | 2.9.1 |
 | `spark.yt.read.planOptimization.enabled` | `false` | Optimize aggregations and joins on sorted input data. | - |
 | `spark.yt.read.countOptimization.enabled` | `true` | Use metadata for count() operations. | - |
 | `spark.yt.read.keyPartitioningSortedTables.enabled` | `true` | Use sorted table partitioning by key, required to optimize plans. | - |
 | `spark.yt.read.keyPartitioningSortedTables.unionLimit` | `1` | Maximum number of partition joins when switching from reading by index to reading by key. | - |
 | `spark.yt.read.transactional` | `true` | Use snapshot lock for reading if transaction is not specified. It is recommended to turn this option off when reading immutable data to improve reading performance. | 2.6.0 |
 | `spark.yt.read.listParentDirectories` | `true` | Batch read of attributes from parent directories when reading by a list of tables. Helps when reading a large number of tables from a single parent directory. | 2.7.5 |
-| `spark.yt.read.ytDistributedReading.enabled` | `false` | Use distributed API for reading data from {{product-name}}. This method reduces the number of requests to the {{product-name}} master when reading data, but is not yet compatible with the `spark.yt.read.planOptimization.enabled` option. | 2.8.0 |
+| `spark.yt.read.ytDistributedReading.enabled` | `false` | Use distributed API for reading data from {{product-name}}. This method reduces the number of requests to the {{product-name}} master when reading data, but is not yet compatible with the `spark.yt.read.planOptimization.enabled` option. Does not apply to ordered dynamic tables: they are read in the regular way. | 2.8.0 |
 | `spark.yt.write.distributed.enabled` | `false` | Use distributed API for writing data to {{product-name}}. This method reduces the number of requests to the {{product-name}} master when writing data, but is only applicable to working with static tables. | 2.8.0 |
 | `spark.yt.read.ytOmitInaccessibleRows.enabled` | `true` | Skip inaccessible rows instead of throwing an error. | 2.9.0 |
 | `spark.yt.read.ytOmitInaccessibleColumns.enabled` | `true` | Skip inaccessible columns instead of throwing an error. | 2.9.0 |
+| `spark.ytsaurus.throttling.maxConcurrency` | `100` | Maximum number of concurrent operations in {{product-name}}. A value of `0` removes the limit. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.requests.enabled` | `true` | Retry requests rejected by an overloaded proxy. Applies to clients with a fixed proxy address, including job proxy: clients with proxy discovery retry requests even without this option. Retries responses with the `RequestQueueSizeLimitExceeded`, `RpcRequestQueueSizeLimitExceeded` and `TooManyRequests` codes, as well as network timeouts and connection drops (the latter are retried without a pause). Only unary requests are retried: data reading and writing are stream‑based and are not retried. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.maxRetries` | `3` | Number of times a request is retried after the first failed attempt. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.initialBackoff` | `3 seconds` | Pause before the first retry. | 2.11.0 |
+| `spark.hadoop.ytsaurus.retry.maxBackoff` | `30 seconds` | Upper limit of the pause, which doubles after each retry. Applies only to the `RequestQueueSizeLimitExceeded` code; other cases are retried using `initialBackoff`. | 2.11.0 |
 
 {wide-content title="Basic options"}
 
 ## Options for launching tasks directly { #direct-submit }
-
 
 | **Parameter** | **Default value** | **Description** | **Starting with version** |
 | ------------ | ------------------------- | ------------ | ------------------ |
@@ -96,8 +101,9 @@ Most of the options are available starting with version 1.23.0, unless otherwis
 | `spark.ytsaurus.shuffle.partition.column` | partition | The name of the chunk column used to store the target partition index. | 2.7.0 |
 | `spark.ytsaurus.shuffle.write.row.size` | 8m | The maximum size of a single row in a chunk containing shuffle data. This value is not directly related to the size of shuffle data rows but serves to partition serialized shuffle data into chunk rows. Reducing this value increases the number of rows in the chunk, while raising the value may result in exceeding the maximum allowed chunk row size. | 2.7.0 |
 | `spark.ytsaurus.shuffle.write.buffer.size` | 10 | Shuffle data write buffer size (in rows) in {{product-name}}. Set this parameter together with `spark.ytsaurus.shuffle.write.row.size` to avoid RAM overflow. | 2.7.0 |
-| `spark.ytsaurus.shuffle.write.config` | - | Additional parameters for writing shuffle data in {{product-name}} in [YSON](../../../../../user-guide/storage/yson.md) format. Matches the [TableWriter](../../../../../user-guide/storage/io-configuration.md#table_writer) configuration. | 2.7.0 |
-| `spark.ytsaurus.shuffle.read.config` | - | Additional parameters for reading shuffle data in {{product-name}} in [YSON](../../../../../user-guide/storage/yson.md) format. Matches the [TableReader](../../../../../user-guide/storage/io-configuration.md#table_reader) configuration. | 2.7.0 |
+| `spark.ytsaurus.shuffle.config` | - | Shuffle configuration in [YSON](../../../../../user-guide/storage/yson.md) format. It is passed once when a shuffle is started and is shared by all writers and readers of that shuffle. May contain only the section of the used shuffle mode (other top-level keys fail shuffle registration): `{pull={reader=...;writer=...}}` when push-based shuffle is disabled (matches the [TableReader](../../../../../user-guide/storage/io-configuration.md#table_reader) and [TableWriter](../../../../../user-guide/storage/io-configuration.md#table_writer) configurations) or `{push={writer=...;reader=...;journal_writer=...;session_pool=...}}` when push-based shuffle is enabled | 2.12.0 |
+| `spark.ytsaurus.shuffle.write.config` | - | Deprecated since 2.12.0 and has no effect. Use `spark.ytsaurus.shuffle.config` with `{pull={writer=...}}` instead. | 2.7.0 |
+| `spark.ytsaurus.shuffle.read.config` | - | Deprecated since 2.12.0 and has no effect. Use `spark.ytsaurus.shuffle.config` with `{pull={reader=...}}` instead. | 2.7.0 |
 
 {wide-content title="Configuration options for the {{product-name}} Shuffle service"}
 

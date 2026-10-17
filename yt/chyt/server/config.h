@@ -34,7 +34,9 @@
 
 #include <yt/yt/library/profiling/solomon/config.h>
 
-#include <yt/yt/library/clickhouse_discovery/config.h>
+#include <yt/yt/library/clickhouse_discovery/public.h>
+
+#include <yt/yt/library/cypress_election/config.h>
 
 #include <yt/yt/library/re2/public.h>
 
@@ -43,13 +45,14 @@ namespace NYT::NClickHouseServer {
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Settings affecting how CHYT behaves around composite values and any columns.
-class TCompositeSettings
+struct TCompositeSettings
     : public NYTree::TYsonStruct
 {
-public:
     EExtendedYsonFormat DefaultYsonFormat;
 
     bool ConvertUnsupportedTypesToString;
+
+    bool AnnotateResultSchemaWithNativeTypes;
 
     bool EnableComplexNullConverison;
 
@@ -67,10 +70,9 @@ DEFINE_REFCOUNTED_TYPE(TCompositeSettings)
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Settings affecting low cardinality type conversion.
-class TLowCardinalitySettings
+struct TLowCardinalitySettings
     : public NYTree::TYsonStruct
 {
-public:
     //! Defines how CHYT works with LC types:
     //! * None - doesn't convert any column to LC;
     //! * StringOnly - converts columns with string-like types (string, utf, json);
@@ -94,10 +96,9 @@ DEFINE_REFCOUNTED_TYPE(TLowCardinalitySettings)
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Settings affecting type conversion.
-class TConversionSettings
+struct TConversionSettings
     : public NYTree::TYsonStruct
 {
-public:
     TCompositeSettingsPtr Composite;
 
     TLowCardinalitySettingsPtr LowCardinality;
@@ -124,10 +125,9 @@ DEFINE_REFCOUNTED_TYPE(TConversionSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TDynamicTableSettings
+struct TDynamicTableSettings
     : public NYTree::TYsonStruct
 {
-public:
     bool EnableDynamicStoreRead;
 
     int WriteRetryCount;
@@ -149,13 +149,15 @@ DEFINE_REFCOUNTED_TYPE(TDynamicTableSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TTestingSettings
+struct TTestingSettings
     : public NYTree::TYsonStruct
 {
-public:
     bool ThrowExceptionInDistributor;
     bool ThrowExceptionInSubquery;
     bool ThrowExceptionInWriterFinish;
+    bool ThrowExceptionAfterRefreshQuery;
+    bool ThrowExceptionAfterRefreshCommit;
+    std::optional<int> FailMaterializedViewRefreshQueryResponseForPartition;
     i64 SubqueryAllocationSize;
 
     bool HangControlInvoker;
@@ -169,6 +171,7 @@ public:
     std::optional<NYPath::TYPath> ListDirsBreakpoint;
     std::optional<NYPath::TYPath> SourceGenerateCallBreakpoint;
     std::optional<NYPath::TYPath> DropTableBreakpoint;
+    std::optional<NYPath::TYPath> MaterializedViewConsumerCommitBreakpoint;
 
     REGISTER_YSON_STRUCT(TTestingSettings);
 
@@ -179,10 +182,9 @@ DEFINE_REFCOUNTED_TYPE(TTestingSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TExecutionSettings
+struct TExecutionSettings
     : public NYTree::TYsonStruct
 {
-public:
     //! Hard limit for query depth. Query will be aborted after reaching this.
     //! If |value| <= 0,  the limit is disabled.
     i64 QueryDepthLimit;
@@ -241,6 +243,7 @@ public:
     //! Mode defines how tables are locked for reading during the query execution.
     ETableReadLockMode TableReadLockMode;
 
+    //! Skip chunks whose column min/max statistics do not satisfy the query filter.
     bool EnableMinMaxFiltering;
 
     //! The intent of this optimization is similar to the `optimize_read_in_order` setting in native CH.
@@ -323,10 +326,9 @@ DEFINE_REFCOUNTED_TYPE(TExecutionSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TConcatTablesSettings
+struct TConcatTablesSettings
     : public NYTree::TYsonStruct
 {
-public:
     //! What to do if a column is missing in some tables (Drop / Throw / ReadAsNull).
     EMissingColumnMode MissingColumnMode;
     //! What to do if types of the column in different tables do not match (Drop / Throw / ReadAsAny).
@@ -347,10 +349,9 @@ DEFINE_REFCOUNTED_TYPE(TConcatTablesSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TCachingSettings
+struct TCachingSettings
     : public NYTree::TYsonStruct
 {
-public:
     //! Specifies how to invalidate cached attributes after table is modified (write/drop).
     EInvalidateCacheMode TableAttributesInvalidateMode;
     //! Timeout for outgoing 'InvalidateCachedObjectAttributes' RPC requests to other instances.
@@ -371,10 +372,9 @@ DEFINE_REFCOUNTED_TYPE(TCachingSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TListDirSettings
+struct TListDirSettings
     : public NYTree::TYsonStruct
 {
-public:
     //! Maximum number of nodes in listed directory. If exceeded, the error is thrown.
     //! Zero means 'default yt limit'.
     int MaxSize;
@@ -388,10 +388,9 @@ DEFINE_REFCOUNTED_TYPE(TListDirSettings)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class TPrewhereSettings
+struct TPrewhereSettings
     : public NYTree::TYsonStruct
 {
-public:
     //! If |true|, CHYT would use a separate stage to pre-filter data slices
     //! with a prewhere condition before reading all other columns.
     //! This could significantly reduce the amount of data read from YT if the
@@ -416,25 +415,32 @@ DEFINE_REFCOUNTED_TYPE(TPrewhereSettings)
 ////////////////////////////////////////////////////////////////////////////////
 
 //! This class will be accessible either via settings or via default_settings.
-class TQuerySettings
+struct TQuerySettings
     : public NYTree::TYsonStruct
 {
-public:
+    //! Skip chunks (and dynamic table tablets) whose key ranges do not satisfy the query key condition.
     bool EnableKeyConditionFiltering;
     bool MakeUpperBoundInclusive;
 
     bool EnableColumnarRead;
 
+    //! If a sorted table has a computed key column (e.g. `key_hash` with expression `farm_hash(key)`),
+    //! deduce its value from the WHERE predicate on source columns (e.g. `key = 'xyz'`)
+    //! so that the full key can be used for filtering.
     bool EnableComputedColumnDeduction;
 
     bool UseBlockSampling;
 
+    //! How deduced computed column values are added to the predicate:
+    //! `In` (`column IN (A, B, C)`) or `DNF` (`column = A OR column = B OR column = C`).
     EDeducedStatementMode DeducedStatementMode;
 
     bool LogKeyConditionDetails;
 
+    //! Perform row batches conversion inside our separate worker thread pool instead of the CH's default thread.
     bool ConvertRowBatchesInWorkerThreadPool;
 
+    //! For sorted dynamic tables, skip tablets whose pivot key ranges do not satisfy the key condition before fetching chunk specs.
     bool InferDynamicTableRangesFromPivotKeys;
 
     TConversionSettingsPtr Conversion;
@@ -463,9 +469,15 @@ public:
 
     TPrewhereSettingsPtr Prewhere;
 
+    //! If `FROM <identifier>` resolves to both a YT table and a clique-internal storage, choose which one to read
+    //! from or throw an error.
     EStorageConflictResolveMode StorageConflictResolveMode;
 
     bool OmitInaccessibleRows;
+
+    // TODO(buyval01) Temporary compatibility workaround for ClickHouse's TO + POPULATE restriction.
+    // Replace with standard POPULATE DDL syntax once ClickHouse supports it.
+    bool MaterializedViewPopulate;
 
     REGISTER_YSON_STRUCT(TQuerySettings);
 
@@ -522,6 +534,11 @@ struct TSubqueryConfig
     bool UseColumnarStatistics;
 
     i64 MinSliceDataWeight;
+
+    //! If set, chunk specs of static tables fetched from master for a full (trivial)
+    //! read range are cached; null (the default) disables caching entirely. Does not
+    //! apply to dynamic tables.
+    TSlruCacheConfigPtr ChunkSpecCache;
 
     REGISTER_YSON_STRUCT(TSubqueryConfig);
 
@@ -677,19 +694,39 @@ DEFINE_REFCOUNTED_TYPE(TUserDefinedSqlObjectsStorageConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-struct TDictionaryRepositoryConfig
+struct TCypressObjectRepositoryConfig
     : public NYTree::TYsonStruct
 {
     NYPath::TYPath RootPath;
 
     TDuration UpdatePeriod;
 
-    REGISTER_YSON_STRUCT(TDictionaryRepositoryConfig);
+    REGISTER_YSON_STRUCT(TCypressObjectRepositoryConfig);
 
     static void Register(TRegistrar registrar);
 };
 
-DEFINE_REFCOUNTED_TYPE(TDictionaryRepositoryConfig)
+DEFINE_REFCOUNTED_TYPE(TCypressObjectRepositoryConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct TMaterializedViewsConfig
+    : public NYTree::TYsonStruct
+{
+    NYPath::TYPath RootPath;
+    TDuration ScanPeriod;
+    i64 MaxRowsPerRefresh;
+    int MaxPartitionsPerRefresh;
+    TDuration QueryTimeout;
+    TDuration TableMountTimeout;
+    TDuration TransactionTimeout;
+
+    REGISTER_YSON_STRUCT(TMaterializedViewsConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TMaterializedViewsConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -783,6 +820,7 @@ struct TYtConfig
     TGuid InstanceId;
     TString CliqueAlias;
     i64 CliqueIncarnation;
+    NYPath::TYPath OrchidRoot;
     //! Address override when entering discovery group.
     std::optional<TString> Address;
     //! Clique size for better profiling.
@@ -842,6 +880,8 @@ struct TYtConfig
 
     THealthCheckerConfigPtr HealthChecker;
 
+    NCypressElection::TCypressElectionManagerConfigPtr ElectionManager;
+
     THashMap<TString, TString> DatabaseDirectories;
 
     TShowTablesConfigPtr ShowTables;
@@ -856,7 +896,9 @@ struct TYtConfig
 
     TUserDefinedSqlObjectsStorageConfigPtr UserDefinedSqlObjectsStorage;
 
-    TDictionaryRepositoryConfigPtr DictionaryRepository;
+    TCypressObjectRepositoryConfigPtr CypressObjectRepository;
+
+    TMaterializedViewsConfigPtr MaterializedViews;
 
     TDictionaryAccessControlConfigPtr DictionaryAccessControl;
 

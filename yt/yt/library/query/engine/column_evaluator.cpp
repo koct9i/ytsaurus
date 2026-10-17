@@ -278,8 +278,8 @@ public:
 
         auto cachedEvaluator = TSyncSlruCacheBase::Find(id);
         if (!cachedEvaluator) {
-            YT_LOG_DEBUG("Codegen cache miss: generating column evaluator (Schema: %v)",
-                *schema);
+            YT_TLOG_DEBUG("Codegen cache miss: generating column evaluator")
+                .With("Schema", *schema);
 
             auto evaluator = TColumnEvaluator::Create(
                 schema,
@@ -300,7 +300,7 @@ public:
 
     i64 GetSize() const override
     {
-        return TSyncSlruCacheBase<llvm::FoldingSetNodeID, TCachedColumnEvaluator>::GetSize();
+        return TSyncSlruCacheBase::GetSize();
     }
 
 private:

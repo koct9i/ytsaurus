@@ -15,13 +15,16 @@
 #include <yt/yt/ytlib/chunk_client/medium_directory_synchronizer.h>
 #include <yt/yt/ytlib/chunk_client/public.h>
 #include <yt/yt/ytlib/chunk_client/replication_reader.h>
+#include <yt/yt/ytlib/chunk_client/replication_writer.h>
 #include <yt/yt/ytlib/chunk_client/session_id.h>
 #include <yt/yt/ytlib/chunk_client/medium_descriptor.h>
 
-#include <yt/yt/client/node_tracker_client/public.h>
-
+#include <yt/yt/client/chunk_client/config.h>
 #include <yt/yt/client/chunk_client/chunk_replica.h>
 
+#include <yt/yt/client/node_tracker_client/public.h>
+
+#include <yt/yt/core/concurrency/delayed_executor.h>
 #include <yt/yt/core/concurrency/thread_pool_poller.h>
 
 #include <yt/yt/core/test_framework/framework.h>
@@ -58,6 +61,18 @@ using namespace NYson;
 
 using ::testing::HasSubstr;
 using ::testing::SizeIs;
+
+////////////////////////////////////////////////////////////////////////////////
+
+// Helper: make a minimal finalized chunk meta suitable for Close().
+TDeferredChunkMetaPtr MakeEmptyChunkMeta()
+{
+    auto meta = New<TDeferredChunkMeta>();
+    meta->set_type(0);
+    meta->set_format(0);
+    *meta->mutable_extensions() = {};
+    return meta;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -145,22 +160,29 @@ protected:
             /*priority*/ 0,
             mediumConfig);
 
-        TCreateObjectOptions options;
-        auto attrs = CreateEphemeralAttributes();
-        attrs->Set("name", "test_s3_medium");
-        attrs->Set("index", 15);
-        attrs->Set("priority", 0);
-        attrs->Set("config", mediumConfig);
-        options.Attributes = attrs;
+        // The medium is shared across tests, so it
+        // may have already been created in a previous one.
+        bool mediumExists = WaitFor(Client_->NodeExists("//sys/media/test_s3_medium"))
+            .ValueOrThrow();
 
-        WaitFor(Client_->CreateObject(EObjectType::S3Medium, options))
-            .ThrowOnError();
-        WaitUntil(
-            [&] {
-                return WaitFor(Client_->NodeExists("//sys/media/test_s3_medium"))
-                    .ValueOrThrow();
-            },
-            "The S3 medium was not created");
+        if (!mediumExists) {
+            TCreateObjectOptions options;
+            auto attrs = CreateEphemeralAttributes();
+            attrs->Set("name", "test_s3_medium");
+            attrs->Set("index", 15);
+            attrs->Set("priority", 0);
+            attrs->Set("config", mediumConfig);
+            options.Attributes = attrs;
+
+            WaitFor(Client_->CreateObject(EObjectType::S3Medium, options))
+                .ThrowOnError();
+            WaitUntil(
+                [&] {
+                    return WaitFor(Client_->NodeExists("//sys/media/test_s3_medium"))
+                        .ValueOrThrow();
+                },
+                "The S3 medium was not created");
+        }
     }
 
     void SetUpS3Writer()
@@ -179,9 +201,15 @@ protected:
     void SetUpReplicationReader()
     {
         NativeClient_ = DynamicPointerCast<NNative::IClient>(Client_);
+
+        // The chunk is written directly to S3 and is never registered on
+        // master, so the reader must stick to the seeds we give it explicitly.
+        auto readerOptions = New<TRemoteReaderOptions>();
+        readerOptions->AllowFetchingSeedsFromMaster = false;
+
         ReplicationReader_ = CreateReplicationReader(
             New<TReplicationReaderConfig>(),
-            New<TRemoteReaderOptions>(),
+            readerOptions,
             New<TChunkReaderHost>(NativeClient_),
             ChunkId_,
             TChunkReplicaWithMediumList{TChunkReplicaWithMedium(
@@ -258,6 +286,16 @@ protected:
     }
 };
 
+std::vector<TBlock> ReadBlocks(
+    IChunkReaderAllowingRepairPtr reader,
+    const std::vector<int>& blockIndexes)
+{
+    IChunkReader::TReadBlocksOptions readOptions;
+    auto readResult = WaitFor(reader->ReadBlocks(readOptions, blockIndexes));
+    return readResult
+        .ValueOrThrow();
+}
+
 TEST_F(TS3DataTest, TestReplicationReader)
 {
     IChunkWriter::TWriteBlocksOptions writeOptions;
@@ -279,33 +317,80 @@ TEST_F(TS3DataTest, TestReplicationReader)
     std::vector<int> blockIndexes(GeneratedBlocks_.size());
     std::iota(blockIndexes.begin(), blockIndexes.end(), 0);
 
-    // The retries are performed here because, even though we create the medium and wait
-    // until it appears in Cypress, the ODG still reads it from master caches when performing
-    // the medium directory sync. Thus, it may not see it from the first attempt.
-    std::vector<TBlock> blocks;
-    IChunkReader::TReadBlocksOptions readOptions;
-    for (int retries = 0; retries < 3; ++retries) {
-        auto readBlocks = WaitFor(ReplicationReader_->ReadBlocks(readOptions, blockIndexes));
-        if (readBlocks.IsOK()) {
-            blocks = readBlocks.Value();
-            break;
-        }
-
-        bool isRetriableError = std::any_of(
-            readBlocks.InnerErrors().begin(),
-            readBlocks.InnerErrors().end(),
-            [] (const TErrorOr<void>& error) {
-                return error.FindMatching([] (const TError& error) {
-                    return error.GetMessage().contains("No such medium 15");
-            });
-        });
-        if (!isRetriableError) {
-            readBlocks.ThrowOnError();
-        }
-    }
+    auto blocks = ReadBlocks(ReplicationReader_, blockIndexes);
 
     for (ssize_t blockIndex = 0; blockIndex < std::ssize(GeneratedBlocks_); ++blockIndex) {
-        ASSERT_EQ(blocks[blockIndex].GetOrComputeChecksum(),GeneratedBlocks_[blockIndex].GetOrComputeChecksum());
+        ASSERT_EQ(blocks[blockIndex].GetOrComputeChecksum(), GeneratedBlocks_[blockIndex].GetOrComputeChecksum());
+    }
+}
+
+TEST_F(TS3DataTest, TestReplicationWriter)
+{
+    auto nativeClient = DynamicPointerCast<NNative::IClient>(Client_);
+
+    // Use a fresh chunk ID so the test is independent of TestReplicationReader.
+    TChunkId writeChunkId = MakeRandomId(EObjectType::Chunk, TCellTag(0xf003));
+    TSessionId sessionId{writeChunkId, MediumDescriptor_->GetIndex()};
+
+    TChunkReplicaWithMediumList targets = {
+        TChunkReplicaWithMedium(
+            OffshoreNodeId,
+            GenericChunkReplicaIndex,
+            MediumDescriptor_->GetIndex())
+    };
+
+    auto writerConfig = New<TReplicationWriterConfig>();
+    writerConfig->UploadReplicationFactor = 1;
+    writerConfig->MinUploadReplicationFactor = 1;
+
+    auto writerOptions = New<TRemoteWriterOptions>();
+    writerOptions->AllowAllocatingNewTargetNodes = false;
+
+    auto replicationWriter = CreateReplicationWriter(
+        std::move(writerConfig),
+        std::move(writerOptions),
+        sessionId,
+        std::move(targets),
+        nativeClient,
+        /*localHostName*/ "localhost");
+
+
+    WaitFor(replicationWriter->Open()
+        .Apply(BIND([&] {
+            EXPECT_TRUE(replicationWriter->WriteBlocks({}, {}, GeneratedBlocks_));
+            return replicationWriter->GetReadyEvent();
+        }))
+        .Apply(BIND([&] {
+            return replicationWriter->Close({}, {}, MakeEmptyChunkMeta());
+        })))
+        .ThrowOnError();
+
+
+    // Read back using the replication reader (offshore read path).
+    // The chunk is never registered on master, so the reader must stick
+    // to the seeds we give it explicitly.
+    auto readReaderOptions = New<TRemoteReaderOptions>();
+    readReaderOptions->AllowFetchingSeedsFromMaster = false;
+
+    auto readReader = CreateReplicationReader(
+        New<TReplicationReaderConfig>(),
+        readReaderOptions,
+        New<TChunkReaderHost>(nativeClient),
+        writeChunkId,
+        TChunkReplicaWithMediumList{TChunkReplicaWithMedium(
+            OffshoreNodeId,
+            GenericChunkReplicaIndex,
+            MediumDescriptor_->GetIndex())});
+
+    std::vector<int> blockIndexes(GeneratedBlocks_.size());
+    std::iota(blockIndexes.begin(), blockIndexes.end(), 0);
+
+    auto readBlocks = ReadBlocks(readReader, blockIndexes);
+
+    ASSERT_EQ(std::ssize(readBlocks), std::ssize(GeneratedBlocks_));
+    for (ssize_t i = 0; i < std::ssize(GeneratedBlocks_); ++i) {
+        EXPECT_EQ(readBlocks[i].GetOrComputeChecksum(), GeneratedBlocks_[i].GetOrComputeChecksum())
+            << "Block " << i << " checksum mismatch";
     }
 }
 

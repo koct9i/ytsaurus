@@ -5,6 +5,8 @@
 #include <yt/yt/client/table_client/unversioned_row.h>
 #include <yt/yt/client/table_client/versioned_row.h>
 
+#include <yt/yt/client/transaction_client/ts_literal.h>
+
 #include <library/cpp/yt/containers/ordered_hash_map.h>
 
 #include <library/cpp/yt/error/error.h>
@@ -21,6 +23,8 @@
 using namespace NYT;
 using namespace NYT::NTableClient;
 using namespace NYT::NYson;
+
+using NTransactionClient::operator""_ts;
 
 // Pretty-printer fixtures: real typed globals (external linkage, so they stay in
 // the core) that the gdb test prints to exercise lib/printers.py.
@@ -50,10 +54,10 @@ void SetupGdbPrinterFixtures()
         GdbPrinterRowBuffer = New<TRowBuffer>();
         TVersionedRowBuilder builder(GdbPrinterRowBuffer);
         builder.AddKey(MakeUnversionedInt64Value(100, 0));
-        builder.AddValue(MakeVersionedInt64Value(555, 0x20, 1));
-        builder.AddValue(MakeVersionedStringValue("v", 0x20, 2));
-        builder.AddWriteTimestamp(0x20);
-        builder.AddDeleteTimestamp(0x10);
+        builder.AddValue(MakeVersionedInt64Value(555, 0x20_ts, 1));
+        builder.AddValue(MakeVersionedStringValue("v", 0x20_ts, 2));
+        builder.AddWriteTimestamp(0x20_ts);
+        builder.AddDeleteTimestamp(0x10_ts);
         GdbPrinterVersionedRow = builder.FinishRow();
     }
 
@@ -70,9 +74,9 @@ void SetupGdbPrinterFixtures()
         // couple of user attributes and an inner error to exercise every field.
         // NYT::EErrorCode is qualified to disambiguate it from NTableClient's.
         auto error = TError(NYT::EErrorCode::Generic, "Disk quota exceeded");
-        error <<= TErrorAttribute("limit", 100);
-        error <<= TErrorAttribute("account", "intermediate");
-        error <<= TError(NYT::EErrorCode::Generic, "Underlying IO error");
+        error.Add("limit", 100);
+        error.Add("account", "intermediate");
+        error.Add(TError(NYT::EErrorCode::Generic, "Underlying IO error"));
         GdbPrinterError = error;
     }
 

@@ -1,6 +1,8 @@
 #include "plugin.h"
 #include "config.h"
 
+#include <yt/yt/core/ytree/fluent.h>
+
 #include <iostream>
 
 namespace NYT::NYqlPlugin {
@@ -15,14 +17,22 @@ IMapNodePtr IYqlPlugin::GetOrchidNode() const
     return GetEphemeralNodeFactory()->CreateMap();
 }
 
+bool IYqlPlugin::IsReady() const
+{
+    return true;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 TYqlNativePluginOptions ConvertToNativePluginOptions(
     TYqlPluginConfigPtr config,
+    TYqlPluginDynamicConfigPtr initialDynamicConfig,
     TYsonString singletonsConfigString,
     THolder<TLogBackend> logBackend,
-    std::string maxSupportedYqlVersion,
-    bool startDqManager)
+    bool startDqManager,
+    bool enableClique,
+    bool useTokenResolver,
+    const std::string& tokenServiceSocketPath)
 {
     auto options = TYqlNativePluginOptions {
         .SingletonsConfig = singletonsConfigString,
@@ -37,11 +47,20 @@ TYqlNativePluginOptions ConvertToNativePluginOptions(
         .YtAccessProviderConfig = ConvertToYsonString(config->YtAccessProviderConfig),
         .OperationAttributes = ConvertToYsonString(config->OperationAttributes),
         .Libraries = ConvertToYsonString(config->Libraries),
+        .InitialDynamicConfig = ConvertToYsonString(initialDynamicConfig),
         .YTTokenPath = config->YTTokenPath,
-        .YqlPluginSharedLibrary = config->YqlPluginSharedLibrary,
-        .MaxYqlLangVersion = maxSupportedYqlVersion,
         .StartDqManager = startDqManager,
+        .EnableClique = enableClique,
     };
+
+    if (useTokenResolver) {
+        options.YtTokenResolverConfig = BuildYsonStringFluently()
+            .BeginMap()
+                .Item("yql_agent").BeginMap()
+                    .Item("unix_socket_path").Value(tokenServiceSocketPath)
+                .EndMap()
+            .EndMap();
+    }
 
     options.LogBackend = std::move(logBackend);
     return options;
@@ -50,13 +69,25 @@ TYqlNativePluginOptions ConvertToNativePluginOptions(
 TYqlQTWorkerPluginOptions ConvertToQtWorkerPluginOptions(
     TYqlNativePluginOptions nativeOptions,
     THolder<TLogBackend> qtWorkerLogBackend,
-    int qtWorkerInspectorPort)
+    int qtWorkerInspectorPort,
+    TString gatewaysConfigPath,
+    bool enableGetUsedClusters)
 {
     TYqlQTWorkerPluginOptions options;
     static_cast<TYqlNativePluginOptions&>(options) = std::move(nativeOptions);
     options.QtWorkerInspectorPort = qtWorkerInspectorPort;
     options.QtWorkerLogBackend = std::move(qtWorkerLogBackend);
+    options.GatewaysConfigPath = std::move(gatewaysConfigPath);
+    options.EnableGetUsedClusters = enableGetUsedClusters;
     return options;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TString DetectFlavorFromSettings(const NYson::TYsonString& settings)
+{
+    auto settingsMap = NYTree::ConvertTo<NYTree::IMapNodePtr>(settings);
+    return settingsMap->GetChildValueOrDefault<TString>("yql_flavor", TString{DefaultFlavor});
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -1,6 +1,7 @@
 RECURSE(
     changelog_surgeon
     chaos_tools
+    collect_stuck_transactions
     cuda_core_dump_injection
     data_node_rpc_request
     dump_changelog
@@ -13,11 +14,11 @@ RECURSE(
     import_table
     journal_reader
     logslice
-    nbd_server
     offline_controller
     offline_read
     offline_read_fmt_write
     parse_rpc_header
+    pod_size_actualization
     prepare_scheduling_usage
     print_column_statistics
     read_arrow
@@ -33,3 +34,7 @@ RECURSE(
     zstdtail
     sqllogictest_generator
 )
+
+IF (OS_LINUX AND NOT OPENSOURCE)
+    RECURSE(nbd_server)
+ENDIF()

@@ -9,6 +9,10 @@ IF (SANITIZER_TYPE)
         cpu:36
         ram:48
     )
+ELSE()
+    REQUIREMENTS(
+        ram:24
+    )
 ENDIF()
 
 PEERDIR(
@@ -44,12 +48,19 @@ DEPENDS(
 ENV(YT_ENABLE_TRACE_LOG=1)
 ENV(YT_ENABLE_TRACE_LOGGING=1)
 
-TEST_SRCS(
-    conftest.py
+PY_SRCS(
     base.py
     helpers.py
+)
+
+NO_CHECK_IMPORTS(base)
+
+TEST_SRCS(
+    conftest.py
     test_atomicity.py
+    test_chunk_spec_cache.py
     test_clickhouse_schema.py
+    test_cluster_connection.py
     test_columnar_read.py
     test_common.py
     test_composite.py
@@ -59,6 +70,7 @@ TEST_SRCS(
     test_input_fetching.py
     test_join_and_in.py
     test_log_tailer.py
+    test_materialized_views.py
     test_mutations.py
     test_prewhere.py
     test_pull_distribution.py

@@ -46,6 +46,7 @@ SRCS(
     data_node/location.cpp
     data_node/location_manager.cpp
     data_node/master_connector.cpp
+    data_node/medium_aware_block_cache_manager.cpp
     data_node/medium_directory_manager.cpp
     data_node/medium_updater.cpp
     data_node/network_statistics.cpp
@@ -85,7 +86,6 @@ SRCS(
     exec_node/proxying_data_node_service.cpp
     exec_node/orchid.cpp
     exec_node/pending_downloads_tracker.cpp
-    exec_node/preparation_options.cpp
     exec_node/private.cpp
     exec_node/public.cpp
     exec_node/scheduler_connector.cpp
@@ -137,6 +137,7 @@ SRCS(
     tablet_node/error_manager.cpp
     tablet_node/failing_on_rotation_reader.cpp
     tablet_node/fetch_rows.cpp
+    tablet_node/global_stores_update_throttler.cpp
     tablet_node/hedging_manager_registry.cpp
     tablet_node/helpers.cpp
     tablet_node/hint_manager.cpp
@@ -257,6 +258,8 @@ PEERDIR(
     yt/yt/server/lib/lsm
     yt/yt/server/lib/misc
     yt/yt/server/lib/nbd
+    yt/yt/server/lib/nbd/chunk
+    yt/yt/server/lib/nbd/image
     yt/yt/server/lib/node
     yt/yt/server/lib/rpc
     yt/yt/server/lib/tablet_balancer

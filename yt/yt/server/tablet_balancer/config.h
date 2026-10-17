@@ -75,8 +75,9 @@ struct TTabletBalancerDynamicConfig
 
     bool FetchTabletCellsFromSecondaryMasters;
     bool EnableParameterizedReshardByDefault;
+    bool EnableParameterizedSizeReshard;
+
     bool PickReshardPivotKeys;
-    bool CancelActionIfPickPivotKeysFails;
     bool EnableReshardVerboseLogging;
     bool IgnoreTabletToCellRatio;
     std::optional<double> ReshardSlicingAccuracy;
@@ -158,6 +159,7 @@ struct TBundleStateProviderConfig
     : public NYTree::TYsonStruct
 {
     bool FetchTabletCellsFromSecondaryMasters;
+    bool UseInternalApi;
     bool UseStatisticsReporter;
     NYPath::TYPath StatisticsTablePath;
 

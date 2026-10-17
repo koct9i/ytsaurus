@@ -80,17 +80,17 @@ public:
                 BIND([this, this_ = MakeStrong(this)] (TWriteLockPtr&& guard) {
                     auto oldState = std::exchange(State_, EState::Initializing);
                     if (oldState != EState::Uninitialized) {
-                        YT_LOG_WARNING("Creating not uninitialized nbd chunk handler (ChunkId: %v, ChunkPath: %v, ChunkSize: %v, State: %v)",
-                            ChunkId_,
-                            ChunkPath_,
-                            ChunkSize_,
-                            oldState);
+                        YT_TLOG_WARNING("Creating not uninitialized NBD chunk handler")
+                            .With("ChunkId", ChunkId_)
+                            .With("ChunkPath", ChunkPath_)
+                            .With("ChunkSize", ChunkSize_)
+                            .With("State", oldState);
 
-                        THROW_ERROR_EXCEPTION("Creating not uninitialized nbd chunk handler")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("chunk_path", ChunkPath_)
-                            << TErrorAttribute("chunk_size", ChunkSize_)
-                            << TErrorAttribute("state", oldState);
+                        THROW_ERROR_EXCEPTION("Creating not uninitialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("chunk_path", ChunkPath_)
+                            .With("chunk_size", ChunkSize_)
+                            .With("state", oldState);
                     }
 
                     auto openFuture = IOEngine_->Open(
@@ -140,17 +140,17 @@ public:
                 BIND([this, this_ = MakeStrong(this)] (TWriteLockPtr&& guard) {
                     auto oldState = std::exchange(State_, EState::Finalizing);
                     if (oldState != EState::Initialized) {
-                        YT_LOG_WARNING("Destroying not initialized nbd chunk handler (ChunkId: %v, ChunkPath: %v, ChunkSize: %v, State: %v)",
-                            ChunkId_,
-                            ChunkPath_,
-                            ChunkSize_,
-                            oldState);
+                        YT_TLOG_WARNING("Destroying not initialized NBD chunk handler")
+                            .With("ChunkId", ChunkId_)
+                            .With("ChunkPath", ChunkPath_)
+                            .With("ChunkSize", ChunkSize_)
+                            .With("State", oldState);
 
-                        THROW_ERROR_EXCEPTION("Destroying not initialized nbd chunk handler")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("chunk_path", ChunkPath_)
-                            << TErrorAttribute("chunk_size", ChunkSize_)
-                            << TErrorAttribute("state", oldState);
+                        THROW_ERROR_EXCEPTION("Destroying not initialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("chunk_path", ChunkPath_)
+                            .With("chunk_size", ChunkSize_)
+                            .With("state", oldState);
                     }
 
                     auto closeFuture = IOEngine_->Close(
@@ -172,13 +172,14 @@ public:
 
                     try {
                         NFs::Remove(ChunkPath_);
-                        YT_LOG_DEBUG("Destroyed nbd chunk handler (ChunkId: %v, ChunkPath: %v)",
-                            ChunkId_,
-                            ChunkPath_);
+                        YT_TLOG_DEBUG("Destroyed NBD chunk handler")
+                            .With("ChunkId", ChunkId_)
+                            .With("ChunkPath", ChunkPath_);
                     } catch (const std::exception& ex) {
-                        YT_LOG_WARNING(ex, "Failed to remove nbd chunk file (ChunkId: %v, ChunkPath: %v)",
-                            ChunkId_,
-                            ChunkPath_);
+                        YT_TLOG_WARNING("Failed to remove NBD chunk file")
+                            .With("ChunkId", ChunkId_)
+                            .With("ChunkPath", ChunkPath_)
+                            .With(ex);
 
                         throw;
                     }
@@ -189,11 +190,11 @@ public:
     //! Read size bytes from NBD chunk at offset.
     TFuture<TBlock> Read(i64 offset, i64 length, ui64 cookie) override
     {
-        YT_LOG_DEBUG("Started reading from NBD chunk (ChunkId: %v, Offset: %v, Length: %v, Cookie: %x)",
-            ChunkId_,
-            offset,
-            length,
-            cookie);
+        YT_TLOG_DEBUG("Started reading from NBD chunk")
+            .With("ChunkId", ChunkId_)
+            .With("Offset", offset)
+            .With("Length", length)
+            .WithFormat("Cookie", "%x", cookie);
 
         // Acquire a reader guard.
         TWallTimer lockWaitTimer;
@@ -203,41 +204,41 @@ public:
                 BIND([=, this, this_ = MakeStrong(this), lockWaitTimer = std::move(lockWaitTimer)] (TReadLockPtr&& guard) {
                     auto lockWaitDuration = lockWaitTimer.GetElapsedTime();
                     if (State_ != EState::Initialized) {
-                        YT_LOG_WARNING("Read from uninitialized nbd chunk handler (ChunkId: %v, ChunkPath: %v, ChunkSize: %v, Offset: %v, Length: %v, Cookie: %x, State: %v)",
-                            ChunkId_,
-                            ChunkPath_,
-                            ChunkSize_,
-                            offset,
-                            length,
-                            cookie,
-                            State_);
+                        YT_TLOG_WARNING("Read from uninitialized NBD chunk handler")
+                            .With("ChunkId", ChunkId_)
+                            .With("ChunkPath", ChunkPath_)
+                            .With("ChunkSize", ChunkSize_)
+                            .With("Offset", offset)
+                            .With("Length", length)
+                            .WithFormat("Cookie", "%x", cookie)
+                            .With("State", State_);
 
-                        THROW_ERROR_EXCEPTION("Read from uninitialized nbd chunk handler")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("chunk_path", ChunkPath_)
-                            << TErrorAttribute("chunk_size", ChunkSize_)
-                            << TErrorAttribute("offset", offset)
-                            << TErrorAttribute("length", length)
-                            << TErrorAttribute("cookie", cookie)
-                            << TErrorAttribute("state", State_);
+                        THROW_ERROR_EXCEPTION("Read from uninitialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("chunk_path", ChunkPath_)
+                            .With("chunk_size", ChunkSize_)
+                            .With("offset", offset)
+                            .With("length", length)
+                            .With("cookie", cookie)
+                            .With("state", State_);
                     }
 
                     if (offset + length > ChunkSize_) {
                         THROW_ERROR_EXCEPTION("Read is out of range")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("chunk_path", ChunkPath_)
-                            << TErrorAttribute("chunk_size", ChunkSize_)
-                            << TErrorAttribute("offset", offset)
-                            << TErrorAttribute("length", length)
-                            << TErrorAttribute("cookie", cookie)
-                            << TErrorAttribute("state", State_);
+                            .With("chunk_id", ChunkId_)
+                            .With("chunk_path", ChunkPath_)
+                            .With("chunk_size", ChunkSize_)
+                            .With("offset", offset)
+                            .With("length", length)
+                            .With("cookie", cookie)
+                            .With("state", State_);
                     }
 
                     // Throttle both network and disk read in parallel.
                     TWallTimer throttleTimer;
                     auto throttleFuture = AllSucceeded(std::vector<TFuture<void>>{
                         ReadNetThrottler_->Throttle(length),
-                        ReadStoreThrottler_->Throttle(length)
+                        ReadStoreThrottler_->Throttle(length),
                     });
 
                     // Perform read and return result.
@@ -255,17 +256,107 @@ public:
                                 BIND([=, guard = std::move(guard), ioTimer = std::move(ioTimer), this, this_ = MakeStrong(this)] (const TReadResponse& response) {
                                     auto ioDuration = ioTimer.GetElapsedTime();
 
-                                    YT_LOG_DEBUG("Finished reading from NBD chunk (ChunkId: %v, Offset: %v, Length: %v, LockWaitDuration: %v, ThrottleDuration: %v, IODuration: %v, Cookie: %x)",
-                                        ChunkId_,
-                                        offset,
-                                        length,
-                                        lockWaitDuration,
-                                        throttleDuration,
-                                        ioDuration,
-                                        cookie);
+                                    YT_TLOG_DEBUG("Finished reading from NBD chunk")
+                                        .With("ChunkId", ChunkId_)
+                                        .With("Offset", offset)
+                                        .With("Length", length)
+                                        .With("LockWaitDuration", lockWaitDuration)
+                                        .With("ThrottleDuration", throttleDuration)
+                                        .With("IODuration", ioDuration)
+                                        .WithFormat("Cookie", "%x", cookie);
 
-                                    YT_VERIFY(response.OutputBuffers.size() == 1);
+                                    YT_VERIFY(std::ssize(response.OutputBuffers) == 1);
                                     return TBlock(response.OutputBuffers[0]);
+                                }));
+                        }));
+                }));
+    }
+
+    //! Read multiple non-contiguous ranges from NBD chunk in a single IO engine call.
+    TFuture<std::vector<TBlock>> ReadBatch(
+        const std::vector<TNbdReadSubrequest>& subrequests,
+        ui64 cookie) override
+    {
+        i64 totalLength = 0;
+        for (const auto& sub : subrequests) {
+            totalLength += sub.Length;
+        }
+
+        YT_TLOG_DEBUG("Started batch reading from NBD chunk")
+            .With("ChunkId", ChunkId_)
+            .With("SubrequestCount", std::ssize(subrequests))
+            .With("TotalLength", totalLength)
+            .WithFormat("Cookie", "%x", cookie);
+
+        // Acquire a reader guard once for all subrequests.
+        TWallTimer lockWaitTimer;
+        return TAsyncLockReaderGuard::Acquire(&Lock_)
+            .AsUnique()
+            .Apply(
+                BIND([=, this, this_ = MakeStrong(this), lockWaitTimer = std::move(lockWaitTimer)] (TReadLockPtr&& guard) mutable {
+                    auto lockWaitDuration = lockWaitTimer.GetElapsedTime();
+                    if (State_ != EState::Initialized) {
+                        THROW_ERROR_EXCEPTION("ReadBatch from uninitialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("state", State_);
+                    }
+
+                    for (const auto& sub : subrequests) {
+                        if (sub.Offset + sub.Length > ChunkSize_) {
+                            THROW_ERROR_EXCEPTION("ReadBatch subrequest is out of range")
+                                .With("chunk_id", ChunkId_)
+                                .With("offset", sub.Offset)
+                                .With("length", sub.Length)
+                                .With("chunk_size", ChunkSize_);
+                        }
+                    }
+
+                    // Throttle both network and disk read in parallel.
+                    TWallTimer throttleTimer;
+                    auto throttleFuture = AllSucceeded(std::vector<TFuture<void>>{
+                        ReadNetThrottler_->Throttle(totalLength),
+                        ReadStoreThrottler_->Throttle(totalLength),
+                    });
+
+                    return throttleFuture.Apply(
+                        BIND([=, guard = std::move(guard), throttleTimer = std::move(throttleTimer), this, this_ = MakeStrong(this)] () mutable {
+                            auto throttleDuration = throttleTimer.GetElapsedTime();
+
+                            // Build one TReadRequest per subrequest.
+                            std::vector<NIO::TReadRequest> ioRequests;
+                            ioRequests.reserve(subrequests.size());
+                            for (const auto& sub : subrequests) {
+                                ioRequests.push_back({
+                                    .Handle = IOEngineHandle_,
+                                    .Offset = sub.Offset,
+                                    .Size = sub.Length,
+                                });
+                            }
+
+                            TWallTimer ioTimer;
+                            return IOEngine_->Read(
+                                std::move(ioRequests),
+                                WorkloadDescriptor_.Category,
+                                GetRefCountedTypeCookie<TNbdChunkReaderBufferTag>())
+                                .Apply(BIND([=, guard = std::move(guard), ioTimer = std::move(ioTimer), this, this_ = MakeStrong(this)] (const NIO::TReadResponse& response) {
+                                    auto ioDuration = ioTimer.GetElapsedTime();
+
+                                    YT_TLOG_DEBUG("Finished batch reading from NBD chunk")
+                                        .With("ChunkId", ChunkId_)
+                                        .With("SubrequestCount", std::ssize(subrequests))
+                                        .With("TotalLength", totalLength)
+                                        .With("LockWaitDuration", lockWaitDuration)
+                                        .With("ThrottleDuration", throttleDuration)
+                                        .With("IODuration", ioDuration)
+                                        .WithFormat("Cookie", "%x", cookie);
+
+                                    YT_VERIFY(std::ssize(response.OutputBuffers) == std::ssize(subrequests));
+                                    std::vector<TBlock> blocks;
+                                    blocks.reserve(response.OutputBuffers.size());
+                                    for (const auto& buf : response.OutputBuffers) {
+                                        blocks.emplace_back(buf);
+                                    }
+                                    return blocks;
                                 }));
                         }));
                 }));
@@ -274,11 +365,11 @@ public:
     //! Write buffer to NBD chunk at offset.
     TFuture<NIO::TIOCounters> Write(i64 offset, const TBlock& block, ui64 cookie) override
     {
-        YT_LOG_DEBUG("Started writing to NBD chunk (ChunkId: %v, Offset: %v, Length: %v, Cookie: %x)",
-            ChunkId_,
-            offset,
-            block.Size(),
-            cookie);
+        YT_TLOG_DEBUG("Started writing to NBD chunk")
+            .With("ChunkId", ChunkId_)
+            .With("Offset", offset)
+            .With("Length", block.Size())
+            .WithFormat("Cookie", "%x", cookie);
 
         // Acquire a reader guard.
         TWallTimer lockWaitTimer;
@@ -288,34 +379,34 @@ public:
                 BIND([=, this, this_ = MakeStrong(this), lockWaitTimer = std::move(lockWaitTimer)] (TReadLockPtr&& guard) {
                     auto lockWaitDuration = lockWaitTimer.GetElapsedTime();
                     if (State_ != EState::Initialized) {
-                        YT_LOG_WARNING("Write to uninitialized nbd chunk handler (ChunkId: %v, ChunkPath: %v, ChunkSize: %v, Offset: %v, Length: %v, Cookie: %x, State: %v)",
-                            ChunkId_,
-                            ChunkPath_,
-                            ChunkSize_,
-                            offset,
-                            block.Size(),
-                            cookie,
-                            State_);
+                        YT_TLOG_WARNING("Write to uninitialized NBD chunk handler")
+                            .With("ChunkId", ChunkId_)
+                            .With("ChunkPath", ChunkPath_)
+                            .With("ChunkSize", ChunkSize_)
+                            .With("Offset", offset)
+                            .With("Length", block.Size())
+                            .WithFormat("Cookie", "%x", cookie)
+                            .With("State", State_);
 
-                        THROW_ERROR_EXCEPTION("Write to uninitialized nbd chunk handler")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("chunk_path", ChunkPath_)
-                            << TErrorAttribute("chunk_size", ChunkSize_)
-                            << TErrorAttribute("offset", offset)
-                            << TErrorAttribute("length", block.Size())
-                            << TErrorAttribute("cookie", cookie)
-                            << TErrorAttribute("state", State_);
+                        THROW_ERROR_EXCEPTION("Write to uninitialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("chunk_path", ChunkPath_)
+                            .With("chunk_size", ChunkSize_)
+                            .With("offset", offset)
+                            .With("length", block.Size())
+                            .With("cookie", cookie)
+                            .With("state", State_);
                     }
 
                     if (offset + std::ssize(block.Data) > ChunkSize_) {
                         THROW_ERROR_EXCEPTION("Write is out of range")
-                            << TErrorAttribute("chunk_id", ChunkId_)
-                            << TErrorAttribute("chunk_path", ChunkPath_)
-                            << TErrorAttribute("chunk_size", ChunkSize_)
-                            << TErrorAttribute("offset", offset)
-                            << TErrorAttribute("length", block.Size())
-                            << TErrorAttribute("cookie", cookie)
-                            << TErrorAttribute("state", State_);
+                            .With("chunk_id", ChunkId_)
+                            .With("chunk_path", ChunkPath_)
+                            .With("chunk_size", ChunkSize_)
+                            .With("offset", offset)
+                            .With("length", block.Size())
+                            .With("cookie", cookie)
+                            .With("state", State_);
                     }
 
                     // Throttle both network and disk write in parallel.
@@ -339,19 +430,98 @@ public:
                                 BIND([=, guard = std::move(guard), ioTimer = std::move(ioTimer), this, this_ = MakeStrong(this)] (const TWriteResponse& response) {
                                     auto ioDuration = ioTimer.GetElapsedTime();
 
-                                    YT_LOG_DEBUG("Finished writing to NBD chunk (ChunkId: %v, Offset: %v, Length: %v, LockWaitDuration: %v, ThrottleDuration: %v, IODuration: %v, Cookie: %x)",
-                                        ChunkId_,
-                                        offset,
-                                        block.Size(),
-                                        lockWaitDuration,
-                                        throttleDuration,
-                                        ioDuration,
-                                        cookie);
+                                    YT_TLOG_DEBUG("Finished writing to NBD chunk")
+                                        .With("ChunkId", ChunkId_)
+                                        .With("Offset", offset)
+                                        .With("Length", block.Size())
+                                        .With("LockWaitDuration", lockWaitDuration)
+                                        .With("ThrottleDuration", throttleDuration)
+                                        .With("IODuration", ioDuration)
+                                        .WithFormat("Cookie", "%x", cookie);
 
                                     return NIO::TIOCounters {
                                         .Bytes = response.WrittenBytes,
                                         .IORequests = response.IOWriteRequests};
                                 }));
+                        }));
+                }));
+    }
+
+    //! Flush dirty data to disk (fsync).
+    TFuture<void> Flush(ui64 cookie) override
+    {
+        YT_TLOG_DEBUG("Started flushing NBD chunk")
+            .With("ChunkId", ChunkId_)
+            .WithFormat("Cookie", "%x", cookie);
+
+        // Acquire a reader guard so that Destroy() (which acquires the writer lock)
+        // cannot close the file handle while a flush is in flight.
+        TWallTimer lockWaitTimer;
+        return TAsyncLockReaderGuard::Acquire(&Lock_)
+            .AsUnique()
+            .Apply(
+                BIND([=, this, this_ = MakeStrong(this), lockWaitTimer = std::move(lockWaitTimer)] (TReadLockPtr&& guard) {
+                    auto lockWaitDuration = lockWaitTimer.GetElapsedTime();
+                    if (State_ != EState::Initialized) {
+                        THROW_ERROR_EXCEPTION("Flush on uninitialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("state", State_);
+                    }
+
+                    TWallTimer ioTimer;
+                    auto flushFuture = IOEngine_->FlushFile(
+                        {.Handle = IOEngineHandle_, .Mode = NIO::EFlushFileMode::All},
+                        WorkloadDescriptor_.Category);
+
+                    return flushFuture.Apply(
+                        BIND([=, guard = std::move(guard), ioTimer = std::move(ioTimer), this, this_ = MakeStrong(this)] (const NIO::TFlushFileResponse&) {
+                            auto ioDuration = ioTimer.GetElapsedTime();
+
+                            YT_TLOG_DEBUG("Finished flushing NBD chunk")
+                                .With("ChunkId", ChunkId_)
+                                .With("LockWaitDuration", lockWaitDuration)
+                                .With("IODuration", ioDuration);
+                        }));
+                }));
+    }
+
+    //! Flush a specific range of data to disk (sync_file_range).
+    TFuture<void> FlushRange(i64 offset, i64 size) override
+    {
+        YT_TLOG_DEBUG("Started flushing NBD chunk range")
+            .With("ChunkId", ChunkId_)
+            .With("Offset", offset)
+            .With("Size", size);
+
+        // Acquire a reader guard so that Destroy() (which acquires the writer lock)
+        // cannot close the file handle while a flush is in flight.
+        TWallTimer lockWaitTimer;
+        return TAsyncLockReaderGuard::Acquire(&Lock_)
+            .AsUnique()
+            .Apply(
+                BIND([=, this, this_ = MakeStrong(this), lockWaitTimer = std::move(lockWaitTimer)] (TReadLockPtr&& guard) {
+                    auto lockWaitDuration = lockWaitTimer.GetElapsedTime();
+                    if (State_ != EState::Initialized) {
+                        THROW_ERROR_EXCEPTION("FlushRange on uninitialized NBD chunk handler")
+                            .With("chunk_id", ChunkId_)
+                            .With("state", State_);
+                    }
+
+                    TWallTimer ioTimer;
+                    auto flushFuture = IOEngine_->FlushFileRange(
+                        {.Handle = IOEngineHandle_, .Offset = offset, .Size = size},
+                        WorkloadDescriptor_.Category);
+
+                    return flushFuture.Apply(
+                        BIND([=, guard = std::move(guard), ioTimer = std::move(ioTimer), this, this_ = MakeStrong(this)] (const NIO::TFlushFileRangeResponse&) {
+                            auto ioDuration = ioTimer.GetElapsedTime();
+
+                            YT_TLOG_DEBUG("Finished flushing NBD chunk range")
+                                .With("ChunkId", ChunkId_)
+                                .With("Offset", offset)
+                                .With("Size", size)
+                                .With("LockWaitDuration", lockWaitDuration)
+                                .With("IODuration", ioDuration);
                         }));
                 }));
     }

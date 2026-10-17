@@ -1,6 +1,10 @@
 #pragma once
 
+#include "public.h"
+
 #include <yt/yt/client/chunk_client/public.h>
+
+#include <yt/yt/client/misc/config.h>
 
 #include <yt/yt/core/misc/config.h>
 
@@ -37,6 +41,22 @@ DEFINE_REFCOUNTED_TYPE(TDistributedChunkSessionControllerConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct TDistributedChunkSessionSealMonitorConfig
+    : public NYTree::TYsonStruct
+{
+    TDuration PollPeriod;
+    int MaxChunksPerFetch;
+    TExponentialBackoffOptions ErrorBackoff;
+
+    REGISTER_YSON_STRUCT(TDistributedChunkSessionSealMonitorConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TDistributedChunkSessionSealMonitorConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct TDistributedChunkSessionPoolConfig
     : public NYTree::TYsonStruct
 {
@@ -68,7 +88,7 @@ DEFINE_REFCOUNTED_TYPE(TDistributedChunkWriterConfig)
 ////////////////////////////////////////////////////////////////////////////////
 
 struct TDistributedChunkSessionReaderConfig
-    : public NYTree::TYsonStruct
+    : public virtual TWorkloadConfig
 {
     NChunkClient::TReplicationReaderConfigPtr UnderlyingReaderConfig;
 

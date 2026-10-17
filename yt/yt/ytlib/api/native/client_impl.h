@@ -56,7 +56,7 @@
 
 #include <yt/yt/client/table_client/tracked_memory_chunk_provider.h>
 
-#include <yt/yt/flow/lib/client/controller/controller_service_proxy.h>
+#include <yt/yt/flow/library/cpp/client/controller/controller_service_proxy.h>
 
 #include <yt/yt/client/ypath/rich.h>
 
@@ -74,10 +74,27 @@ namespace NYT::NApi::NNative {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// TODO(omgronny): Do we really two separate vectors for finished and running jobs?
+struct TListJobsFromControllerAgentResult
+{
+    std::vector<TJob> FinishedJobs;
+    int TotalFinishedJobCount = 0;
+    std::vector<TJob> InProgressJobs;
+    int TotalInProgressJobCount = 0;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct TMountAndReplicasInfo
 {
     NTabletClient::TTableMountInfoPtr MountInfo;
     TTableReplicaInfoPtrList Replicas;
+};
+
+struct TExecuteTabletServiceRequestOptions
+{
+    bool AllowSequoia = true;
+    std::optional<NObjectClient::EMasterFeature> RequiredServerFeature;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -290,7 +307,7 @@ public: \
         const TAlterReplicationCardOptions& options = {}),
         (replicationCardId, options))
 
-    IMPLEMENT_METHOD(NQueueClient::IQueueRowsetPtr, PullQueue, (
+    IMPLEMENT_METHOD(TPullQueueResult, PullQueue, (
         const NYPath::TRichYPath& queuePath,
         i64 offset,
         int partitionIndex,
@@ -298,7 +315,7 @@ public: \
         const TPullQueueOptions& options = {}),
         (queuePath, offset, partitionIndex, rowBatchReadOptions, options))
 
-    IMPLEMENT_METHOD(NQueueClient::IQueueRowsetPtr, PullQueueUnauthenticated, (
+    IMPLEMENT_METHOD(TPullQueueResult, PullQueueUnauthenticated, (
         const NYPath::TRichYPath& queuePath,
         i64 offset,
         int partitionIndex,
@@ -306,7 +323,7 @@ public: \
         const TPullQueueOptions& options = {}),
         (queuePath, offset, partitionIndex, rowBatchReadOptions, options))
 
-    IMPLEMENT_METHOD(NQueueClient::IQueueRowsetPtr, PullQueueConsumer, (
+    IMPLEMENT_METHOD(TPullQueueResult, PullQueueConsumer, (
         const NYPath::TRichYPath& consumerPath,
         const NYPath::TRichYPath& queuePath,
         std::optional<i64> offset,
@@ -470,6 +487,15 @@ public: \
     IFileWriterPtr CreateFileWriter(
         const NYPath::TRichYPath& path,
         const TFileWriterOptions& options) override;
+
+    IMPLEMENT_METHOD(TFilePartitions, PartitionFile, (
+        const NYPath::TYPath& path,
+        const std::vector<TFileReadRange>& ranges,
+        const TPartitionFileOptions& options),
+        (path, ranges, options))
+    TFuture<IFileReaderPtr> CreateFilePartitionReader(
+        const TFilePartitionCookiePtr& cookie,
+        const TReadFilePartitionOptions& options) override;
 
     IJournalReaderPtr CreateJournalReader(
         const NYPath::TYPath& path,
@@ -819,6 +845,14 @@ public: \
         NChaosClient::TChaosLeaseId chaosLeaseId,
         const TChaosLeaseAttachOptions& options = {}),
         (chaosLeaseId, options))
+    IMPLEMENT_METHOD(void, PingChaosLease, (
+        NChaosClient::TChaosLeaseId chaosLeaseId,
+        const TChaosLeasePingOptions& options = {}),
+        (chaosLeaseId, options))
+    IMPLEMENT_METHOD(NChaosClient::TChaosLeasePtr, GetChaosLease, (
+        NChaosClient::TChaosLeaseId chaosLeaseId,
+        const TGetChaosLeaseOptions& options = {}),
+        (chaosLeaseId, options))
 
     IMPLEMENT_METHOD(void, SetUserBanned, (
         const std::string& user,
@@ -1032,18 +1066,6 @@ public: \
         NObjectClient::TTransactionId parentTransactionId,
         const TStartShuffleOptions& options),
         (account, partitionCount, parentTransactionId, options))
-    IMPLEMENT_METHOD(void, RegisterShuffleChunks, (
-        const TShuffleHandlePtr& shuffleHandle,
-        const std::vector<NChunkClient::NProto::TChunkSpec>& chunkSpecs,
-        std::optional<int> writerIndex,
-        const TRegisterShuffleChunksOptions& options),
-        (shuffleHandle, chunkSpecs, writerIndex, options))
-    IMPLEMENT_METHOD(std::vector<NChunkClient::NProto::TChunkSpec>, FetchShuffleChunks, (
-        const TShuffleHandlePtr& shuffleHandle,
-        int partitionIndex,
-        std::optional<std::pair<int, int>> writerIndexRange,
-        const TFetchShuffleChunksOptions& options),
-        (shuffleHandle, partitionIndex, writerIndexRange, options))
     IMPLEMENT_METHOD(void, ForsakeChaosCoordinator, (
         NHydra::TCellId chaosCellId,
         NHydra::TCellId cordinatorCellId,
@@ -1063,12 +1085,12 @@ public: \
     TFuture<IRowBatchReaderPtr> CreateShuffleReader(
         const TSignedShuffleHandlePtr& signedShuffleHandle,
         int partitionIndex,
-        std::optional<std::pair<int, int>> writerIndexRange,
+        std::optional<std::pair<int, int>> logicalWriterIndexRange,
         const TShuffleReaderOptions& options) override;
     TFuture<IRowBatchWriterPtr> CreateShuffleWriter(
         const TSignedShuffleHandlePtr& signedShuffleHandle,
         const std::string& partitionColumn,
-        std::optional<int> writerIndex,
+        std::optional<int> logicalWriterIndex,
         const TShuffleWriterOptions& options) override;
 
 
@@ -1135,12 +1157,12 @@ private:
     const NTableClient::TMemoryProviderMapByTagPtr MemoryProvider_ = New<NTableClient::TMemoryProviderMapByTag>();
 
     using TChannels = THashMap<NObjectClient::TCellTag, NRpc::IChannelPtr>;
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, MasterChannelsLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, MasterChannelsLock_);
     TEnumIndexedArray<EMasterChannelKind, TChannels> MasterChannels_;
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, CypressChannelsLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, CypressChannelsLock_);
     TEnumIndexedArray<EMasterChannelKind, TChannels> CypressChannels_;
     NRpc::IChannelPtr SchedulerChannel_;
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, OperationsArchiveClientLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, OperationsArchiveClientLock_);
     IClientPtr OperationsArchiveClient_;
     NNodeTrackerClient::INodeChannelFactoryPtr ChannelFactory_;
     NTransactionClient::TTransactionManagerPtr TransactionManager_;
@@ -1151,14 +1173,14 @@ private:
 
     struct TReplicaClient final
     {
-        YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, Lock);
+        YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, Lock);
         NApi::NNative::IClientPtr Client;
         TFuture<NApi::NNative::IClientPtr> AsyncClient;
 
         bool IsTerminated() const;
     };
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TReaderWriterSpinLock, ReplicaClientsLock_);
+    YT_DECLARE_SPIN_LOCK(TReaderWriterSpinLock, ReplicaClientsLock_);
     THashMap<std::string, TIntrusivePtr<TReplicaClient>> ReplicaClients_;
 
     TChannels GetMasterChannels(EMasterChannelKind kind);
@@ -1306,16 +1328,15 @@ private:
         const std::vector<int>& tabletIndexes,
         const TGetTabletInfosOptions& options);
 
-    template <class TReq>
+    template <CTwoPhaseTableRequest TRequest>
     void ExecuteTabletServiceRequest(
         const NYPath::TYPath& path,
         TStringBuf action,
-        TReq* req);
+        TRequest request,
+        const TMutatingOptions& options,
+        const TExecuteTabletServiceRequestOptions& executeOptions = {});
 
     NTabletClient::NProto::TReqReshard MakeReshardRequest(
-        const TReshardTableOptions& options);
-    NTableClient::TTableYPathProxy::TReqReshardPtr MakeYPathReshardRequest(
-        const NYPath::TYPath& path,
         const TReshardTableOptions& options);
 
     std::vector<NTableClient::TLegacyOwningKey> PickUniformPivotKeys(
@@ -1336,7 +1357,7 @@ private:
     // Queues
     //
 
-    NQueueClient::IQueueRowsetPtr DoPullQueueImpl(
+    TPullQueueResult DoPullQueueImpl(
         const NYPath::TRichYPath& queuePath,
         i64 offset,
         int partitionIndex,
@@ -1344,7 +1365,7 @@ private:
         const TPullQueueOptions& options,
         bool checkPermissions);
 
-    NQueueClient::IQueueRowsetPtr DoPullQueueImplOnce(
+    TPullQueueResult DoPullQueueImplOnce(
         const NYPath::TRichYPath& queuePath,
         i64 offset,
         int partitionIndex,

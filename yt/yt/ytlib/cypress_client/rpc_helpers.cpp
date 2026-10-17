@@ -2,6 +2,8 @@
 
 #include <yt/yt/ytlib/cypress_client/proto/rpc.pb.h>
 
+#include <yt/yt/ytlib/object_client/proto/object_ypath.pb.h>
+
 #include <yt/yt/core/rpc/client.h>
 #include <yt/yt/core/rpc/service.h>
 
@@ -50,6 +52,18 @@ bool GetSuppressAccessTracking(const TRequestHeader& header)
 {
     return header.HasExtension(TAccessTrackingExt::suppress_access_tracking)
         ? header.GetExtension(TAccessTrackingExt::suppress_access_tracking)
+        : false;
+}
+
+void SetSuppressAccessLogging(const IClientRequestPtr& request, bool value)
+{
+    request->Header().SetExtension(TAccessTrackingExt::suppress_access_logging, value);
+}
+
+bool GetSuppressAccessLogging(const TRequestHeader& header)
+{
+    return header.HasExtension(TAccessTrackingExt::suppress_access_logging)
+        ? header.GetExtension(TAccessTrackingExt::suppress_access_logging)
         : false;
 }
 
@@ -154,7 +168,21 @@ bool GetCausedByNodeExpiration(const NRpc::NProto::TRequestHeader& header)
     return header.GetExtension(TExpirationExt::caused_by_node_expiration);
 }
 
+void SetResolvedSequoiaObjectId(NRpc::NProto::TRequestHeader* header, TObjectId objectId)
+{
+    auto* ext = header->MutableExtension(NObjectClient::NProto::TResolvedSequoiaObjectExt::resolved_sequoia_object);
+    ToProto(ext->mutable_object_id(), objectId);
+}
+
+TObjectId GetResolvedSequoiaObjectId(const NRpc::NProto::TRequestHeader& header)
+{
+    if (header.HasExtension(NObjectClient::NProto::TResolvedSequoiaObjectExt::resolved_sequoia_object)) {
+        return FromProto<TObjectId>(header.GetExtension(NObjectClient::NProto::TResolvedSequoiaObjectExt::resolved_sequoia_object).object_id());
+    } else {
+        return NullObjectId;
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NCypressClient
-

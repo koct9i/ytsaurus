@@ -68,6 +68,8 @@ struct TDynamicTransactionManagerTestingConfig
 
     THashSet<TTransactionId> PrerequisiteCheckFailureDuringCommitOfTransactions;
 
+    TDuration ArtificialParticipantCommitDelay;
+
     REGISTER_YSON_STRUCT(TDynamicTransactionManagerTestingConfig);
 
     static void Register(TRegistrar registrar);
@@ -81,6 +83,7 @@ struct TDynamicTransactionManagerConfig
     : public NYTree::TYsonStruct
 {
     static constexpr auto DefaultProfilingPeriod = TDuration::MilliSeconds(1000);
+    static constexpr auto DefaultAlertFlushPeriod = TDuration::Seconds(10);
 
     TDuration MaxTransactionTimeout;
     int MaxTransactionDepth;
@@ -91,6 +94,7 @@ struct TDynamicTransactionManagerConfig
     TTransactionFinisherConfigPtr TransactionFinisher;
 
     TDuration ProfilingPeriod;
+    TDuration AlertFlushPeriod;
 
     bool IgnoreCypressTransactions;
 
@@ -113,6 +117,19 @@ struct TDynamicTransactionManagerConfig
 
     // COMPAT(shakurov)
     bool EnableStartForeignTransactionFixes;
+
+    // Alert if a user has too many active native transactions on a cell.
+    // NB: Alert may not be triggered if threshold is exceeded by concurrent requests.
+    int ActiveTransactionCountAlertThreshold;
+
+    // Deny starting transactions if the user has too many active native transactions on the cell.
+    // NB: May be exceeded by concurrent requests.
+    int ActiveTransactionCountLimit;
+
+    bool EnforceActiveTransactionCountLimit;
+
+    // COMPAT(shakurov)
+    bool IgnoreMissingLeaseCellsOnForcedTransactionAbort;
 
     REGISTER_YSON_STRUCT(TDynamicTransactionManagerConfig);
 

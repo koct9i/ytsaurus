@@ -53,6 +53,8 @@ struct IUserSlot
 
     virtual void Prepare() = 0;
 
+    virtual TFuture<void> BuildSlotRootDirectory() = 0;
+
     virtual TFuture<void> RunJobProxy(
         NJobProxy::TJobProxyInternalConfigPtr config,
         TJobId jobId,
@@ -60,8 +62,7 @@ struct IUserSlot
 
     //! Sets up quotas.
     virtual TFuture<void> PrepareSandboxDirectories(
-        const TUserSandboxOptions& options,
-        bool ignoreQuota = false) = 0;
+        const TUserSandboxOptions& options) = 0;
 
     virtual TFuture<void> MakeLink(
         TJobId jobId,
@@ -105,10 +106,12 @@ struct IUserSlot
 
     virtual TFuture<IVolumePtr> PrepareRootVolume(
         std::vector<TOverlayData> overlayDataArray,
+        const TBaseVolumeParamsPtr& volumeParams,
         const TVolumePreparationOptions& options) = 0;
 
     virtual TFuture<IVolumePtr> PrepareGpuCheckVolume(
         std::vector<TOverlayData> overlayDataArray,
+        const TBaseVolumeParamsPtr& volumeParams,
         const TVolumePreparationOptions& options) = 0;
 
     virtual TFuture<std::vector<TVolumeResultPtr>> PrepareNonRootVolumes(
@@ -116,8 +119,7 @@ struct IUserSlot
         const IVolumePtr& rootVolume,
         const std::vector<TBaseVolumeParamsPtr>& volumes,
         std::vector<std::vector<TOverlayData>> perVolumeOverlayData,
-        const std::vector<TVolumeMountPtr>& volumeMounts,
-        bool testRootFs) = 0;
+        const std::vector<TVolumeMountPtr>& volumeMounts) = 0;
 
     virtual TFuture<IVolumePtr> RbindRootVolume(
         const IVolumePtr& volume) = 0;
@@ -125,11 +127,12 @@ struct IUserSlot
     virtual TFuture<void> LinkVolumes(
         const IVolumePtr& rootVolume,
         const std::vector<TVolumeResultPtr>& volumes,
-        const std::vector<TVolumeMountPtr>& volumeMounts,
-        bool testRootFs) = 0;
+        const std::vector<TVolumeMountPtr>& volumeMounts) = 0;
 
     virtual NBus::NTcp::TBusServerConfigPtr GetBusServerConfig() const = 0;
     virtual NBus::NTcp::TBusClientConfigPtr GetBusClientConfig() const = 0;
+    virtual NBus::NTcp::TBusServerConfigPtr GetPrivateBusServerConfig() const = 0;
+    virtual NBus::NTcp::TBusClientConfigPtr GetPrivateBusClientConfig() const = 0;
 
     virtual NRpc::NGrpc::TServerConfigPtr GetGrpcServerConfig() const = 0;
 
@@ -141,7 +144,7 @@ struct IUserSlot
 
     virtual std::string GetSlotPath() const = 0;
 
-    virtual std::string GetSandboxPath(ESandboxKind sandboxKind, const IVolumePtr& rootVolume, bool testRootFs) const = 0;
+    virtual std::string GetSandboxPath(ESandboxKind sandboxKind, const IVolumePtr& rootVolume) const = 0;
 
     virtual std::string GetMediumName() const = 0;
 

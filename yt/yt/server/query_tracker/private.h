@@ -14,12 +14,13 @@ namespace NYT::NQueryTracker {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-using namespace NQueryTrackerClient;
+using NQueryTrackerClient::EQueryEngine;
+using NQueryTrackerClient::EQueryState;
 using NQueryTrackerClient::TQueryId;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_DEFINE_GLOBAL(const NLogging::TLogger, QueryTrackerLogger, "QueryTracker");
+YT_DEFINE_LEAKY_GLOBAL(const NLogging::TLogger, QueryTrackerLogger, "QueryTracker");
 
 ////////////////////////////////////////////////////////////////////////////////
 

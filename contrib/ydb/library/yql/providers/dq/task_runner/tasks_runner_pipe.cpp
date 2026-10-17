@@ -55,6 +55,30 @@ extern "C" int waitpid(int pid, int* status, int options);
 
 namespace {
 
+struct TPipeFactoryCounters {
+    explicit TPipeFactoryCounters(const NMonitoring::TDynamicCounterPtr& root)
+        : ProcessesInPool(root->GetCounter("ProcessesInPool"))
+        , ProcessesPendingStop(root->GetCounter("ProcessesPendingStop"))
+        , PortoContainersAlive(root->GetCounter("PortoContainersAlive"))
+        , PortoContainersStarted(root->GetCounter("PortoContainersStarted", /*derivative=*/true))
+        , PortoContainersDestroyed(root->GetCounter("PortoContainersDestroyed", /*derivative=*/true))
+        , PortoContainerDestroyErrors(root->GetCounter("PortoContainerDestroyErrors", /*derivative=*/true))
+    {
+    }
+
+    const NMonitoring::TDynamicCounters::TCounterPtr ProcessesInPool;
+    const NMonitoring::TDynamicCounters::TCounterPtr ProcessesPendingStop;
+
+    // Best-effort count of Porto containers owned by live TPortoProcess objects.
+    // It intentionally does not query Porto and therefore cannot detect orphaned containers.
+    const NMonitoring::TDynamicCounters::TCounterPtr PortoContainersAlive;
+    const NMonitoring::TDynamicCounters::TCounterPtr PortoContainersStarted;
+    const NMonitoring::TDynamicCounters::TCounterPtr PortoContainersDestroyed;
+    const NMonitoring::TDynamicCounters::TCounterPtr PortoContainerDestroyErrors;
+};
+
+using TPipeFactoryCountersPtr = std::shared_ptr<TPipeFactoryCounters>;
+
 void Load(IInputStream& input, void* buf, size_t size) {
     char* p = (char*)buf;
     while (size) {
@@ -196,6 +220,7 @@ public:
         Stdout = MakeHolder<TPipedInput>(output[0]);
         Stderr = MakeHolder<TPipedInput>(error[0]);
         YQL_CLOG(DEBUG, ProviderDq) << "Forked child, pid: " << Pid;
+        OnStarted();
 #endif
     }
 
@@ -275,6 +300,9 @@ protected:
         }
     }
 
+    virtual void OnStarted() {
+    }
+
     virtual void Exec() {
         for (int i = 3; i < 32768; ++i) {
             close(i);
@@ -285,7 +313,8 @@ protected:
         }
 
         if (execve(ExeName.c_str(), ExecArgs.data(), ExecEnv.data()) == -1) {
-            ythrow TSystemError() << "Cannot execl";
+            YQL_CLOG(ERROR, ProviderDq) << "Cannot execve: " << ExeName << ", args: " << JoinSeq(',', Args);
+            ythrow TSystemError() << "Cannot execve: " << ExeName;
         }
     }
 };
@@ -293,8 +322,9 @@ protected:
 /*______________________________________________________________________________________________*/
 
 struct TProcessHolder {
-    TProcessHolder()
-        : Watcher(MakeHolder<TThread>([this] () { Watch(); }))
+    explicit TProcessHolder(TPipeFactoryCountersPtr counters)
+        : Counters(std::move(counters))
+        , Watcher(MakeHolder<TThread>([this] () { Watch(); }))
     {
         Running.test_and_set();
         Watcher->Start();
@@ -314,6 +344,7 @@ struct TProcessHolder {
     void Put(const TString& key, THolder<TChildProcess>process) {
         TGuard<TMutex> lock(Mutex);
         Processes.emplace_back(key, std::move(process));
+        UpdatePoolSize();
     }
 
     THolder<TChildProcess> Acquire(const TString& key, TList<THolder<TChildProcess>>* stopList) {
@@ -328,6 +359,7 @@ struct TProcessHolder {
             }
             stopList->push_back(std::move(first.second));
         }
+        UpdatePoolSize();
         return result;
     }
 
@@ -346,6 +378,7 @@ struct TProcessHolder {
                         ++it;
                     }
                 }
+                UpdatePoolSize();
             }
 
             for (const auto& job : stopList) {
@@ -356,6 +389,11 @@ struct TProcessHolder {
         }
     }
 
+    void UpdatePoolSize() {
+        *Counters->ProcessesInPool = Processes.size();
+    }
+
+    const TPipeFactoryCountersPtr Counters;
     THolder<TThread> Watcher;
     std::atomic_flag Running;
 
@@ -368,6 +406,7 @@ struct TPortoSettings {
     TMaybe<ui64> MemoryLimit;
     TString Layer;
     TString ContainerNamePrefix;
+    bool EnableAnonLimitRaiseBeforeDestroy;
 
     bool operator == (const TPortoSettings& o) const {
         return Enable == o.Enable && MemoryLimit == o.MemoryLimit && Layer == o.Layer;
@@ -385,11 +424,13 @@ struct TPortoSettings {
 class TPortoProcess: public TChildProcess
 {
 public:
-    TPortoProcess(const TString& portoCtl, const TString& exeName, const TVector<TString>& args, const THashMap<TString, TString>& env, const TString& workDir, const TPortoSettings& portoSettings)
+    TPortoProcess(const TString& portoCtl, const TString& exeName, const TVector<TString>& args, const THashMap<TString, TString>& env, const TString& workDir, const TPortoSettings& portoSettings, TPipeFactoryCountersPtr counters)
         : TChildProcess(exeName, args, env, workDir)
         , PortoCtl(portoCtl)
         , PortoLayer(portoSettings.Layer)
         , MemoryLimit(portoSettings.MemoryLimit)
+        , EnablePortoAnonLimitRaiseBeforeDestroy(portoSettings.EnableAnonLimitRaiseBeforeDestroy)
+        , Counters(std::move(counters))
         , ContainerName(WorkDir.substr(WorkDir.rfind("/") + 1))
         , InternalWorkDir_("mnt/work")
         , InternalExeDir("usr/local/bin")
@@ -416,6 +457,9 @@ public:
     }
 
     ~TPortoProcess() {
+        if (Started) {
+            --*Counters->PortoContainersAlive;
+        }
         try {
             NFs::RemoveRecursive(TmpDir);
         } catch (...) {
@@ -424,6 +468,12 @@ public:
     }
 
 private:
+
+    void OnStarted() override {
+        Started = true;
+        ++*Counters->PortoContainersStarted;
+        ++*Counters->PortoContainersAlive;
+    }
 
     TString GetPortoSetting(const TString& name) const {
         TShellCommand cmd(PortoCtl, {"get", ContainerName, name});
@@ -437,7 +487,8 @@ private:
     }
 
     void Kill() override {
-        if (MemoryLimit) {
+        const auto startedAt = TInstant::Now();
+        if (EnablePortoAnonLimitRaiseBeforeDestroy && MemoryLimit) {
             try {
                 // see YQL-13760
                 i64 anonLimit = -1;
@@ -460,13 +511,35 @@ private:
             }
         }
 
+        const auto destroyStartedAt = TInstant::Now();
+        bool destroyed = false;
         try {
             TShellCommand cmd(PortoCtl, {"destroy", ContainerName});
             cmd.Run().Wait();
+            const auto exitCode = cmd.GetExitCode();
+            destroyed = exitCode.GetOrElse(-1) == 0;
+            if (!destroyed) {
+                YQL_CLOG(DEBUG, ProviderDq) << "Cannot destroy container " << ContainerName
+                    << ", exit code: " << exitCode.GetOrElse(-1)
+                    << ", stderr: " << cmd.GetError();
+            }
         } catch (...) {
             YQL_CLOG(DEBUG, ProviderDq) << "Cannot destroy: " << CurrentExceptionMessage();
         }
+        const auto destroyFinishedAt = TInstant::Now();
+        if (destroyed && !DestroyReported) {
+            ++*Counters->PortoContainersDestroyed;
+            DestroyReported = true;
+        } else if (!destroyed && !DestroyReported) {
+            ++*Counters->PortoContainerDestroyErrors;
+        }
         TChildProcess::Kill();
+        YQL_CLOG(DEBUG, ProviderDq) << "Porto cleanup finished (Container: " << ContainerName
+            << ", AnonLimitDurationUs: " << (destroyStartedAt - startedAt).MicroSeconds()
+            << ", DestroyDurationUs: " << (destroyFinishedAt - destroyStartedAt).MicroSeconds()
+            << ", RaiseEnabled: " << EnablePortoAnonLimitRaiseBeforeDestroy
+            << ", MemoryLimitSet: " << MemoryLimit.Defined()
+            << ", Destroyed: " << destroyed << ")";
     }
 
     void PrepareForExec() override {
@@ -521,13 +594,18 @@ private:
         }
 
         if (execvp(PortoCtl.c_str(), ExecArgs.data()) == -1) {
-            ythrow TSystemError() << "Cannot execl";
+            YQL_CLOG(ERROR, ProviderDq) << "Cannot execvp: " << PortoCtl << ", args: " << JoinSeq(',', ArgsElems);
+            ythrow TSystemError() << "Cannot execvp: " << PortoCtl;
         }
     }
 
     const TString PortoCtl;
     const TString PortoLayer;
     const TMaybe<ui64> MemoryLimit;
+    const bool EnablePortoAnonLimitRaiseBeforeDestroy;
+    const TPipeFactoryCountersPtr Counters;
+    bool Started = false;
+    bool DestroyReported = false;
     TString ContainerName;
 
     const TString InternalWorkDir_;
@@ -764,22 +842,6 @@ public:
         return false;
     }
 
-    void PauseByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void AddWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void ResumeByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    bool IsPausedByWatermark() const override {
-        return false;
-    }
-
     template<typename T>
     void FromProto(const T& f)
     {
@@ -939,22 +1001,6 @@ public:
     }
 
     bool IsPausedByCheckpoint() const override {
-        return false;
-    }
-
-    void PauseByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void AddWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    void ResumeByWatermark(TInstant) override {
-        Y_ABORT("Watermarks are not supported");
-    }
-
-    bool IsPausedByWatermark() const override {
         return false;
     }
 
@@ -1779,11 +1825,16 @@ public:
         return "";
     }
 
-    void Prepare(const TDqTaskSettings& task, const TDqTaskRunnerMemoryLimits& memoryLimits,
-        const IDqTaskRunnerExecutionContext& execCtx, TDqComputeActorWatermarks* watermarksTracker) override
-    {
+    void Prepare(
+        const TDqTaskSettings& task,
+        const TDqTaskRunnerMemoryLimits& memoryLimits,
+        const IDqTaskRunnerExecutionContext& execCtx,
+        TDqComputeActorWatermarks* watermarksTracker,
+        TDqWatermarkGeneratorTracker* sourceWatermarksTracker
+    ) override {
         Y_UNUSED(execCtx);
         Y_UNUSED(watermarksTracker);
+        Y_UNUSED(sourceWatermarksTracker);
         Y_ABORT_UNLESS(Task.GetId() == task.GetId());
         try {
             auto result = Delegate->Prepare(memoryLimits);
@@ -1952,6 +2003,14 @@ public:
             // Stats.CodeGenFinalizeTime = f.GetCodeGenFinalizeTime();
             // Stats.CodeGenModulePassTime = f.GetCodeGenModulePassTime();
 
+            Stats.MkqlStats.clear();
+            for (const auto& stat : protoStats.GetMkqlStats()) {
+                Stats.MkqlStats.emplace_back(TMkqlStat{
+                    TStatKey(stat.GetName(), stat.GetDeriv()),
+                    stat.GetValue()
+                });
+            }
+
             for (const auto& input : protoStats.GetInputChannels()) {
                 InputChannels[input.GetChannelId()]->FromProto(input);
             }
@@ -2014,15 +2073,18 @@ class TPipeFactory: public IProxyFactory {
 
     struct TStopJob: public TTaskScheduler::ITask {
         TList<THolder<TChildProcess>> StopList;
+        const TPipeFactoryCountersPtr Counters;
 
-        TStopJob(TList<THolder<TChildProcess>>&& stopList)
+        TStopJob(TList<THolder<TChildProcess>>&& stopList, TPipeFactoryCountersPtr counters)
             : StopList(std::move(stopList))
+            , Counters(std::move(counters))
         { }
 
         TInstant Process() override {
             for (const auto& job : StopList) {
                 job->Kill();
                 job->Wait(TDuration::Seconds(1));
+                --*Counters->ProcessesPendingStop;
             }
 
             return TInstant::Max();
@@ -2037,7 +2099,8 @@ public:
                 EnablePorto,
                 Nothing(),
                 options.PortoLayer,
-                options.ContainerName
+                options.ContainerName,
+                options.EnablePortoAnonLimitRaiseBeforeDestroy,
             })
         , FileCache(options.FileCache)
         , Args {"yql@child", "tasks_runner_proxy"}
@@ -2045,6 +2108,9 @@ public:
         , Revision(options.Revision
             ? *options.Revision
             : GetProgramCommitId())
+        , Counters(std::make_shared<TPipeFactoryCounters>(
+              options.Counters ? options.Counters : MakeIntrusive<NMonitoring::TDynamicCounters>()))
+        , ProcessHolder(Counters)
         , TaskScheduler(1)
         , MaxProcesses(options.MaxProcesses)
         , PortoCtlPath(options.PortoCtlPath)
@@ -2077,7 +2143,7 @@ public:
 
 private:
     THolder<TChildProcess> StartOne(const TString& exePath, const TPortoSettings& portoSettings) {
-        return CreateChildProcess(PortoCtlPath, FileCache->GetDir(), exePath, Args, Env, ContainerId++, portoSettings);
+        return CreateChildProcess(PortoCtlPath, FileCache->GetDir(), exePath, Args, Env, ContainerId++, portoSettings, Counters);
     }
 
     void Start(const TString& exePath, const TPortoSettings& portoSettings) {
@@ -2099,7 +2165,8 @@ private:
     }
 
     void StopJobs(TList<THolder<TChildProcess>>&& stopList) {
-        Y_ABORT_UNLESS(TaskScheduler.Add(MakeIntrusive<TStopJob>(std::move(stopList)), TInstant()));
+        *Counters->ProcessesPendingStop += stopList.size();
+        Y_ABORT_UNLESS(TaskScheduler.Add(MakeIntrusive<TStopJob>(std::move(stopList), Counters), TInstant()));
     }
 
     TString GetKey(const TString& exePath, const TPortoSettings& settings)
@@ -2116,20 +2183,20 @@ private:
         task.GetMeta().UnpackTo(&taskMeta);
 
         auto* files = taskMeta.MutableFiles();
-
+        YQL_CLOG(TRACE, ProviderDq) << "PrepareTask: files " << files->size();
         for (auto& file : *files) {
             if (file.GetObjectType() != Yql::DqsProto::TFile::EEXE_FILE) {
                 auto maybeFile = FileCache->AcquireFile(file.GetObjectId());
                 if (!maybeFile) {
-                    throw std::runtime_error("Cannot find object `" + file.GetObjectId() + "' in cache");
+                    throw std::runtime_error("Cannot find object `" + file.GetObjectId() + "` in cache");
                 }
                 filesHolder->Add(file.GetObjectId());
                 auto name = file.GetName();
-
                 switch (file.GetObjectType()) {
                     case Yql::DqsProto::TFile::EUDF_FILE:
                     case Yql::DqsProto::TFile::EUSER_FILE:
                         file.SetLocalPath(InitializeLocalFile(result->ExternalWorkDir(), *maybeFile, name));
+                        YQL_CLOG(TRACE, ProviderDq) << "PrepareTask: Add file.SetLocalPath: " << name << ", local path: " << file.GetLocalPath();
                         break;
                     default:
                         Y_ABORT_UNLESS(false);
@@ -2217,11 +2284,12 @@ private:
         const TVector<TString>& args,
         const THashMap<TString, TString>& env,
         i64 containerId,
-        const TPortoSettings& portoSettings)
+        const TPortoSettings& portoSettings,
+        const TPipeFactoryCountersPtr& counters)
     {
         THolder<TChildProcess> command;
         if (portoSettings.Enable) {
-            command = MakeHolder<TPortoProcess>(portoCtlPath, exePath, args, env, cacheDir + "/Slot-" + ToString(containerId), portoSettings);
+            command = MakeHolder<TPortoProcess>(portoCtlPath, exePath, args, env, cacheDir + "/Slot-" + ToString(containerId), portoSettings, counters);
         } else {
             command = MakeHolder<TChildProcess>(exePath, args, env, cacheDir + "/Slot-" + ToString(containerId));
         }
@@ -2245,6 +2313,7 @@ private:
 
     const TString Revision;
 
+    const TPipeFactoryCountersPtr Counters;
     TProcessHolder ProcessHolder;
     TTaskScheduler TaskScheduler;
     const int MaxProcesses;

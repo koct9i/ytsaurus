@@ -139,7 +139,7 @@ public:
 
         if (rsp->Attachments().size() != 1) {
             THROW_ERROR_EXCEPTION("Invalid attachment count")
-                << TErrorAttribute("count", rsp->Attachments().size());
+                .With("count", rsp->Attachments().size());
         }
 
         return rsp->Attachments()[0];
@@ -149,7 +149,7 @@ private:
     const TBusClientConfigPtr TcpBusClientConfig_;
     const TJobProbeConfigPtr ProbeConfig_;
 
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, SpinLock_);
+    YT_DECLARE_SPIN_LOCK(TSpinLock, SpinLock_);
     std::unique_ptr<TJobProberServiceProxy> JobProberProxy_;
 
 

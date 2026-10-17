@@ -1,25 +1,22 @@
+import copy
+import functools
 import itertools
 import json
 import os
 import os.path
 import shutil
+import urllib.request
 
 import pytest
 
 import yatest.common
 
-import library.python.ydb.federated_topic_client as federated_topic_client
-
 import yt.yson as yson
-
-from yt.yt.flow.yandex.extensions.monium.python.mock import _MoniumServerMock
-
-import logbroker.tools.lib.recipe_helpers.cm_requests as cm_requests
-from logbroker.public.api.admin import config_manager_admin_pb2
 
 from library.python.port_manager import PortManager
 
-from contextlib import closing
+from contextlib import ExitStack
+from datetime import datetime, timezone
 
 from yt.environment import init_operations_archive
 from yt.environment.helpers import (
@@ -29,8 +26,10 @@ from yt.environment.helpers import (
 )
 
 from yt.wrapper.flow_commands import PipelineState
+from yt.wrapper.ypath import parse_ypath
 
 from yt.yql.tests.common.test_framework.test_utils import (
+    wait_pipeline_condition_or_failed_jobs,
     wait_pipeline_state_or_failed_jobs,
     create_flow_logs_replicators,
     dump_pipeline_jobs_stderr,
@@ -41,114 +40,11 @@ from yt.yql.tests.common.test_framework.test_utils import (
 
 from yt_commands import (
     authors, create, sync_mount_table, insert_rows, select_rows,
-    list_queue_consumer_registrations, raises_yt_error,
+    list_queue_consumer_registrations, raises_yt_error, get, get_driver,
 )
 
 from yt_queries import start_query
 from yt_queue_agent_test_base import TestQueueAgentBase
-
-
-LOGBROKER_FEDERATION_RECIPE_BINARY = yatest.common.binary_path(
-    "kikimr/public/tools/federation_recipe/federation_recipe"
-)
-
-ENV_FILE = yatest.common.work_path("env.json.txt")
-
-
-def has_logbroker_federation():
-    return os.getenv("CM_PORT") is not None
-
-
-def get_logbroker_endpoint(cluster):
-    return f"localhost:{os.getenv(f'{cluster}_port')}"
-
-
-def get_logbroker_cm_endpoint():
-    return f"localhost:{os.getenv("CM_PORT")}"
-
-
-class LogbrokerClient:
-    # By default logbroker federation recipe creates two clusters named 'cluster_a' and 'cluster_b'
-    # and two accounts named `prod` and `test`.
-    # Each account also already contains 1 topic and 1 consumer named `topic` and `consumer` correspondingly.
-    LOGBROKER_CLUSTER = "cluster_a"
-    LOGBROKER_ACCOUNT = "test"
-    LOGBROKER_DATABASE = "/Root/logbroker-federation/" + LOGBROKER_ACCOUNT
-    LOGBROKER_TOPIC = "topic"
-
-    def __init__(self, endpoint, database, cm, test_id):
-        self._endpoint = endpoint
-        self._database = database
-        self._cm = cm
-        self._test_id = test_id
-
-        self._federation_driver = federated_topic_client.FederationDriver(
-            endpoint, database
-        )
-
-        self._federation_driver.wait_init()
-
-        self._created_topics = []
-        self._topic_index_generator = itertools.count()
-
-    @property
-    def endpoint(self):
-        return self._endpoint
-
-    @property
-    def database(self):
-        return self._database
-
-    @property
-    def cm(self):
-        return self._cm
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
-
-    def make_create_topic_request(self, path):
-        request = config_manager_admin_pb2.SingleModifyRequest()
-        request.create_topic.path.path = path
-        request.create_topic.parent_template = 'default'
-        request.create_topic.properties.partitions_count.user_defined = 1
-        request.create_topic.properties.auto_partitioning_strategy.user_defined = "disabled"
-        return request
-
-    def create_topic(self):
-        topic_index = next(self._topic_index_generator)
-        topic_path = self._test_id + "." + self.LOGBROKER_TOPIC + str(topic_index)
-        full_topic_path = self.LOGBROKER_ACCOUNT + "/" + topic_path
-        self._cm.exec_request((
-            self.make_create_topic_request(full_topic_path),
-        ))
-
-        self._created_topics.append(full_topic_path)
-
-        return topic_path
-
-    def create_topic_writer(self, topic_path):
-        return self._federation_driver.topic_writer(topic=topic_path)
-
-    def create_topic_reader(self, topic_path, consumer):
-        return self._federation_driver.topic_reader(topic=topic_path, consumer=consumer)
-
-    def close(self):
-        if self._created_topics:
-            self._cm.exec_request(tuple(
-                cm_requests.request_remove_topic(topic) for topic in self._created_topics
-            ))
-
-        self._federation_driver.close()
-
-
-def load_env():
-    with open(ENV_FILE, "r") as env_file:
-        for line in env_file:
-            for key, value in json.loads(line.strip()).items():
-                os.environ[key] = value
 
 
 def get_test_id(request):
@@ -165,121 +61,39 @@ def get_test_id(request):
     return ".".join(prefix_parts)
 
 
-@pytest.fixture(scope="session")
-def logbroker_federation():
-    common_args = [
-        "--build-root", yatest.common.build_path(),
-        "--source-root", yatest.common.source_path(),
-        "--output-dir", yatest.common.output_path(),
-        "--env-file", ENV_FILE,
-    ]
-
-    yatest.common.process.execute(
-        command=[LOGBROKER_FEDERATION_RECIPE_BINARY, "start"] + common_args,
-    )
-
-    load_env()
-
-    yield
-
-    yatest.common.process.execute(
-        command=[LOGBROKER_FEDERATION_RECIPE_BINARY, "stop"] + common_args,
-    )
+def ts(seconds):
+    return seconds * 1_000_000
 
 
-@pytest.fixture
-def logbroker_client(request, logbroker_federation):
-    if not has_logbroker_federation():
-        pytest.skip("Logbroker federation is not available")
+def with_ytflow_default_settings(**new_values):
+    def decorator(test):
+        @functools.wraps(test)
+        def wrapper(self, *args, **kwargs):
+            client = self.Env.create_client()
+            config_path = "//sys/yql_agent/config"
+            old_config = client.get(config_path)
 
-    cm_port = os.getenv("CM_PORT")
+            try:
+                for name, value in new_values.items():
+                    self.set_default_setting(name, value, client)
 
-    logbroker_cluster = LogbrokerClient.LOGBROKER_CLUSTER
-    logbroker_endpoint = get_logbroker_endpoint(logbroker_cluster)
+                return test(self, *args, **kwargs)
+            finally:
+                client.set(config_path, old_config)
+                wait_for_dynamic_config_update(
+                    client,
+                    old_config,
+                    "//sys/yql_agent/instances"
+                )
 
-    cm = cm_requests.CMApiHelper(f'localhost:{cm_port}')
+        return wrapper
 
-    test_id = get_test_id(request)
-
-    with LogbrokerClient(
-        endpoint=logbroker_endpoint,
-        database=LogbrokerClient.LOGBROKER_DATABASE,
-        cm=cm,
-        test_id=test_id,
-    ) as client:
-        yield client
-
-
-# Module-level singleton holding the in-process gRPC mock server for the
-# duration of the test session.  Populated by the session-scoped
-# ``solomon_emulator`` fixture and consumed by the function-scoped
-# ``solomon_client`` fixture.
-_monium_mock_singleton = None
-
-
-@pytest.fixture(scope="session")
-def solomon_emulator():
-    """Session-scoped fixture that starts the in-process Monium gRPC mock.
-
-    Replaces the old external solomon_emulator_recipe process.  Sets the env
-    vars that ``modify_yql_agent_config`` reads (SOLOMON_MOCK_ENDPOINT) and
-    that the TMoniumDriver uses for OAuth auth (MONIUM_TOKEN).
-    """
-    global _monium_mock_singleton
-
-    mock = _MoniumServerMock()
-    mock.start()
-    _monium_mock_singleton = mock
-
-    os.environ["MONIUM_TOKEN"] = "test-token"
-    os.environ["SOLOMON_MOCK_ENDPOINT"] = mock.endpoint
-
-    try:
-        yield
-    finally:
-        os.environ.pop("MONIUM_TOKEN", None)
-        os.environ.pop("SOLOMON_MOCK_ENDPOINT", None)
-        mock.stop()
-        _monium_mock_singleton = None
-
-
-@pytest.fixture
-def solomon_client(solomon_emulator):
-    """Per-test fixture that wraps the session Monium mock with shard tracking.
-
-    Provides the same ``create_shard`` / ``get_metrics`` / ``cleanup`` API that
-    the old SolomonClient had, so no test-body changes are needed.  All shards
-    created during a test are cleaned up in the fixture teardown.
-    """
-    mock = _monium_mock_singleton
-    created_shards = []
-
-    class _Client:
-        @property
-        def endpoint(self):
-            return mock.endpoint
-
-        def create_shard(self):
-            shard_path = mock.create_shard()
-            created_shards.append(shard_path)
-            return shard_path
-
-        def get_metrics(self, shard_name):
-            return mock.get_metrics(shard_name)
-
-        def cleanup(self, shard_name):
-            parts = shard_name.split("/", 2)
-            mock.cleanup_solomon(*parts)
-
-    client = _Client()
-    try:
-        yield client
-    finally:
-        for shard_path in created_shards:
-            client.cleanup(shard_path)
+    return decorator
 
 
 class TestYtflowBase(TestQueueAgentBase):
+    ENABLE_MULTIDAEMON = True
+
     NUM_MASTERS = 1
     NUM_DISCOVERY_SERVERS = 1
     NUM_NODES = 3
@@ -299,7 +113,7 @@ class TestYtflowBase(TestQueueAgentBase):
 
     COPY_YTSERVER = False
 
-    MAX_YQL_VERSION = '2025.04'
+    MAX_YQL_VERSION = '2025.05'
     DEFAULT_YQL_UI_VERSION = '2025.01'
 
     PIPELINE_PATH = '//tmp/pipeline'
@@ -307,18 +121,6 @@ class TestYtflowBase(TestQueueAgentBase):
     YT_TABLE_PATH = '//tmp/Table'
     YT_CONSUMER_PATH = '//tmp/main_consumer'
     YT_PRODUCER_PATH = '//tmp/main_producer'
-
-    # By default logbroker federation recipe creates two clusters named 'cluster_a' and 'cluster_b'
-    # and two accounts named `prod` and `test`.
-    # Each account also already contains 1 topic and 1 consumer named `topic` and `consumer` correspondingly.
-    LOGBROKER_CONSUMER = "consumer"
-    LOGBROKER_COMPRESSION_CODEC = "raw"
-    LOGBROKER_COMPRESSION_LEVEL = "0"
-
-    # Solomon emulator creates project, service and cluster on first write
-    SOLOMON_PROJECT = "project"
-    SOLOMON_SERVICE = "service"
-    SOLOMON_CLUSTER = "cluster"
 
     YTFLOW_WORKER_BIN = yatest.common.binary_path("yt/yql/tools/ytflow_worker/ytflow_worker")
 
@@ -337,8 +139,15 @@ class TestYtflowBase(TestQueueAgentBase):
                 dict(name='_RpcTimeout', value='10s'),
                 dict(name='_MasterLockTimeout', value='2m'),
                 dict(name='_MasterLockPingPeriod', value='30s'),
+                # Controller timings (ms) patched into the controller job config.
+                dict(name='_ControllerConfig',
+                     value='{warm_up_time=1000;scheduler_period=500;publish_retry_period=1000;'
+                           'controller_service={set_spec_retry_period=1000};}'),
+                # Balancer timings (ms) merged into the dynamic pipeline spec's job_manager.
+                dict(name='_JobManagerConfig', value='{rebalance_sync_period=500;}'),
                 dict(name='_FiniteStreams', value=str(run_vanilla_operation)),
-                dict(name='_UseCpuAwareBalancer', value='false'),
+                dict(name='_YtUseSourceWatermark', value='false'),
+                dict(name='EnableComputationPatternResources', value='false'),
                 dict(name='_ControllerWriteFullLogsToYT', value='true'),
                 dict(name='_ControllerWriteLogsToFile', value='false'),
                 dict(name='_ControllerLogLevel', value='debug'),
@@ -349,13 +158,8 @@ class TestYtflowBase(TestQueueAgentBase):
                 dict(name='_WorkerEnableStderrLogging', value='false'),
                 dict(name='_LogsDirectory', value='logs'),
                 dict(name='YtPartitionCount', value='1'),
-                dict(name='LogbrokerSubject', value='authenticated@well-known'),
-                dict(name='LogbrokerTopicPartitionCount', value='3'),
-                dict(name='_LogbrokerMirrorToCluster', value='all_original'),
-                dict(name='_LogbrokerConfigManagerPollingPeriod', value='100ms'),
                 dict(name='_SwitchComputationNodeBufferSizeBytes', value='0'),
                 dict(name='_RunVanillaOperation', value=str(run_vanilla_operation)),
-                dict(name='_MoniumDriverSecure', value='false'),
             ],
             cluster_mapping=[dict(
                 name=cls.Env.id,
@@ -364,32 +168,17 @@ class TestYtflowBase(TestQueueAgentBase):
             )],
         )
 
-        if has_logbroker_federation():
-            logbroker_endpoint = get_logbroker_endpoint(LogbrokerClient.LOGBROKER_CLUSTER)
-            logbroker_cm_endpoint = get_logbroker_cm_endpoint()
-            config['yql_agent']['pq_gateway_config'] = dict(
-                cluster_mapping=[dict(
-                    name='logbroker',
-                    endpoint=logbroker_endpoint,
-                    token="dummy_token",
-                    database=LogbrokerClient.LOGBROKER_DATABASE,
-                    config_manager_endpoint=logbroker_cm_endpoint
-                )]
-            )
-
-        config['yql_agent']['solomon_gateway_config'] = dict(
-            cluster_mapping=[dict(
-                name='solomon',
-                cluster=os.getenv("SOLOMON_MOCK_ENDPOINT", "localhost:0"),
-                token="dummy_token",
-            )]
-        )
+        cls.extend_yql_agent_config(config)
 
         yt_gateway_config = config['yql_agent']['gateway_config']
         yt_gateway_config['mr_job_udfs_dir'] = ";".join([
             yt_gateway_config['mr_job_udfs_dir'],
             yatest.common.binary_path("yt/yql/tests/agent/throwing_udf"),
         ])
+
+    @classmethod
+    def extend_yql_agent_config(cls, config):
+        pass
 
     @classmethod
     def set_default_setting(cls, name, value, client):
@@ -428,22 +217,24 @@ class TestYtflowBase(TestQueueAgentBase):
         gateways_config = {
             "yt": yql_agent_config['yql_agent']['gateway_config'],
             "ytflow": yql_agent_config['yql_agent']['ytflow_gateway_config'],
-            "solomon": yql_agent_config['yql_agent']['solomon_gateway_config'],
         }
 
         yt_cluster_mapping = gateways_config['yt']['cluster_mapping']
-        assert len(yt_cluster_mapping) == 1
-        yt_cluster_mapping[0]['YTToken'] = "dummy_token"
+        for mapping in yt_cluster_mapping:
+            mapping['YTToken'] = "dummy_token"
 
         ytflow_cluster_mapping = gateways_config['ytflow']['cluster_mapping']
-        assert len(ytflow_cluster_mapping) == 1
-        ytflow_cluster_mapping[0]['token'] = "dummy_token"
+        for mapping in ytflow_cluster_mapping:
+            mapping['token'] = "dummy_token"
 
-        if has_logbroker_federation():
-            gateways_config["pq"] = yql_agent_config['yql_agent']['pq_gateway_config']
+        cls.extend_debug_gateways_config(gateways_config, yql_agent_config)
 
         with open(destination_gateways_conf_path, "w") as f:
             f.write(convert_gateways_config_to_proto_text(gateways_config))
+
+    @classmethod
+    def extend_debug_gateways_config(cls, gateways_config, yql_agent_config):
+        pass
 
     @classmethod
     def setup_yql_debug_environment(
@@ -480,82 +271,64 @@ class TestYtflowBase(TestQueueAgentBase):
         table_path = self.YT_TABLE_PATH + str(table_index)
         return table_path
 
-    def _create_yt_table(self, input_table_attrs):
+    def _create_yt_table(self, input_table_attrs, cluster=None):
         table_path = self._allocate_yt_table_path()
         input_table_attrs.update(dynamic=True)
-        create("table", table_path, attributes=input_table_attrs)
-        sync_mount_table(table_path)
+        driver = get_driver(cluster=cluster) if cluster is not None else None
+        create("table", table_path, attributes=input_table_attrs, driver=driver)
+        sync_mount_table(table_path, driver=driver)
         return table_path
 
-    def _write_yt_table(self, table_path, rows):
-        insert_rows(table_path, rows)
+    def _write_yt_table(self, table_path, rows, cluster=None):
+        driver = get_driver(cluster=cluster) if cluster is not None else None
+        insert_rows(table_path, rows, driver=driver)
 
-    def _read_yt_table(self, table_path):
-        result = list(select_rows(f"* from [{table_path}]"))
+    def _read_yt_table(self, table_path, cluster=None):
+        driver = get_driver(cluster=cluster) if cluster is not None else None
+        result = list(select_rows(f"* from [{table_path}]", driver=driver))
         self._remove_system_columns(result)
         return result
 
-    def _assert_yt_table_content(self, table_path, expected_rows):
-        assert_items_equal(self._read_yt_table(table_path), expected_rows)
+    def _assert_yt_table_content(self, table_path, expected_rows, cluster=None):
+        assert_items_equal(self._read_yt_table(table_path, cluster=cluster), expected_rows)
 
-    def _write_logbroker_topic(self, topic_path, data, logbroker_client):
-        with closing(logbroker_client.create_topic_writer(topic_path)) as topic_writer:
-            topic_writer.write(data)
+    def _get_yt_table_key_columns(self, table_path):
+        schema = get(f"{table_path}/@schema")
+        return [column["name"] for column in schema if "sort_order" in column]
 
-    def _read_logbroker_topic(self, topic_path, logbroker_client):
-        with closing(
-            logbroker_client.create_topic_reader(topic_path, self.LOGBROKER_CONSUMER)
-        ) as topic_reader:
-            batch = topic_reader.receive_batch()
-            topic_reader.commit_with_ack(batch)
-            return batch.messages
+    def _assert_yt_table_key_columns(self, table_path, expected_key_columns):
+        assert self._get_yt_table_key_columns(table_path) == list(expected_key_columns)
 
-    def _assert_logbroker_topic_content(self, topic_path, expected_data, logbroker_client):
-        actual_data = [
-            lb_data.message.data.decode()
-            for lb_data in self._read_logbroker_topic(topic_path, logbroker_client)
+    def _get_single_flow_worker(self, client):
+        workers = client.get_flow_view(self.PIPELINE_PATH, cache=False)["state"]["workers"]
+        assert len(workers) == 1
+        return next(iter(workers.values()))
+
+    @staticmethod
+    def _read_flow_worker_monitoring(monitoring_address, path):
+        # JSON requests are Solomon pulls by default, which converts counters to
+        # per-grid rate gauges. Read cumulative counters for deterministic assertions.
+        request = urllib.request.Request(
+            f"http://{monitoring_address}{path}",
+            headers={"X-YT-IsSolomonPull": "0"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+
+    @staticmethod
+    def _get_flow_worker_counter(sensors, sensor_name, required_labels):
+        values = [
+            sensor["value"]
+            for sensor in sensors
+            if sensor.get("labels", {}).get("sensor") == sensor_name
+            and all(
+                sensor.get("labels", {}).get(label) == value
+                for label, value in required_labels.items()
+            )
         ]
-
-        assert_items_equal(actual_data, expected_data)
-
-    def _assert_solomon_shard_content(self, shard_name, expected_data, solomon_client, sensors={"counter"}):
-        result_metrics = solomon_client.get_metrics(shard_name)
-
-        expected_metrics = []
-        for row in expected_data:
-            timestamp = None
-            labels = {}
-            sensor_values = {}
-            for key, value in row.items():
-                if key in sensors:
-                    sensor_values[key] = value
-                elif isinstance(value, str):
-                    labels[key] = value
-                elif isinstance(value, int) or value is None:
-                    timestamp = value
-                else:
-                    assert False, f"Unexpected type of value: {type(value)}"
-
-            if timestamp is None:
-                continue
-
-            for sensor_name, value in sensor_values.items():
-                metric = {
-                    "labels": sorted([["sensor", sensor_name]] + [[key, value] for key, value in labels.items()]),
-                    "value": value,
-                    "ts": timestamp
-                }
-                expected_metrics.append(metric)
-
-        assert_items_equal(result_metrics, sorted(expected_metrics, key=lambda x: (x["ts"], x["labels"])))
-
-    def _convert_solomon_metrics_to_yt_format(self, metrics, timestamp_column="metric_timestamp"):
-        def convert_timestamp(metric):
-            converted_metric = metric.copy()
-            if converted_metric[timestamp_column] is not None:
-                converted_metric[timestamp_column] *= 1000000
-            return converted_metric
-        return list(map(convert_timestamp, metrics))
+        assert values
+        # Solomon exports the same tagged counter through several tag projections.
+        return max(values)
 
     @pytest.fixture
     def run_query(self, request):
@@ -564,18 +337,37 @@ class TestYtflowBase(TestQueueAgentBase):
 
         os.makedirs(test_output_directory)
 
-        query_text_path = os.path.join(test_output_directory, "query.yql")
-
-        def wait_if_yql_debug_requested():
+        def wait_if_yql_debug_requested(query_text_path, artifact_subdirectory):
             if self.debug_yql_output_directory is not None:
+                debug_output_directory = self.debug_yql_output_directory
+                if artifact_subdirectory is not None:
+                    debug_output_directory = os.path.join(
+                        debug_output_directory,
+                        artifact_subdirectory,
+                    )
+                    os.makedirs(debug_output_directory, exist_ok=True)
+
                 self.setup_yql_debug_environment(
                     os.path.join(yatest.common.output_path(), "yql_agent_configs", "yql_agent-0.yson"),
-                    os.path.join(self.debug_yql_output_directory, "gateways.conf"),
+                    os.path.join(debug_output_directory, "gateways.conf"),
                     query_text_path,
-                    os.path.join(self.debug_yql_output_directory, "query.yql"))
+                    os.path.join(debug_output_directory, "query.yql"))
 
-        def wait_if_flow_debug_requested(client, port_manager):
+        def wait_if_flow_debug_requested(
+            client,
+            port_manager,
+            invocation_output_directory,
+            artifact_subdirectory,
+        ):
             if self.debug_flow_output_directory is not None:
+                debug_output_directory = self.debug_flow_output_directory
+                if artifact_subdirectory is not None:
+                    debug_output_directory = os.path.join(
+                        debug_output_directory,
+                        artifact_subdirectory,
+                    )
+                    os.makedirs(debug_output_directory, exist_ok=True)
+
                 flowDebugHelper = FlowDebugHelper(
                     "primary",
                     self.Env.get_http_proxy_address(),
@@ -585,15 +377,38 @@ class TestYtflowBase(TestQueueAgentBase):
                     port_manager)
 
                 flowDebugHelper.setup_flow_debug_environment(
-                    os.path.join(test_output_directory, "setup_pipeline_spec_config.yson"),
-                    self.debug_flow_output_directory,
+                    os.path.join(invocation_output_directory, "setup_pipeline_spec_config.yson"),
+                    debug_output_directory,
                     controller_wait_retries=5,
                     controller_retry_delay=5,
                     flow_command_timeout=600)
 
-        def impl(query_text):
-            with PortManager() as port_manager:
+        call_stacks = []
+
+        def impl(
+            query_text,
+            yql_version=self.MAX_YQL_VERSION,
+            target_state=PipelineState.Completed,
+            artifact_subdirectory=None,
+            on_target_state_reached=None,
+            success_condition=None,
+            success_condition_timeout=120,
+        ):
+            with ExitStack() as stack:
+                port_manager = stack.enter_context(PortManager())
                 pipeline_path = self.PIPELINE_PATH
+                invocation_output_directory = test_output_directory
+                if artifact_subdirectory is not None:
+                    invocation_output_directory = os.path.join(
+                        test_output_directory,
+                        artifact_subdirectory,
+                    )
+                    os.makedirs(invocation_output_directory)
+
+                query_text_path = os.path.join(
+                    invocation_output_directory,
+                    "query.yql",
+                )
 
                 query_text_header = f"""
 use primary;
@@ -618,9 +433,7 @@ pragma Ytflow.WorkerCount = "1";
 pragma Ytflow.WorkerCpuLimit = "1.0";
 pragma Ytflow.WorkerMemoryLimit = "1G";
 
-pragma Ytflow.LogbrokerConsumerPath = "{self.LOGBROKER_CONSUMER}";
-pragma Ytflow.LogbrokerWriteCompressionCodec = "{self.LOGBROKER_COMPRESSION_CODEC}";
-pragma Ytflow.LogbrokerWriteCompressionLevel = "{self.LOGBROKER_COMPRESSION_LEVEL}";
+{self.get_additional_query_pragmas()}
 """
 
                 query_text = '\n'.join([query_text_header, query_text])
@@ -628,38 +441,75 @@ pragma Ytflow.LogbrokerWriteCompressionLevel = "{self.LOGBROKER_COMPRESSION_LEVE
                 with open(query_text_path, "w") as f:
                     f.write(query_text)
 
-                wait_if_yql_debug_requested()
+                wait_if_yql_debug_requested(query_text_path, artifact_subdirectory)
 
                 client = self.Env.create_client()
 
-                self.set_default_setting("_DumpPipelineSpecToDirectory", test_output_directory, client)
+                self.set_default_setting(
+                    "_DumpPipelineSpecToDirectory",
+                    invocation_output_directory,
+                    client,
+                )
 
                 controller_logs_replicator, worker_logs_replicator = create_flow_logs_replicators(
                     self.PIPELINE_PATH,
-                    test_output_directory,
+                    invocation_output_directory,
                     logs_batch_size=1000,
                     output_file_prefix="",
                     yt_client=client)
 
-                with controller_logs_replicator, worker_logs_replicator:
-                    query = start_query("yql", query_text)
-                    query.track()
+                stack.enter_context(controller_logs_replicator)
+                stack.enter_context(worker_logs_replicator)
+                query = start_query("yql", query_text, settings={"yql_version": yql_version})
+                query.track()
 
-                    wait_if_flow_debug_requested(client, port_manager)
+                wait_if_flow_debug_requested(
+                    client,
+                    port_manager,
+                    invocation_output_directory,
+                    artifact_subdirectory,
+                )
 
-                    try:
-                        wait_pipeline_state_or_failed_jobs(
-                            PipelineState.Completed, pipeline_path,
+                try:
+                    wait_pipeline_state_or_failed_jobs(
+                        target_state, pipeline_path,
+                        client=client,
+                        timeout=600)
+
+                    if on_target_state_reached is not None:
+                        on_target_state_reached(client)
+
+                    if success_condition is not None:
+                        wait_pipeline_condition_or_failed_jobs(
+                            lambda current_state: success_condition(client, current_state),
+                            pipeline_path,
                             client=client,
-                            timeout=600)
+                            timeout=success_condition_timeout,
+                            condition_description="query success condition",
+                            ignore_exceptions=True,
+                        )
 
-                    finally:
-                        dump_pipeline_jobs_stderr(
-                            self.PIPELINE_PATH,
-                            os.path.join(test_output_directory, "pipeline_jobs.stderr"),
-                            client=client)
+                finally:
+                    dump_pipeline_jobs_stderr(
+                        self.PIPELINE_PATH,
+                        os.path.join(
+                            invocation_output_directory,
+                            "pipeline_jobs.stderr",
+                        ),
+                        client=client,
+                        operation_driver_factory=lambda cluster: get_driver(cluster=cluster))
 
-        return impl
+                call_stacks.append(stack.pop_all())
+                return client
+
+        try:
+            yield impl
+        finally:
+            for stack in reversed(call_stacks):
+                stack.close()
+
+    def get_additional_query_pragmas(self):
+        return ""
 
     def _remove_system_columns(self, rows):
         system_columns = ["$tablet_index", "$row_index", "$timestamp", "$cumulative_data_weight"]
@@ -676,7 +526,7 @@ pragma Ytflow.LogbrokerWriteCompressionLevel = "{self.LOGBROKER_COMPRESSION_LEVE
 
 
 class TestYtflow(TestYtflowBase):
-    NUM_TEST_PARTITIONS = 16
+    NUM_TEST_PARTITIONS = 8
 
     @authors("ngc224")
     @pytest.mark.timeout(180)
@@ -715,6 +565,319 @@ where string_field = "foo" or int64_field >= 100;
             {"string_field": "foo_ytflow", "int64_field": 100, "bool_field": False},
             {"string_field": "foobar_ytflow", "int64_field": 10000, "bool_field": True},
         ])
+
+    @authors("artemmashin")
+    @pytest.mark.timeout(180)
+    @pytest.mark.parametrize("output_table_exists", [True, False])
+    def test_select_star(self, query_tracker, yql_agent, run_query, output_table_exists):
+        schema = self._make_queue_schema([
+            {"name": "value", "type": "int64"},
+        ])
+        input_table_path = self._create_yt_table(dict(schema=schema))
+        input_data = [
+            {"value": 1},
+            {"value": 2}
+        ]
+        self._write_yt_table(input_table_path, input_data)
+
+        if output_table_exists:
+            out_table_path = self._create_yt_table(dict(schema=schema))
+        else:
+            out_table_path = self._allocate_yt_table_path()
+
+        run_query(f"""
+insert into `{out_table_path}`
+select * from `{input_table_path}`;
+""")
+
+        self._assert_yt_table_content(out_table_path, input_data)
+
+    @authors("ngc224")
+    @pytest.mark.timeout(180)
+    @with_ytflow_default_settings(
+        _FiniteStreams="false",
+        _YtUseSourceWatermark="true",
+    )
+    def test_hopping_aggregate_skips_late_data(self, query_tracker, yql_agent, run_query):
+        input_table_path = self._create_yt_table(dict(
+            schema=self._make_queue_schema([
+                {"name": "key", "type": "string"},
+                {"name": "ts", "type": "uint32"},
+                {"name": "value", "type": "int64"},
+                {"name": "flow_queue_meta", "type": "any"},
+            ]),
+        ))
+
+        output_table_path = self._create_yt_table(dict(
+            schema=self._make_queue_schema([
+                {"name": "window_start", "type": "timestamp"},
+                {"name": "key", "type": "string"},
+                {"name": "sum_values", "type": "int64"},
+            ]),
+        ))
+
+        def data_row(timestamp, value, event_timestamp, key="foo"):
+            return {
+                "key": key,
+                "ts": timestamp,
+                "value": value,
+                "flow_queue_meta": {"event_timestamp": event_timestamp},
+            }
+
+        def heartbeat(timestamp):
+            return {"flow_queue_meta": {
+                "event_watermark": timestamp,
+                "pure_heartbeat": True,
+            }}
+
+        self._write_yt_table(input_table_path, [
+            data_row(timestamp=6, value=1, event_timestamp=6),
+            data_row(timestamp=8, value=10, event_timestamp=8),
+            heartbeat(timestamp=8),
+        ])
+
+        expected_rows = [
+            {
+                "window_start": ts(4),
+                "key": "foo",
+                "sum_values": 1,
+            },
+            {
+                "window_start": ts(6),
+                "key": "foo",
+                "sum_values": 131,
+            },
+            {
+                "window_start": ts(8),
+                "key": "foo",
+                "sum_values": 60,
+            },
+            {
+                "window_start": ts(10),
+                "key": "foo",
+                "sum_values": 30,
+            },
+            {
+                "window_start": ts(10),
+                "key": "non_expired",
+                "sum_values": 100000,
+            },
+            {
+                "window_start": ts(12),
+                "key": "non_expired",
+                "sum_values": 100000,
+            },
+        ]
+
+        first_window_closed = False
+
+        def output_ready(client, current_state):
+            nonlocal first_window_closed
+
+            rows = self._read_yt_table(output_table_path)
+            first_window_seen = any(
+                row["window_start"] == ts(4)
+                for row in rows
+            )
+
+            if not first_window_closed and first_window_seen:
+                self._write_yt_table(input_table_path, [
+                    data_row(timestamp=7, value=100, event_timestamp=9),
+                    data_row(timestamp=4, value=1000, event_timestamp=9, key="expired"),
+                    data_row(timestamp=9, value=20, event_timestamp=9),
+                    data_row(timestamp=5, value=10000, event_timestamp=9),
+                    data_row(timestamp=13, value=100000, event_timestamp=13, key="non_expired"),
+                    data_row(timestamp=11, value=30, event_timestamp=11),
+                    heartbeat(timestamp=16),
+                ])
+
+                first_window_closed = True
+
+            # Aggregate partitions flush independently; wait for every expected window.
+            seen_windows = {(row["window_start"], row["key"]) for row in rows}
+            return all(
+                (row["window_start"], row["key"]) in seen_windows
+                for row in expected_rows
+            )
+
+        run_query(f"""
+insert into `{output_table_path}`
+select
+    HOP_START() as window_start,
+    key,
+    sum(value) as sum_values
+from `{input_table_path}`
+group by
+    key,
+    HOP(Datetime::FromSeconds(Unwrap(ts)), "PT2S", "PT4S", "PT0S");
+""",
+            target_state=PipelineState.Working,
+            success_condition=output_ready,
+        )
+
+        self._assert_yt_table_content(output_table_path, expected_rows)
+
+    @authors("spreis")
+    @pytest.mark.timeout(300)
+    def test_pattern_pipeline_spec_update(
+        self,
+        query_tracker,
+        yql_agent,
+        run_query,
+    ):
+        input_table_path = self._create_yt_table(dict(
+            schema=self._make_queue_schema([
+                {"name": "key", "type": "string"},
+                {"name": "value", "type": "int64"},
+            ]),
+            tablet_count=2,
+        ))
+        first_input_rows = [
+            {"$tablet_index": 0, "key": "first_0", "value": 1},
+            {"$tablet_index": 1, "key": "first_1", "value": 2},
+        ]
+        second_input_rows = [
+            {"$tablet_index": 0, "key": "second_0", "value": 3},
+            {"$tablet_index": 1, "key": "second_1", "value": 4},
+        ]
+        self._write_yt_table(input_table_path, first_input_rows)
+
+        output_schema = self._make_queue_schema([
+            {"name": "key", "type": "string"},
+            {"name": "value", "type": "int64"},
+        ])
+        first_output_path = self._create_yt_table(dict(schema=output_schema))
+        second_output_path = self._create_yt_table(dict(schema=output_schema))
+        first_expected_rows = [
+            {"key": "first_0_processed", "value": 10},
+            {"key": "first_1_processed", "value": 20},
+        ]
+        second_expected_rows = [
+            {"key": "second_0_processed", "value": 30},
+            {"key": "second_1_processed", "value": 40},
+        ]
+
+        def table_has_rows(table_path, expected_rows):
+            return sorted(self._read_yt_table(table_path), key=lambda row: row["key"]) == sorted(
+                expected_rows,
+                key=lambda row: row["key"],
+            )
+
+        function_registry_load_sensor = (
+            "yt.flow.worker.resource.custom.function_registry.load")
+        computation_pattern_load_sensor = (
+            "yt.flow.worker.resource.custom.computation_pattern.load")
+        computation_graph_clone_sensor = (
+            "yt.flow.worker.computation.custom.computation_graph.clone")
+
+        def pattern_resource_metrics_are_ready(client):
+            static_spec = client.get_pipeline_spec(self.PIPELINE_PATH)["spec"]
+
+            def find_resource_id(resource_class_name):
+                resource_ids = [
+                    resource_id
+                    for resource_id, resource_spec in static_spec["resources"].items()
+                    if resource_spec["resource_class_name"] == resource_class_name
+                ]
+                assert len(resource_ids) == 1
+                return resource_ids[0]
+
+            function_registry_resource_id = find_resource_id(
+                "NYql::NYtflow::TFunctionRegistryResource")
+            computation_pattern_resource_id = find_resource_id(
+                "NYql::NYtflow::TComputationPatternResource")
+            pattern_computation_ids = [
+                computation_id
+                for computation_id, computation_spec in static_spec["computations"].items()
+                if computation_pattern_resource_id
+                in computation_spec.get("required_resource_ids", {})
+            ]
+            assert len(pattern_computation_ids) == 1
+            pattern_computation_id = pattern_computation_ids[0]
+
+            monitoring_address = self._get_single_flow_worker(client)["monitoring_address"]
+
+            sensors = self._read_flow_worker_monitoring(
+                monitoring_address,
+                "/solomon/all",
+            )["sensors"]
+            return (
+                self._get_flow_worker_counter(
+                    sensors,
+                    function_registry_load_sensor,
+                    {"resource": function_registry_resource_id},
+                ) == 1
+                and self._get_flow_worker_counter(
+                    sensors,
+                    computation_pattern_load_sensor,
+                    {"resource": computation_pattern_resource_id},
+                ) == 1
+                and self._get_flow_worker_counter(
+                    sensors,
+                    computation_graph_clone_sensor,
+                    {"computation_id": pattern_computation_id},
+                ) >= 2
+            )
+
+        def submit_query(
+            output_path,
+            expected_rows,
+            artifact_subdirectory,
+            on_target_state_reached=None,
+        ):
+            return run_query(f"""
+pragma Ytflow.EnableComputationPatternResources = "true";
+
+insert into `{output_path}`
+select
+    key || "_processed" as key,
+    value * 10 as value
+from `{input_table_path}`;
+""",
+                target_state=PipelineState.Working,
+                artifact_subdirectory=artifact_subdirectory,
+                on_target_state_reached=on_target_state_reached,
+                success_condition=lambda client, _: (
+                    table_has_rows(output_path, expected_rows)
+                    and pattern_resource_metrics_are_ready(client)
+                ),
+            )
+
+        config_client = self.Env.create_client()
+        self.set_default_setting("_FiniteStreams", "false", config_client)
+        try:
+            first_client = submit_query(
+                first_output_path,
+                first_expected_rows,
+                artifact_subdirectory="first_query",
+            )
+            assert first_client.get_pipeline_state(self.PIPELINE_PATH) == PipelineState.Working
+            first_operation_id = first_client.get(
+                f"{self.PIPELINE_PATH}/@_yql_ytflow_vanilla_info/operation_id")
+            self._assert_yt_table_content(second_output_path, [])
+
+            def write_second_input(client):
+                assert client.get_pipeline_state(self.PIPELINE_PATH) == PipelineState.Working
+                assert client.get(
+                    f"{self.PIPELINE_PATH}/@_yql_ytflow_vanilla_info/operation_id"
+                ) != first_operation_id
+                self._write_yt_table(input_table_path, second_input_rows)
+
+            second_client = submit_query(
+                second_output_path,
+                second_expected_rows,
+                artifact_subdirectory="second_query",
+                on_target_state_reached=write_second_input,
+            )
+            assert second_client.get_pipeline_state(self.PIPELINE_PATH) == PipelineState.Working
+            second_operation_id = second_client.get(
+                f"{self.PIPELINE_PATH}/@_yql_ytflow_vanilla_info/operation_id")
+            assert second_operation_id != first_operation_id
+
+            self._assert_yt_table_content(first_output_path, first_expected_rows)
+            self._assert_yt_table_content(second_output_path, second_expected_rows)
+        finally:
+            self.set_default_setting("_FiniteStreams", "true", config_client)
 
     @authors("ngc224")
     @pytest.mark.timeout(180)
@@ -947,6 +1110,64 @@ select * from $stream;
 
     @authors("artemmashin")
     @pytest.mark.timeout(180)
+    def test_create_sorted_table_by_primary_key_setting(
+        self, query_tracker, yql_agent, run_query
+    ):
+        input_table_path = self._create_yt_table(dict(
+            schema=self._make_queue_schema([
+                {"name": "key", "type": "string"},
+                {"name": "value", "type": "int64"},
+            ]),
+        ))
+        input_data = [
+            {"key": "foo", "value": 1},
+            {"key": "bar", "value": 10},
+            {"key": "baz", "value": 100},
+        ]
+        self._write_yt_table(input_table_path, input_data)
+
+        out_table_path = self._allocate_yt_table_path()
+
+        run_query(f"""
+replace into `{out_table_path}` with primary_key = "[key]"
+select key, value from `{input_table_path}`;
+""")
+
+        self._assert_yt_table_key_columns(out_table_path, ["key"])
+        self._assert_yt_table_content(out_table_path, input_data)
+
+    @authors("artemmashin")
+    @pytest.mark.timeout(180)
+    @pytest.mark.parametrize("key_columns", [("key_a", "key_b"), ("key_b", "key_a")])
+    def test_create_sorted_table_by_composite_primary_key_setting(
+        self, query_tracker, yql_agent, run_query, key_columns
+    ):
+        input_table_path = self._create_yt_table(dict(
+            schema=self._make_queue_schema([
+                {"name": "key_a", "type": "int64"},
+                {"name": "key_b", "type": "string"},
+                {"name": "value", "type": "int64"},
+            ]),
+        ))
+        input_data = [
+            {"key_a": 1, "key_b": "foo", "value": 5},
+            {"key_a": 2, "key_b": "foo", "value": 15},
+            {"key_a": 1, "key_b": "bar", "value": 25},
+        ]
+        self._write_yt_table(input_table_path, input_data)
+
+        out_table_path = self._allocate_yt_table_path()
+
+        run_query(f"""
+replace into `{out_table_path}` with primary_key = "[{";".join(key_columns)}]"
+select key_a, key_b, value from `{input_table_path}`;
+""")
+
+        self._assert_yt_table_key_columns(out_table_path, key_columns)
+        self._assert_yt_table_content(out_table_path, input_data)
+
+    @authors("artemmashin")
+    @pytest.mark.timeout(180)
     def test_complex_graph_with_several_maps(self, query_tracker, yql_agent, run_query):
         input_table_path = self._create_yt_table(dict(
             schema=self._make_queue_schema([
@@ -1048,587 +1269,238 @@ select * from $add_two_stream;
         expected_data = [{"value": value} for value in [3, 4, 7]]
         self._assert_yt_table_content(out_table_paths[2], expected_data)
 
-
-class TestYtflowLogbroker(TestYtflowBase):
-    NUM_TEST_PARTITIONS = 16
-
     @authors("artemmashin")
     @pytest.mark.timeout(180)
-    def test_logbroker_read(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, ["a", "b", "c"], logbroker_client)
+    @pytest.mark.parametrize("yql_version", ["2025.01", "2025.05"])
+    def test_datetime_udf_with_different_langver(self, query_tracker, yql_agent, run_query, yql_version):
+        input_table_path = self._create_yt_table(dict(
+            schema=self._make_queue_schema([
+                {"name": "value", "type": "uint32"},
+            ]),
+        ))
+
+        datetime_format = "%Y-%m-%d %H:%M:%S"
+
+        test_timestamp = int(datetime.strptime("2026-07-14 19:11:35", datetime_format).timestamp())
+        input_timestamps = [test_timestamp + i for i in range(5)]
+        input_data = [{"value": timestamp} for timestamp in input_timestamps]
+        self._write_yt_table(input_table_path, input_data)
 
         out_table_path = self._create_yt_table(dict(
             schema=self._make_queue_schema([
-                {"name": "Data", "type": "string"},
+                {"name": "time", "type": "string"},
             ]),
         ))
 
         run_query(f"""
-$stream = select Data || "_ytflow" as Data from logbroker.`{input_topic_path}`;
-
 insert into `{out_table_path}`
-select * from $stream;
-""")
+select DateTime::Format('{datetime_format}')(DateTime::FromSeconds(value)) as time from `{input_table_path}`;
+""", yql_version)
 
-        self._assert_yt_table_content(out_table_path, [
-            {"Data": "a_ytflow"},
-            {"Data": "b_ytflow"},
-            {"Data": "c_ytflow"},
-        ])
+        expected_data = [{"time": datetime.fromtimestamp(timestamp, timezone.utc).strftime(datetime_format)} for timestamp in input_timestamps]
+        self._assert_yt_table_content(out_table_path, expected_data)
+
+
+class TestYtflowRemoteCluster(TestYtflowBase):
+    NUM_REMOTE_CLUSTERS = 2
+    NUM_TEST_PARTITIONS = 4
+
+    DELTA_QUEUE_CONSUMER_REGISTRATION_MANAGER_CONFIG = {
+        "state_read_path": parse_ypath("<clusters=[primary]>//sys/queue_agents/consumer_registrations"),
+        "state_write_path": parse_ypath("primary://sys/queue_agents/consumer_registrations"),
+    }
+
+    @classmethod
+    def _use_primary_timestamp_provider(cls, config, cluster_index):
+        # The queue agent uses primary-cluster clocks for both clusters' tablet bundles.
+        if cluster_index > 0:
+            config["cluster_connection"]["timestamp_provider"] = copy.deepcopy(
+                cls.Env.configs["master"][0]["cluster_connection"]["timestamp_provider"])
+
+    @classmethod
+    def modify_rpc_proxy_config(cls, config, cluster_index, multidaemon_config, proxy_index):
+        cls._use_primary_timestamp_provider(config, cluster_index)
+
+    @classmethod
+    def modify_http_proxy_config(cls, config, cluster_index, multidaemon_config, proxy_index):
+        cls._use_primary_timestamp_provider(config, cluster_index)
+
+    @classmethod
+    def extend_yql_agent_config(cls, config):
+        for remote_env in cls.remote_envs:
+            config['yql_agent']['ytflow_gateway_config']['cluster_mapping'].append(dict(
+                name=remote_env.id,
+                real_name=remote_env.id,
+                proxy_url=remote_env.get_http_proxy_address(),
+            ))
 
     @authors("ngc224")
     @pytest.mark.timeout(180)
-    @pytest.mark.parametrize("creation_mode", ["fresh_table", "truncate"])
-    @pytest.mark.parametrize("selection_mode", ["all_columns", "exact_columns"])
-    def test_logbroker_transparent_column_removal(
-        self, query_tracker, yql_agent, run_query, logbroker_client,
-        creation_mode, selection_mode
-    ):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, ["a", "b", "c"], logbroker_client)
+    @pytest.mark.parametrize("kind", ["queue", "sorted_table"])
+    def test_remote_read_and_write(self, query_tracker, yql_agent, run_query, kind):
+        schema = self._make_queue_schema([
+            {"name": "key", "type": "string"},
+            {"name": "value", "type": "int64"},
+        ])
 
-        if creation_mode == "fresh_table":
-            out_table_path = self._allocate_yt_table_path()
-            write_hint = ""
-        elif creation_mode == "truncate":
-            out_table_path = self._create_yt_table(dict(
-                schema=self._make_queue_schema([
-                    {"name": "Data", "type": "string"},
-                ]),
-            ))
+        rows = [
+            {"key": "foo", "value": 1},
+            {"key": "bar", "value": 2},
+        ]
 
-            write_hint = " with truncate"
+        input_path = self._create_yt_table(dict(schema=schema), cluster="remote_0")
+        self._write_yt_table(input_path, rows, cluster="remote_0")
+
+        if kind == "sorted_table":
+            output_path = self._allocate_yt_table_path()
+
+            run_query(f"""
+replace into remote_0.`{output_path}` with primary_key = "[key]"
+select key, value from remote_0.`{input_path}`;
+""")
         else:
-            raise ValueError(f"Unsupported creation mode: {creation_mode}")
+            output_path = self._create_yt_table(dict(schema=schema), cluster="remote_0")
 
-        if selection_mode == "all_columns":
-            select_body = "*"
-        elif selection_mode == "exact_columns":
-            select_body = "Data"
+            run_query(f"""
+insert into remote_0.`{output_path}`
+select * from remote_0.`{input_path}`;
+""")
+
+        self._assert_yt_table_content(output_path, rows, cluster="remote_0")
+
+    @authors("ngc224")
+    @pytest.mark.timeout(180)
+    @pytest.mark.parametrize("kind", ["queue", "sorted_table"])
+    def test_local_read_and_local_and_remote_writes(self, query_tracker, yql_agent, run_query, kind):
+        schema = self._make_queue_schema([
+            {"name": "key", "type": "string"},
+            {"name": "value", "type": "int64"},
+        ])
+
+        rows = [
+            {"key": "foo", "value": 1},
+            {"key": "bar", "value": 2},
+        ]
+
+        input_path = self._create_yt_table(dict(schema=schema))
+        self._write_yt_table(input_path, rows)
+
+        if kind == "sorted_table":
+            local_path = self._allocate_yt_table_path()
+            remote_path = self._allocate_yt_table_path()
+
+            run_query(f"""
+replace into `{local_path}` with primary_key = "[key]"
+select key, value from `{input_path}`;
+
+replace into remote_0.`{remote_path}` with primary_key = "[key]"
+select key, value from `{input_path}`;
+""")
         else:
-            raise ValueError(f"Unsupported selection mode: {selection_mode}")
+            local_path = self._create_yt_table(dict(schema=schema))
+            remote_path = self._create_yt_table(dict(schema=schema), cluster="remote_0")
 
-        run_query(f"""
-$stream = select Data || "_ytflow" as Data from logbroker.`{input_topic_path}`;
+            run_query(f"""
+insert into `{local_path}`
+select * from `{input_path}`;
 
-insert into `{out_table_path}`{write_hint}
-select {select_body} from $stream;
+insert into remote_0.`{remote_path}`
+select * from `{input_path}`;
 """)
 
-        self._assert_yt_table_content(out_table_path, [
-            {"Data": "a_ytflow"},
-            {"Data": "b_ytflow"},
-            {"Data": "c_ytflow"},
+        self._assert_yt_table_content(local_path, rows)
+        self._assert_yt_table_content(remote_path, rows, cluster="remote_0")
+
+    @authors("ngc224")
+    @pytest.mark.timeout(180)
+    @pytest.mark.parametrize("kind", ["queue", "sorted_table"])
+    def test_write_to_two_remote_clusters(self, query_tracker, yql_agent, run_query, kind):
+        schema = self._make_queue_schema([
+            {"name": "key", "type": "string"},
+            {"name": "value", "type": "int64"},
         ])
 
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_select_star_read_lb_write_lb(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, ["AB", "CD", "EF"], logbroker_client)
+        rows = [
+            {"key": "foo", "value": 1},
+            {"key": "bar", "value": 2},
+        ]
 
-        out_topic_path = logbroker_client.create_topic()
+        input_path = self._create_yt_table(dict(schema=schema))
+        self._write_yt_table(input_path, rows)
 
-        run_query(f"""
-insert into logbroker.`{out_topic_path}`
-select * from logbroker.`{input_topic_path}`;
+        if kind == "queue":
+            output_0 = self._create_yt_table(dict(schema=schema), cluster="remote_0")
+            output_1 = self._create_yt_table(dict(schema=schema), cluster="remote_1")
+
+            with raises_yt_error("Writing into several remote YT queues"):
+                run_query(f"""
+insert into remote_0.`{output_0}`
+select * from `{input_path}`;
+
+insert into remote_1.`{output_1}`
+select * from `{input_path}`;
+""")
+        else:
+            output_0 = self._allocate_yt_table_path()
+            output_1 = self._allocate_yt_table_path()
+
+            run_query(f"""
+replace into remote_0.`{output_0}` with primary_key = "[key]"
+select key, value from `{input_path}`;
+
+replace into remote_1.`{output_1}` with primary_key = "[key]"
+select key, value from `{input_path}`;
 """)
 
-        self._assert_logbroker_topic_content(out_topic_path, ["AB", "CD", "EF"], logbroker_client)
+            self._assert_yt_table_content(output_0, rows, cluster="remote_0")
+            self._assert_yt_table_content(output_1, rows, cluster="remote_1")
 
-    @authors("artemmashin")
+    @authors("ngc224")
     @pytest.mark.timeout(180)
-    def test_select_star_read_lb_write_yt(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, ["AB", "CD", "EF"], logbroker_client)
-
-        out_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string"},
-            ]),
-        ))
-
-        run_query(f"""
-insert into `{out_table_path}`
-select * from logbroker.`{input_topic_path}`;
-""")
-
-        self._assert_yt_table_content(out_table_path, [
-            {"Data": "AB"},
-            {"Data": "CD"},
-            {"Data": "EF"}
+    def test_copy_remote_queue_to_primary(self, query_tracker, yql_agent, run_query):
+        schema = self._make_queue_schema([
+            {"name": "value", "type": "string"}
         ])
 
-    @authors("artemmashin")
+        rows = [
+            {"value": "foo"},
+            {"value": "bar"},
+        ]
+
+        input_table_path = self._create_yt_table(dict(schema=schema), cluster="remote_0")
+        self._write_yt_table(input_table_path, rows, cluster="remote_0")
+
+        output_table_path = self._create_yt_table(dict(schema=schema))
+
+        run_query(f"""
+insert into `{output_table_path}`
+select * from remote_0.`{input_table_path}`;
+""")
+
+        self._assert_yt_table_content(output_table_path, rows)
+
+    @authors("ngc224")
     @pytest.mark.timeout(180)
-    def test_logbroker_write(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string"},
-            ]),
-        ))
-        self._write_yt_table(input_table_path, [
-            {"Data": "AB"},
-            {"Data": "CD"},
-            {"Data": "EF"},
+    def test_remote_runtime_cluster(self, query_tracker, yql_agent, run_query, request):
+        schema = self._make_queue_schema([
+            {"name": "value", "type": "string"}
         ])
 
-        out_topic_path = logbroker_client.create_topic()
-
-        run_query(f"""
-$stream = select coalesce(Data, "Empty!") as Data from `{input_table_path}`;
-
-insert into logbroker.`{out_topic_path}`
-select * from $stream;
-""")
-
-        self._assert_logbroker_topic_content(out_topic_path, ["AB", "CD", "EF"], logbroker_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_read_yt_write_yt_logbroker(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string"},
-            ]),
-        ))
-        self._write_yt_table(input_table_path, [
-            {"Data" : "yt"},
-            {"Data" : "logbroker"},
-            {"Data" : "logbroker"},
-        ])
-
-        out_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string"},
-            ]),
-        ))
-        out_topic_path = logbroker_client.create_topic()
-
-        run_query(f"""
-$stream = select * from `{input_table_path}`;
-
-$lambda = ($row) -> {{
-    $good_row_type = Struct<'Data':optional<string>>;
-    $bad_row_type = Struct<'Data':string>;
-    $variant_type = Variant<$good_row_type, $bad_row_type>;
-
-    return If(
-        $row.Data == "yt",
-        Variant($row, "0", $variant_type),
-        Variant(<|Data:coalesce($row.Data, "Empty!")|>, "1", $variant_type)
-    );
-}};
-
-$good_stream, $bad_stream = process $stream using $lambda(TableRow());
-
-insert into `{out_table_path}`
-select * from $good_stream;
-
-insert into logbroker.`{out_topic_path}`
-select * from $bad_stream;
-""")
-
-        self._assert_yt_table_content(out_table_path, [
-            {"Data": "yt"}
-        ])
-        self._assert_logbroker_topic_content(out_topic_path, ["logbroker", "logbroker"], logbroker_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_read_logbroker_write_yt_logbroker(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, ["yt", "logbroker", "logbroker"], logbroker_client)
-
-        out_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string", "required": True},
-            ]),
-        ))
-        out_topic_path = logbroker_client.create_topic()
-
-        run_query(f"""
-$stream = select * from logbroker.`{input_topic_path}`;
-
-$lambda = ($row) -> {{
-    $row_type = TypeOf($row);
-    $variant_type = Variant<$row_type, $row_type>;
-
-    return If(
-        $row.Data == "yt",
-        Variant($row, "0", $variant_type),
-        Variant($row, "1", $variant_type)
-    );
-}};
-
-$good_stream, $bad_stream = process $stream using $lambda(TableRow());
-
-insert into `{out_table_path}`
-select * from $good_stream;
-
-insert into logbroker.`{out_topic_path}`
-select * from $bad_stream;
-""")
-
-        self._assert_yt_table_content(out_table_path, [
-            {"Data": "yt"}
-        ])
-        self._assert_logbroker_topic_content(out_topic_path, ["logbroker", "logbroker"], logbroker_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_many_logbroker_outputs(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, [str(i) for i in range(5)], logbroker_client)
-
-        out_topics = [logbroker_client.create_topic() for _ in range(5)]
-
-        run_query(f"""
-$stream = select * from logbroker.`{input_topic_path}`;
-
-$lambda = ($row) -> {{
-    $row_type = TypeOf($row);
-    $variant_type = Variant<$row_type, $row_type, $row_type, $row_type, $row_type>;
-
-    return case $row.Data
-        {"\n".join([f"""when "{i}" then Variant($row, "{i}", $variant_type)""" for i in range(5)])}
-        else Variant(<|Data:"Unexpected!"|>, "0", $variant_type)
-    end;
-}};
-
-$stream0, $stream1, $stream2, $stream3, $stream4 = process $stream using $lambda(TableRow());
-
-{"\n".join([f"""insert into logbroker.`{out_topic_path}` select * from $stream{idx};""" for idx, out_topic_path in enumerate(out_topics)])}
-
-""")
-        for idx, out_topic in enumerate(out_topics):
-            self._assert_logbroker_topic_content(out_topic, [f"{idx}"], logbroker_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_yt_yt_logbroker_output(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        self._write_logbroker_topic(input_topic_path, [str(i) for i in range(3)], logbroker_client)
-
-        out_tables = [self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string", "required": True},
-            ]),
-        )) for _ in range(2)]
-
-        out_topic_path = logbroker_client.create_topic()
-
-        run_query(f"""
-$stream = select * from logbroker.`{input_topic_path}`;
-
-$lambda = ($row) -> {{
-    $row_type = TypeOf($row);
-    $variant_type = Variant<$row_type, $row_type, $row_type>;
-
-    return case $row.Data
-        {"\n".join([f"""when "{i}" then Variant($row, "{i}", $variant_type)""" for i in range(3)])}
-        else Variant(<|Data:"Unexpected!"|>, "0", $variant_type)
-    end;
-}};
-
-$stream0, $stream1, $stream2 = process $stream using $lambda(TableRow());
-
-insert into `{out_tables[0]}`
-select * from $stream0;
-
-insert into `{out_tables[1]}`
-select * from $stream1;
-
-insert into logbroker.`{out_topic_path}`
-select * from $stream2;
-""")
-
-        for idx, out_table in enumerate(out_tables):
-            self._assert_yt_table_content(out_table, [
-                {"Data": f"{idx}"}
-            ])
-
-        self._assert_logbroker_topic_content(out_topic_path, ["2"], logbroker_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_remove_system_columns_from_write(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        input_data = [str(i) for i in range(3)]
-        self._write_logbroker_topic(input_topic_path, input_data, logbroker_client)
-
-        out_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string"},
-            ]),
-        ))
-
-        run_query(f"""
-$stream = select * from logbroker.`{input_topic_path}`;
-
-$lambda = ($row) -> {{
-    return ReplaceMember($row, "Data", $row.Data || "_processed");
-}};
-
-$processed_stream = process $stream using $lambda(TableRow());
-
-insert into `{out_table_path}`
-select * from $processed_stream;
-""")
-
-        self._assert_yt_table_content(out_table_path, [{"Data": data + "_processed"} for data in input_data])
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_logbroker_output_topics_creation(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "Data", "type": "string", "required": True},
-            ]),
-        ))
-        input_data = [{"Data": str(i)} for i in range(4)]
-        self._write_yt_table(input_table_path, input_data)
-
-        out_topic_paths = [
-            "test/topic_dir/topic_first",
-            "test/topic_dir/topic_second",
-            "test/other_topics/topic",
-            "test/other_topics/inner/topic"
+        rows = [
+            {"value": "foo"},
+            {"value": "bar"},
         ]
 
-        run_query(f"""
-$stream = select Data from `{input_table_path}`;
+        input_table_path = self._create_yt_table(dict(schema=schema))
+        self._write_yt_table(input_table_path, rows)
 
-$lambda = ($row) -> {{
-    $row_type = TypeOf($row);
-    $variant_type = Variant<$row_type, $row_type, $row_type, $row_type>;
-
-    return case $row.Data
-        {"\n".join([f"""when "{idx}" then Variant($row, "{idx}", $variant_type)""" for idx in range(len(input_data))])}
-        else Variant(<|Data:"Unexpected!"|>, "0", $variant_type)
-    end;
-}};
-
-$stream0, $stream1, $stream2, $stream3 = process $stream using $lambda(TableRow());
-
-{"\n".join([f"""insert into logbroker.`{out_topic_path}`
-select * from $stream{idx};""" for idx, out_topic_path in enumerate(out_topic_paths)])}
-
-""")
-
-        for idx, out_topic_path in enumerate(out_topic_paths):
-            self._assert_logbroker_topic_content(out_topic_path, [f"{idx}"], logbroker_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_logbroker_consumer_creation(self, query_tracker, yql_agent, run_query, logbroker_client):
-        input_topic_path = logbroker_client.create_topic()
-        input_data = [str(i) for i in range(5)]
-        self._write_logbroker_topic(input_topic_path, input_data, logbroker_client)
-
-        out_topic_path = "test/topic_dir/topic"
+        output_table_path = self._create_yt_table(dict(schema=schema))
 
         run_query(f"""
-pragma Ytflow.LogbrokerConsumerPath = "test/consumer_dir/consumer";
+pragma Ytflow.RuntimeCluster = "remote_0";
 
-$stream = select Data || "_dummy" as Data from logbroker.`{input_topic_path}`;
-
-insert into logbroker.`{out_topic_path}`
-select * from $stream;
+insert into `{output_table_path}`
+select * from `{input_table_path}`;
 """)
 
-        self._assert_logbroker_topic_content(
-            out_topic_path, [f"{input}_dummy" for input in input_data], logbroker_client)
-
-
-class TestYtflowSolomon(TestYtflowBase):
-    NUM_TEST_PARTITIONS = 16
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_solomon_write(self, query_tracker, yql_agent, run_query, solomon_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "counter", "type": "uint64"},
-                {"name": "metric_timestamp", "type": "timestamp"},
-                {"name": "label", "type": "string", "required": True}
-            ]),
-        ))
-
-        expected_data = [
-            {"counter": 135 + i, "label": f"label_{i}", "metric_timestamp": 1750000000 + i} for i in range(5)
-        ]
-        self._write_yt_table(input_table_path, self._convert_solomon_metrics_to_yt_format(expected_data))
-
-        out_shard_path = solomon_client.create_shard()
-
-        run_query(f"""
-$stream = select coalesce(counter, 0) as counter, metric_timestamp, label from `{input_table_path}`;
-
-insert into solomon.`{out_shard_path}`
-select * from $stream;
-""")
-
-        self._assert_solomon_shard_content(out_shard_path, expected_data, solomon_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_yt_solomon_write(self, query_tracker, yql_agent, run_query, solomon_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "counter", "type": "uint64"},
-                {"name": "metric_timestamp", "type": "timestamp"},
-                {"name": "yt_data", "type": "string"},
-            ]),
-        ))
-
-        solomon_expected_data = [
-            {"counter": 135 + i, "metric_timestamp": 1750000000 + i} for i in range(5)
-        ]
-        yt_expected_data = [
-            {"yt_data": f"data_{i}"} for i in range(5)
-        ]
-
-        self._write_yt_table(input_table_path, self._convert_solomon_metrics_to_yt_format(solomon_expected_data) + yt_expected_data)
-
-        out_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "yt_data", "type": "string"}
-            ]),
-        ))
-        out_shard_path = solomon_client.create_shard()
-
-        run_query(f"""
-$stream = select * from `{input_table_path}`;
-
-$lambda = ($row) -> {{
-    $yt_row_type = Struct<'yt_data':optional<string>>;
-    $solomon_row_type = Struct<'counter':uint64, 'ts':timestamp>;
-    $variant_type = Variant<$yt_row_type, $solomon_row_type>;
-
-    return If(
-        $row.yt_data is not null,
-        Variant(<|yt_data:$row.yt_data|>, "0", $variant_type),
-        Variant(<|counter:coalesce($row.counter, 0), ts:coalesce($row.metric_timestamp, CurrentUtcTimestamp())|>, "1", $variant_type)
-    );
-}};
-
-$yt_stream, $solomon_stream = process $stream using $lambda(TableRow());
-
-insert into `{out_table_path}`
-select * from $yt_stream;
-
-insert into solomon.`{out_shard_path}`
-select * from $solomon_stream;
-""")
-
-        self._assert_yt_table_content(out_table_path, yt_expected_data)
-        self._assert_solomon_shard_content(out_shard_path, solomon_expected_data, solomon_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_logbroker_solomon_write(self, query_tracker, yql_agent, run_query, logbroker_client, solomon_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "counter", "type": "uint64"},
-                {"name": "metric_timestamp", "type": "timestamp"},
-                {"name": "logbroker_data", "type": "string"},
-            ]),
-        ))
-
-        solomon_expected_data = [
-            {"counter": 135 + i, "metric_timestamp": 1750000000 + i} for i in range(5)
-        ]
-        logbroker_expected_data = [f"data_{i}" for i in range(5)]
-
-        input_data = [{"logbroker_data": data} for data in logbroker_expected_data]
-        input_data += self._convert_solomon_metrics_to_yt_format(solomon_expected_data)
-        self._write_yt_table(input_table_path, input_data)
-
-        out_topic_path = logbroker_client.create_topic()
-        out_shard_path = solomon_client.create_shard()
-
-        run_query(f"""
-$stream = select * from `{input_table_path}`;
-
-$lambda = ($row) -> {{
-    $logbroker_row_type = Struct<'data':string>;
-    $solomon_row_type = Struct<'counter':uint64, 'ts':timestamp>;
-    $variant_type = Variant<$logbroker_row_type, $solomon_row_type>;
-
-    return If(
-        $row.logbroker_data is not null,
-        Variant(<|data:coalesce($row.logbroker_data, "Empty!")|>, "0", $variant_type),
-        Variant(<|counter:coalesce($row.counter, 0), ts:coalesce($row.metric_timestamp, CurrentUtcTimestamp())|>, "1", $variant_type)
-    );
-}};
-
-$logbroker_stream, $solomon_stream = process $stream using $lambda(TableRow());
-
-insert into logbroker.`{out_topic_path}`
-select * from $logbroker_stream;
-
-insert into solomon.`{out_shard_path}`
-select * from $solomon_stream;
-""")
-
-        self._assert_logbroker_topic_content(out_topic_path, logbroker_expected_data, logbroker_client)
-        self._assert_solomon_shard_content(out_shard_path, solomon_expected_data, solomon_client)
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_multiple_solomon_metrics_in_row(self, query_tracker, yql_agent, run_query, solomon_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "counter", "type": "uint64"},
-                {"name": "gauge", "type": "float"},
-                {"name": "igauge", "type": "int64"},
-                {"name": "metric_timestamp", "type": "timestamp"},
-            ]),
-        ))
-
-        solomon_expected_data = [
-            {"counter": 135 + i, "gauge": 235.0 + float(i), "igauge": 335 + i, "metric_timestamp": 1750000000 + i} for i in range(5)
-        ]
-        self._write_yt_table(input_table_path, self._convert_solomon_metrics_to_yt_format(solomon_expected_data))
-
-        out_shard_path = solomon_client.create_shard()
-
-        run_query(f"""
-$stream = select coalesce(counter, 0) as counter, coalesce(gauge, 0.0) as gauge, coalesce(igauge, 0) as igauge, metric_timestamp from `{input_table_path}`;
-
-insert into solomon.`{out_shard_path}`
-select * from $stream;
-""")
-
-        self._assert_solomon_shard_content(out_shard_path, solomon_expected_data, solomon_client, {"counter", "gauge", "igauge"})
-
-    @authors("artemmashin")
-    @pytest.mark.timeout(180)
-    def test_solomon_with_null_timestamp(self, query_tracker, yql_agent, run_query, solomon_client):
-        input_table_path = self._create_yt_table(dict(
-            schema=self._make_queue_schema([
-                {"name": "counter", "type": "uint64"},
-                {"name": "metric_timestamp", "type": "timestamp"},
-            ]),
-        ))
-
-        solomon_expected_data = [
-            {
-                "counter": 135 + i,
-                "metric_timestamp": 1750000000 + i if i % 3 != 0 else None
-            } for i in range(5)
-        ]
-        self._write_yt_table(input_table_path, self._convert_solomon_metrics_to_yt_format(solomon_expected_data))
-
-        out_shard_path = solomon_client.create_shard()
-
-        run_query(f"""
-$stream = select coalesce(counter, 0) as counter, metric_timestamp from `{input_table_path}`;
-
-insert into solomon.`{out_shard_path}`
-select * from $stream;
-""")
-
-        self._assert_solomon_shard_content(out_shard_path, solomon_expected_data, solomon_client)
+        self._assert_yt_table_content(output_table_path, rows)

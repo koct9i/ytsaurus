@@ -256,6 +256,31 @@ class TestSchedulerMapCommands(YTEnvSetup):
         wait(lambda: assert_statistics(op, "data.output.0.row_count", lambda row_count: row_count == 5))
         wait(lambda: assert_statistics(op, "data.output.1.row_count", lambda row_count: row_count == 1))
 
+    @authors("pogorelov")
+    def test_job_statistics_wire_mode_1(self):
+        update_nodes_dynamic_config({
+            "exec_node": {
+                "controller_agent_connector": {
+                    "omit_data_statistics_from_yson": True,
+                },
+            },
+        })
+
+        create("table", "//tmp/wire_input")
+        create("table", "//tmp/wire_output_0")
+        create("table", "//tmp/wire_output_1")
+        write_table("//tmp/wire_input", [{"key": 1}, {"key": 2}])
+
+        op = map(
+            command="cat; echo {key=3} >&4",
+            in_="//tmp/wire_input",
+            out=["//tmp/wire_output_0", "//tmp/wire_output_1"],
+        )
+
+        wait(lambda: assert_statistics(op, "data.input.row_count", lambda count: count == 2))
+        wait(lambda: assert_statistics(op, "data.output.0.row_count", lambda count: count == 2))
+        wait(lambda: assert_statistics(op, "data.output.1.row_count", lambda count: count == 1))
+
     @authors("renadeen")
     def test_codec_statistics(self):
         create("table", "//tmp/t1", attributes={"compression_codec": "lzma_9"})
@@ -2734,6 +2759,9 @@ print(json.dumps(input))
         job_time_ms = extract_statistic_v2(statistics, "time.exec")
 
         eps_ms = 20
+        # The empty writer's Close() shares the single-threaded ChunkWriter queue with the two
+        # writers closing real chunks, so its overhead over the injected delay is not tiny.
+        close_eps_ms = 1000
 
         def assert_total_time(total_time):
             # Not very precise :(.
@@ -2758,7 +2786,7 @@ print(json.dumps(input))
 
             assert wait_time == 0
             assert write_time == 0
-            assert 100 <= close_time < 100 + eps_ms  # testing_delay_before_chunk_close + eps.
+            assert 100 <= close_time < 100 + close_eps_ms  # testing_delay_before_chunk_close + eps.
             assert_total_time(idle_time + wait_time + write_time + close_time)
 
     @authors("apollo1321")
@@ -2999,6 +3027,49 @@ print(json.dumps(input))
 
         release_breakpoint()
 
+        op.track()
+
+    @authors("apollo1321")
+    def test_interruption_does_not_increase_compressed_data_size(self):
+        create("table", "//tmp/t_in", attributes={
+            "schema": make_schema([
+                {"name": "selected", "type": "string"},
+                {"name": "payload", "type": "string"},
+            ]),
+            "optimize_for": "scan",
+            "replication_factor": 1,
+        })
+        write_table(
+            "//tmp/t_in",
+            [{"selected": "", "payload": "x" * 1000}] * 2050,
+        )
+        create("table", "//tmp/t_out", attributes={"replication_factor": 1})
+
+        op = map(
+            track=False,
+            in_="//tmp/t_in{selected}",
+            out="//tmp/t_out",
+            command=with_breakpoint("read row; BREAKPOINT; cat"),
+            spec={
+                "mapper": {"format": "json"},
+                "job_count": 1,
+                "job_io": {
+                    "buffer_row_count": 1,
+                    "pipe_capacity": 200,
+                },
+                "enable_job_splitting": False,
+                "max_speculative_job_count_per_task": 0,
+                "input_table_columnar_statistics": {
+                    "enabled": True,
+                    "mode": "from_master",
+                },
+                "force_allow_job_interruption": True,
+            },
+        )
+
+        job_id, = wait_breakpoint(job_count=1)
+        op.interrupt_job(job_id)
+        release_breakpoint()
         op.track()
 
     @authors("apollo1321")
@@ -3260,7 +3331,14 @@ class TestJobSizeAdjuster(YTEnvSetup):
     NUM_NODES = 5
     NUM_SCHEDULERS = 1
 
-    DELTA_CONTROLLER_AGENT_CONFIG = {"controller_agent": {"map_operation_options": {"data_size_per_job": 1}}}
+    DELTA_CONTROLLER_AGENT_CONFIG = {
+        "controller_agent": {
+            "map_operation_options": {
+                "data_size_per_job": 1,
+                "enable_ordered_map_job_size_adjustment": True,
+            },
+        },
+    }
 
     @authors("max42")
     def test_map_job_size_adjuster_boost(self):

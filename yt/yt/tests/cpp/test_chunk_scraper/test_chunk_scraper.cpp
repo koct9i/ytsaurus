@@ -155,7 +155,7 @@ protected:
         auto writer = Client_->CreateFileWriter(Format("#%v", fileId));
         WaitFor(writer->Open())
             .ThrowOnError();
-        WaitFor(writer->Write(TSharedRef::FromString("Hello, World"))).ThrowOnError();
+        WaitFor(writer->Write(TSharedRef::FromString(std::string("Hello, World")))).ThrowOnError();
         WaitFor(writer->Close())
             .ThrowOnError();
     }
@@ -466,7 +466,7 @@ TEST_F(TChunkScraperBaseTest, DrainQueueAndAddChunks)
     WaitFor(allChunksRemoved.ToFuture())
         .ThrowOnError();
 
-    ScraperActionQueue_->GetInvoker()->Invoke(BIND([scraper, chunkIds = std::move(chunkIds)] {
+    ScraperActionQueue_->GetInvoker()->Invoke(BIND([&] {
         for (auto chunkId : chunkIds) {
             scraper->Add(chunkId);
         }

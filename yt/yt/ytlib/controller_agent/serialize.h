@@ -124,6 +124,16 @@ DEFINE_ENUM(ESnapshotVersion,
     ((PersistVanillaJobCounts)               (302301))
     ((DropLegacySortedPool)                  (302302))
     ((HighThreadCountJobThreshold)           (302303))
+    ((SamplingSeed)                          (302304))
+    ((SerializableLoggerTagPayload)          (302305))
+    ((InputChunkSliceUncompressedDataSize)   (302306))
+    // 26.3 starts here
+    ((BumpTo_26_3)                           (302400))
+    ((DropLegacyDataSliceRepresentation)     (302401))
+    ((DropInvalidatedJoblets)                (302402))
+    ((JobPhaseSpacing)                       (302403))
+    ((RlsAuthenticatedUser)                  (302404))
+    ((PushBasedShuffle)                      (302405))
 );
 
 ////////////////////////////////////////////////////////////////////////////////

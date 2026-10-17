@@ -12,13 +12,13 @@
 
 #include <yt/yt/core/actions/future.h>
 
-#include <yt/yt/core/misc/property.h>
-
 #include <yt/yt/core/rpc/authentication_identity.h>
 
 #include <yt/yt/core/tracing/public.h>
 
 #include <library/cpp/yt/memory/ref_tracked.h>
+
+#include <library/cpp/yt/misc/property.h>
 
 namespace NYT::NTransactionSupervisor {
 
@@ -36,15 +36,19 @@ void Serialize(const TExpectedTransactionSignatureInfo& signatureInfo, NYson::IY
 
 ////////////////////////////////////////////////////////////////////////////////
 
+using TTransactionCommitApprovalCounts = THashMap<TCellId, int>;
+
+////////////////////////////////////////////////////////////////////////////////
+
 DEFINE_ENUM(ECommitState,
     ((Start)                     (0))
     ((Prepare)                   (1))
     ((GeneratingCommitTimestamps)(2)) // transient only
+    ((CommitTimestampKnown)      (7))
     ((Commit)                    (3))
     ((Aborting)                  (4)) // transient only
     ((Abort)                     (5))
     ((Finishing)                 (6)) // transient only
-    ((ReadyToCommit)             (7))
 );
 
 class TCommit
@@ -57,6 +61,7 @@ public:
     DEFINE_BYVAL_RO_PROPERTY(NTracing::TTraceId, TraceId);
     DEFINE_BYREF_RO_PROPERTY(std::vector<TCellId>, ParticipantCellIds);
     DEFINE_BYREF_RO_PROPERTY(TExpectedTransactionSignatureInfo, ExpectedPrepareSignatures);
+    DEFINE_BYREF_RO_PROPERTY(TTransactionCommitApprovalCounts, TargetCommitApprovalCounts);
     DEFINE_BYREF_RO_PROPERTY(std::vector<TCellId>, PrepareOnlyParticipantCellIds);
     DEFINE_BYREF_RO_PROPERTY(std::vector<TCellId>, CellIdsToSyncWithBeforePrepare);
     DEFINE_BYVAL_RO_PROPERTY(bool, Distributed);
@@ -83,6 +88,7 @@ public:
         NRpc::TMutationId mutationId,
         std::vector<TCellId> participantCellIds,
         TExpectedTransactionSignatureInfo expectedPrepareSignatures,
+        TTransactionCommitApprovalCounts targetCommitApprovalCounts,
         std::vector<TCellId> prepareOnlyParticipantCellIds,
         std::vector<TCellId> cellIdsToSyncWithBeforePrepare,
         bool distributed,

@@ -6,6 +6,8 @@
 
 #include <yt/yt/client/security_client/public.h>
 
+#include <yt/yt/core/ypath/token.h>
+
 #include <yt/yt/core/ytree/helpers.h>
 #include <yt/yt/core/ytree/fluent.h>
 
@@ -91,7 +93,7 @@ void TFormatManager::ValidateAndPatchOperationSpec(
                 return;
             }
             for (const auto& [name, taskSpec] : tasks->AsMap()->GetChildren()) {
-                processTask("/tasks/" + name);
+                processTask("/tasks/" + NYPath::ToYPathLiteral(name));
             }
             return;
         }
@@ -130,7 +132,7 @@ void TFormatManager::ValidateAndPatchFormatNode(const INodePtr& formatNode, std:
             errorMessage = Format("Format %Qlv is disabled", formatType);
         }
         THROW_ERROR_EXCEPTION(NApi::EErrorCode::FormatDisabled, std::move(errorMessage), TError::DisableFormat)
-            << TErrorAttribute("origin", origin);
+            .With("origin", origin);
     }
 
     const auto& defaultAttributes = formatConfig->DefaultAttributes;
@@ -154,8 +156,8 @@ TFormat TFormatManager::ConvertToFormat(const INodePtr& formatNode, std::string 
         return ConvertTo<TFormat>(formatNode);
     } catch (const std::exception& ex) {
         THROW_ERROR_EXCEPTION("Failed to parse format")
-            << ex
-            << TErrorAttribute("origin", origin);
+            .With(ex)
+            .With("origin", origin);
     }
 }
 

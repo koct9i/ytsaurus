@@ -1,7 +1,7 @@
-from yt_env_setup import YTEnvSetup
+from .base import QueriesTestBase
 
 from yt_commands import (
-    add_member, authors, create_access_control_object, remove,
+    abort_transaction, add_member, authors, create_access_control_object, remove,
     make_ace, raises_yt_error, wait, create_user, print_debug, select_rows,
     set, get, insert_rows, sync_compact_table, generate_uuid, ls)
 
@@ -16,9 +16,16 @@ from yt.common import date_string_to_timestamp_mcs
 from yt.test_helpers import assert_items_equal
 
 from yt.wrapper import yson
+import yt.packages.requests as requests
+
+from yt.common import YtResponseError
+
+import json
 
 from collections import Counter
 from builtins import set as Set
+
+import pyarrow as pa
 
 import pytest
 import time
@@ -37,7 +44,7 @@ def expect_queries(queries, list_result, incomplete=False):
         raise
 
 
-class TestMetrics(YTEnvSetup):
+class TestMetrics(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -82,7 +89,7 @@ class TestMetrics(YTEnvSetup):
         wait(lambda: state_time_metric.get({"state": "Completing"}) is not None)
 
 
-class TestQueriesMock(YTEnvSetup):
+class TestQueriesMock(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -113,6 +120,19 @@ class TestQueriesMock(YTEnvSetup):
         with raises_yt_error("Query .* aborted"):
             q.track()
         assert q.get_state() == "aborted"
+
+    @authors("ngc224")
+    def test_fail_query_after_lease_loss(self, query_tracker):
+        q = start_query("mock", "complete_after", settings={"duration": 60000})
+        wait(lambda: q.get_state() == "running")
+
+        active_query = q.get(attributes=["lease_transaction_id"])
+        abort_transaction(active_query["lease_transaction_id"])
+
+        with raises_yt_error("Query lease was lost; restarting query execution is unsafe"):
+            q.track()
+
+        assert q.get_state() == "failed"
 
     @authors("max42")
     def test_complete(self, query_tracker):
@@ -152,6 +172,21 @@ class TestQueriesMock(YTEnvSetup):
         assert_items_equal(q.read_result(1, columns=["foo"]), [{"foo": row["foo"]} for row in rows])
         assert q.read_result(1, columns=["bar", "foo", "bar"], output_format="dsv") == \
             b"""bar=abc\tfoo=42\nbar=def\tfoo=-17\nbar=ghi\tfoo=123\n"""
+
+    @authors("dagorokhov")
+    def test_read_empty_result(self, query_tracker):
+        schema = [{"name": "foo", "type": "int64"}, {"name": "bar", "type": "string"}]
+
+        q = start_query("mock", "complete_after", settings={
+            "results": [
+                {"schema": schema, "rows": []},
+            ]
+        })
+        q.track()
+
+        result = pa.ipc.open_stream(q.read_result(0, output_format=yson.YsonString(b"arrow"))).read_all()
+        assert result.num_rows == 0
+        assert result.column_names == ["foo", "bar"]
 
     @authors("kirsiv40")
     def test_assigned_tracker_attribute_saves_after_query_finishes(self, query_tracker):
@@ -314,8 +349,86 @@ class TestQueriesMock(YTEnvSetup):
         assert len(list_queries()["queries"]) == 1
         assert str(get_query(q.id)["is_indexed"]) == "false"
 
+    def _get_stored_finished_query_settings(self, query_id):
+        rows = select_rows(f"settings from [//sys/query_tracker/finished_queries] where query_id = \"{query_id}\"")
+        assert len(rows) == 1
+        return rows[0]["settings"]
 
-class TestQueryTrackerBan(YTEnvSetup):
+    @authors("mpereskokova")
+    def test_tokens_are_stripped_from_completed_query_settings(self, query_tracker):
+        settings = {
+            "duration": 0,
+            "cluster": "primary",
+            "tokens": {"yql_auth_data": "secret_auth_data"},
+        }
+        q = start_query("mock", "complete_after", settings=settings)
+        q.track()
+
+        finished_settings = q.get()["settings"]
+        assert "tokens" not in finished_settings
+        assert finished_settings["cluster"] == "primary"
+        assert finished_settings["duration"] == 0
+
+        stored_settings = self._get_stored_finished_query_settings(q.id)
+        assert "tokens" not in stored_settings
+        assert stored_settings["cluster"] == "primary"
+
+    @authors("mpereskokova")
+    def test_tokens_are_stripped_from_aborted_query_settings(self, query_tracker):
+        settings = {"tokens": {"yql_auth_data": "secret_auth_data"}}
+        q = start_query("mock", "run_forever", settings=settings)
+        wait(lambda: q.get_state() == "running")
+
+        assert q.get()["settings"]["tokens"] == {"yql_auth_data": "secret_auth_data"}
+
+        q.abort()
+        with raises_yt_error("Query .* aborted"):
+            q.track()
+
+        assert "tokens" not in q.get()["settings"]
+        assert "tokens" not in self._get_stored_finished_query_settings(q.id)
+
+    @authors("mpereskokova")
+    def test_get_query_progress_parts(self, query_tracker):
+        q = start_query("mock", "run_forever")
+        wait(lambda: q.get_state() == "running")
+        assert get_query(q.id)["progress"] == {}
+
+        with raises_yt_error() as err:
+            get_query(q.id, progress_parts=["yql_plan"])
+        assert err[0].contains_text("stores progress in compact form")
+
+        with raises_yt_error() as err:
+            get_query(q.id, min_progress_revision=5)
+        assert err[0].contains_text("stores progress in compact form")
+
+        with raises_yt_error() as err:
+            get_query(q.id, progress_parts=["yql_plan"], min_progress_revision=5)
+        assert err[0].contains_text("stores progress in compact form")
+
+    @authors("tinarsky")
+    def test_start_query_retry(self, query_tracker):
+        mutation_id = generate_uuid()
+        q = start_query("mock", "run_forever", mutation_id=mutation_id)
+
+        assert start_query("mock", "run_forever", mutation_id=mutation_id, retry=True).id == q.id
+        with raises_yt_error("Duplicate request is not marked as"):
+            start_query("mock", "run_forever", mutation_id=mutation_id)
+        assert start_query("mock", "run_forever").id != q.id
+
+    @authors("tinarsky")
+    def test_start_query_retry_by_another_user(self, query_tracker):
+        create_user("u1")
+        create_user("u2")
+        mutation_id = generate_uuid()
+        q1 = start_query("mock", "run_forever", mutation_id=mutation_id, authenticated_user="u1")
+        q2 = start_query("mock", "run_forever", mutation_id=mutation_id, authenticated_user="u2")
+
+        assert q1.id != q2.id
+        assert start_query("mock", "run_forever", mutation_id=mutation_id, retry=True, authenticated_user="u2").id == q2.id
+
+
+class TestQueryTrackerBan(QueriesTestBase):
     NUM_QUERY_TRACKER = 1
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
@@ -361,7 +474,7 @@ class TestQueryTrackerBan(YTEnvSetup):
         wait(lambda: query.get_state() == "running", ignore_exceptions=True)
 
 
-class TestQueryTrackerResults(YTEnvSetup):
+class TestQueryTrackerResults(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -433,7 +546,7 @@ class TestQueryTrackerResults(YTEnvSetup):
         assert query.get_result(0)["full_result"] == yson.YsonEntity()
 
 
-class TestQueryTrackerQueryRestart(YTEnvSetup):
+class TestQueryTrackerQueryRestart(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -501,7 +614,7 @@ class TestQueryTrackerQueryRestart(YTEnvSetup):
         query.track()
 
 
-class TestAccessControl(YTEnvSetup):
+class TestAccessControl(QueriesTestBase):
     NUM_TEST_PARTITIONS = 16
 
     DELTA_DRIVER_CONFIG = {
@@ -779,7 +892,7 @@ class TestAccessControl(YTEnvSetup):
         expect_queries([q1, q2], list_queries(filter="asd"))
 
 
-class TestGetQueryTrackerInfo(YTEnvSetup):
+class TestGetQueryTrackerInfo(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -811,7 +924,7 @@ class TestGetQueryTrackerInfo(YTEnvSetup):
                 'query_tracker_stage': 'production',
                 'cluster_name': 'primary',
                 'supported_features': supported_features,
-                'access_control_objects': ['everyone', 'everyone-share', 'nobody'],
+                'access_control_objects': ['admin', 'everyone', 'everyone-share', 'nobody'],
                 'clusters': ['primary'],
                 'engines_info' : {},
             })
@@ -851,7 +964,7 @@ class TestGetQueryTrackerInfo(YTEnvSetup):
                 'query_tracker_stage': 'production',
                 'cluster_name': '',
                 'supported_features': {},
-                'access_control_objects': ['everyone', 'everyone-share', 'nobody'],
+                'access_control_objects': ['admin', 'everyone', 'everyone-share', 'nobody'],
                 'clusters': [],
                 'engines_info' : {},
             },
@@ -881,7 +994,7 @@ class TestGetQueryTrackerInfo(YTEnvSetup):
                 'query_tracker_stage': 'production',
                 'cluster_name': 'primary',
                 'supported_features': supported_features,
-                'access_control_objects': ['everyone', 'everyone-share', 'nobody'],
+                'access_control_objects': ['admin', 'everyone', 'everyone-share', 'nobody'],
                 'clusters': ['primary'],
                 'engines_info' : {},
             },
@@ -891,14 +1004,14 @@ class TestGetQueryTrackerInfo(YTEnvSetup):
                 'query_tracker_stage': 'testing',
                 'cluster_name': 'primary',
                 'supported_features': supported_features,
-                'access_control_objects': ['everyone', 'everyone-share', 'nobody'],
+                'access_control_objects': ['admin', 'everyone', 'everyone-share', 'nobody'],
                 'clusters': ['primary'],
                 'engines_info' : {},
             },
             stage='testing')
 
 
-class TestShare(YTEnvSetup):
+class TestShare(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -916,7 +1029,7 @@ class TestShare(YTEnvSetup):
         expect_queries([], list_queries(authenticated_user="u2"))
 
 
-class TestSecrets(YTEnvSetup):
+class TestSecrets(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -938,7 +1051,7 @@ class TestSecrets(YTEnvSetup):
         assert q2_info["secrets"] == secrets
 
 
-class TestIndexTables(YTEnvSetup):
+class TestIndexTables(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -982,7 +1095,7 @@ class TestIndexTables(YTEnvSetup):
         expect_queries([q2, q1], list_queries(authenticated_user="u1", limit=2))
 
 
-class TestMultipleAccessControl(YTEnvSetup):
+class TestMultipleAccessControl(QueriesTestBase):
     DELTA_DRIVER_CONFIG = {
         "cluster_connection_dynamic_config_policy": "from_cluster_directory",
     }
@@ -1063,7 +1176,7 @@ class TestMultipleAccessControl(YTEnvSetup):
         expect_queries([q2], list_queries(authenticated_user="u2"))
 
 
-class TestTutorials(YTEnvSetup):
+class TestTutorials(QueriesTestBase):
     @authors("kirsiv40")
     def test_tutorials_are_not_listed_with_standart_queries(self, query_tracker):
         create_user("u1")
@@ -1227,7 +1340,7 @@ class TestTutorials(YTEnvSetup):
 
 
 # Separate list to fit 480 seconds limit for a test class.
-class TestAccessControlList(YTEnvSetup):
+class TestAccessControlList(QueriesTestBase):
     NUM_TEST_PARTITIONS = 16
 
     DELTA_DRIVER_CONFIG = {
@@ -1422,7 +1535,7 @@ class TestAccessControlList(YTEnvSetup):
         expect_queries([], list_queries(cursor_direction="future", attributes=["id"], user="u1\") OR ([user]=\"u2"))
 
 
-class TestSearch(YTEnvSetup):
+class TestSearch(QueriesTestBase):
     @authors("kirsiv40")
     @pytest.mark.timeout(900)
     def test_list_search_filters(self, query_tracker):
@@ -1517,8 +1630,11 @@ class TestSearch(YTEnvSetup):
                         expect_with_filters([q1, q2], cursor_direction="future", attributes=["id"], filter="\"aco:some-aco'$%^'\" 'aco:everyone'", search_by_token_prefix=True, **params_map)
 
 
-class TestTTL(YTEnvSetup):
-    QUERY_TRACKER_DYNAMIC_CONFIG = {"not_indexed_queries_ttl": 1000}
+class TestTTL(QueriesTestBase):
+    QUERY_TRACKER_DYNAMIC_CONFIG = {
+        "not_indexed_queries_ttl": 1000,
+        "proxy_config": {"queries_by_mutation_id_ttl": 1000},
+    }
 
     @authors("mpereskokova")
     def test_ttl(self, query_tracker):
@@ -1543,6 +1659,19 @@ class TestTTL(YTEnvSetup):
         q1.get()
         with raises_yt_error("Query .* is not found"):
             q0.get()
+
+    @authors("tinarsky")
+    def test_queries_by_mutation_id_ttl(self, query_tracker):
+        set("//sys/query_tracker/queries_by_user_and_mutation_id/@min_data_ttl", 1000)
+
+        mutation_id = generate_uuid()
+        q = start_query("mock", "run_forever", mutation_id=mutation_id)
+        assert start_query("mock", "run_forever", mutation_id=mutation_id, retry=True).id == q.id
+
+        time.sleep(3)  # > row TTL (1 second)
+        sync_compact_table("//sys/query_tracker/queries_by_user_and_mutation_id")
+
+        assert start_query("mock", "run_forever", mutation_id=mutation_id, retry=True).id != q.id
 
 
 ##################################################################
@@ -1642,3 +1771,50 @@ class TestSearchRpcProxy(TestSearch):
     ENABLE_RPC_PROXY = True
     NUM_RPC_PROXIES = 1
     ENABLE_MULTIDAEMON = True
+
+
+class TestQueriesHttpProxy(QueriesTestBase):
+    ENABLE_HTTP_PROXY = True
+    NUM_HTTP_PROXIES = 1
+
+    def _get_proxy_address(self):
+        return "http://" + self.Env.get_proxy_address()
+
+    def _get_query_declared_parameters_info_via_http(self, params):
+        headers = {
+            "X-YT-Parameters": yson.dumps(params),
+            "X-YT-Header-Format": "<format=text>yson",
+            "X-YT-Output-Format": "<format=text>yson",
+            "X-YT-User-Name": "root",
+        }
+        return requests.post(
+            "{}/api/v4/get_query_declared_parameters_info".format(self._get_proxy_address()),
+            headers=headers)
+
+    def _raise_for_yt_error(self, rsp):
+        if "X-YT-Error" in rsp.headers:
+            raise YtResponseError(json.loads(rsp.headers["X-YT-Error"]))
+        rsp.raise_for_status()
+
+    # YTADMINREQ-60283: Core dump on uninitialized "engine" in driver.
+    @authors("achains")
+    def test_get_query_declared_parameters_info_without_engine(self, query_tracker):
+        rsp = self._get_query_declared_parameters_info_via_http({
+            "query": "some query",
+            "stage": "production",
+        })
+        with raises_yt_error():
+            self._raise_for_yt_error(rsp)
+
+        assert requests.get(self._get_proxy_address() + "/ping").ok
+
+    @authors("achains")
+    def test_get_query_declared_parameters_info(self, query_tracker):
+        rsp = self._get_query_declared_parameters_info_via_http({
+            "query": "some query",
+            "engine": "mock",
+            "stage": "production",
+        })
+        self._raise_for_yt_error(rsp)
+        result = yson.loads(rsp.content)
+        assert "parameters" in result

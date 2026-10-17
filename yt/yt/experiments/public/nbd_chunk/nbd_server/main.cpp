@@ -1,6 +1,13 @@
-#include <yt/yt/server/lib/nbd/chunk_block_device.h>
-#include <yt/yt/server/lib/nbd/config.h>
+#include <yt/yt/server/lib/nbd/block_device.h>
 #include <yt/yt/server/lib/nbd/server.h>
+
+#include <yt/yt/server/lib/nbd/chunk/chunk_block_device.h>
+
+#include <yt/yt/ytlib/chunk_client/session_id.h>
+
+#include <yt/yt/library/nbd/chunk/config.h>
+
+#include <yt/yt/library/nbd/config.h>
 
 #include <yt/yt/core/concurrency/thread_pool.h>
 #include <yt/yt/core/concurrency/thread_pool_poller.h>
@@ -21,6 +28,8 @@
 #include <yt/yt/library/program/helpers.h>
 
 namespace NYT::NNbd {
+
+using namespace NNbd::NChunk;
 
 ////////////////////////////////////////////////////////////////////////////////
 

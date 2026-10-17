@@ -4,6 +4,8 @@
 #include "helpers.h"
 #include "hunk_storage_node.h"
 #include "hunk_tablet.h"
+#include "tablet_cell_bundle.h"
+#include "stores_update_throttler.h"
 
 #include <yt/yt/server/master/cell_master/automaton.h>
 #include <yt/yt/server/master/cell_master/bootstrap.h>
@@ -20,6 +22,8 @@
 
 #include <yt/yt/server/master/object_server/object_manager.h>
 
+#include <yt/yt/server/master/security_server/security_manager.h>
+
 #include <yt/yt/server/master/transaction_server/transaction_manager.h>
 
 #include <yt/yt/server/lib/tablet_server/proto/tablet_manager.pb.h>
@@ -34,11 +38,14 @@
 
 #include <yt/yt/client/chunk_client/chunk_replica.h>
 
+#include <library/cpp/iterator/enumerate.h>
+
 namespace NYT::NTabletServer {
 
 using namespace NCellMaster;
 using namespace NChunkServer;
 using namespace NChunkClient;
+using namespace NConcurrency;
 using namespace NHydra;
 using namespace NObjectClient;
 using namespace NObjectServer;
@@ -50,9 +57,8 @@ using namespace NTransactionClient;
 using namespace NTabletClient;
 
 using NChunkClient::NProto::TMiscExt;
-using NTableClient::NProto::THunkChunkRefsExt;
 using NTableClient::NProto::TBoundaryKeysExt;
-
+using NTableClient::NProto::THunkChunkRefsExt;
 using NYT::FromProto;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -68,12 +74,14 @@ struct TProfilingCounters
     explicit TProfilingCounters(const TProfiler& profiler)
         : CopyChunkListIfSharedActionCount(profiler.Counter("/copy_chunk_list_if_shared/action_count"))
         , UpdateTabletStoresStoreCount(profiler.Counter("/update_tablet_stores/store_count"))
+        , UpdateTabletStoresHunkChunkCount(profiler.Counter("/update_tablet_stores/hunk_chunk_count"))
         , UpdateTabletStoresTime(profiler.TimeCounter("/update_tablet_stores/cumulative_time"))
         , CopyChunkListTime(profiler.TimeCounter("/copy_chunk_list_if_shared/cumulative_time"))
     { }
 
     const TCounter CopyChunkListIfSharedActionCount{};
     const TCounter UpdateTabletStoresStoreCount{};
+    const TCounter UpdateTabletStoresHunkChunkCount{};
     const TTimeCounter UpdateTabletStoresTime{};
     const TTimeCounter CopyChunkListTime{};
 };
@@ -85,9 +93,20 @@ class TTabletChunkManager
     , public TMasterAutomatonPart
 {
 public:
-    explicit TTabletChunkManager(TBootstrap* bootstrap)
+    TTabletChunkManager(
+        TBootstrap* bootstrap,
+        IInvokerPtr storesUpdateThrottlerInvoker)
         : TMasterAutomatonPart(bootstrap, EAutomatonThreadQueue::TabletManager)
+        , StoresUpdateThrottler_(CreateStoresUpdateThrottler(New<TStoresUpdateThrottlerConfig>()))
+        , StoresUpdateThrottlerInvoker_(std::move(storesUpdateThrottlerInvoker))
     { }
+
+    void Initialize() override
+    {
+        const auto& configManager = Bootstrap_->GetConfigManager();
+        configManager->SubscribeConfigChanged(
+            BIND_NO_PROPAGATE(&TTabletChunkManager::OnDynamicConfigChanged, MakeWeak(this)));
+    }
 
     void CopyChunkListsIfShared(
         TTableNode* table,
@@ -131,14 +150,14 @@ public:
         };
 
         std::variant<TChunkTreeStatistics, THunkChunkTreeStatistics> oldStatistics;
-        if (IsHunkRelatedChunkList(oldRootChunkList)) {
+        if (oldRootChunkList->IsHunkRelated()) {
             oldStatistics = oldRootChunkList->HunkStatistics();
         } else {
             oldStatistics = oldRootChunkList->Statistics();
         }
 
         if (oldRootChunkList->GetObjectRefCounter(/*flushUnrefs*/ true) > 1) {
-            auto updateChunkListStatisticsIncrementally = !IsHunkRelatedChunkList(oldRootChunkList);
+            auto updateChunkListStatisticsIncrementally = !oldRootChunkList->IsHunkRelated();
 
             auto* newRootChunkList = chunkManager->CreateChunkList(oldRootChunkList->GetKind());
             if (!updateChunkListStatisticsIncrementally) {
@@ -158,18 +177,17 @@ public:
                     {newTabletChunkList},
                     updateChunkListStatisticsIncrementally);
 
-                actionCount += IsHunkRelatedChunkList(newTabletChunkList)
+                actionCount += newTabletChunkList->IsHunkRelated()
                     ? newTabletChunkList->HunkStatistics().ChunkCount
                     : newTabletChunkList->Statistics().ChunkCount;
 
-                if (IsHunkRelatedChunkList(newTabletChunkList)) {
+                if (newTabletChunkList->IsHunkRelated()) {
                     if (newTabletChunkList->HunkStatistics() != oldTabletChunkList->HunkStatistics()) {
-                        YT_LOG_ALERT("Invalid tablet chunk list hunk statistics while copying root chunk list "
-                            "(TableId: %v, TabletIndex: %v, NewHunkStatistics: %v, OldHunkStatistics: %v)",
-                            table->GetId(),
-                            index,
-                            newTabletChunkList->HunkStatistics(),
-                            oldTabletChunkList->HunkStatistics());
+                        YT_TLOG_ALERT("Invalid tablet chunk list hunk statistics while copying root chunk list")
+                            .With("TableId", table->GetId())
+                            .With("TabletIndex", index)
+                            .With("NewHunkStatistics", newTabletChunkList->HunkStatistics())
+                            .With("OldHunkStatistics", oldTabletChunkList->HunkStatistics());
                     }
                 }
             }
@@ -187,14 +205,13 @@ public:
             oldRootChunkList->RemoveOwningNode(table);
 
             // NB: No need checking hunk root chunk list statistics because they are just copied as is.
-            if (!IsHunkRelatedChunkList(newRootChunkList)) {
+            if (!newRootChunkList->IsHunkRelated()) {
                 const auto& oldTypedStatistics = std::get<TChunkTreeStatistics>(oldStatistics);
                 if (!checkStatisticsMatch(newRootChunkList->Statistics(), oldTypedStatistics)) {
-                    YT_LOG_ALERT("Invalid new root chunk list statistics "
-                        "(TableId: %v, NewRootChunkListStatistics: %v, Statistics: %v)",
-                        table->GetId(),
-                        newRootChunkList->Statistics(),
-                        oldTypedStatistics);
+                    YT_TLOG_ALERT("Invalid new root chunk list statistics")
+                        .With("TableId", table->GetId())
+                        .With("NewRootChunkListStatistics", newRootChunkList->Statistics())
+                        .With("Statistics", oldTypedStatistics);
                 }
             }
         } else {
@@ -204,17 +221,16 @@ public:
                     auto* newTabletChunkList = chunkManager->CloneTabletChunkList(oldTabletChunkList);
                     chunkManager->ReplaceChunkListChild(oldRootChunkList, index, newTabletChunkList);
 
-                    actionCount += IsHunkRelatedChunkList(newTabletChunkList)
+                    actionCount += newTabletChunkList->IsHunkRelated()
                         ? newTabletChunkList->HunkStatistics().ChunkCount
                         : newTabletChunkList->Statistics().ChunkCount;
 
-                    if (IsHunkRelatedChunkList(oldTabletChunkList)) {
+                    if (oldTabletChunkList->IsHunkRelated()) {
                         if (newTabletChunkList->HunkStatistics() != oldTabletChunkList->HunkStatistics()) {
-                            YT_LOG_ALERT("Invalid tablet chunk list hunk statistics "
-                                "(TableId: %v, OldHunkStatistics: %v, NewHunkStatistics: %v)",
-                                table->GetId(),
-                                oldTabletChunkList->HunkStatistics(),
-                                newTabletChunkList->HunkStatistics());
+                            YT_TLOG_ALERT("Invalid tablet chunk list hunk statistics")
+                                .With("TableId", table->GetId())
+                                .With("OldHunkStatistics", oldTabletChunkList->HunkStatistics())
+                                .With("NewHunkStatistics", newTabletChunkList->HunkStatistics());
                         }
                     } else {
                         // NB: ReplaceChunkListChild assumes that statistics are updated by caller.
@@ -229,23 +245,21 @@ public:
                 }
             }
 
-            if (IsHunkRelatedChunkList(oldRootChunkList)) {
+            if (oldRootChunkList->IsHunkRelated()) {
                 const auto& oldTypedStatistics = std::get<THunkChunkTreeStatistics>(oldStatistics);
                 if (oldRootChunkList->HunkStatistics() != oldTypedStatistics) {
-                    YT_LOG_ALERT("Invalid old root chunk list hunk statistics "
-                        "(TableId: %v, OldRootChunkListHunkStatistics: %v, HunkStatistics: %v)",
-                        table->GetId(),
-                        oldRootChunkList->HunkStatistics(),
-                        oldTypedStatistics);
+                    YT_TLOG_ALERT("Invalid old root chunk list hunk statistics")
+                        .With("TableId", table->GetId())
+                        .With("OldRootChunkListHunkStatistics", oldRootChunkList->HunkStatistics())
+                        .With("HunkStatistics", oldTypedStatistics);
                 }
             } else {
                 const auto& oldTypedStatistics = std::get<TChunkTreeStatistics>(oldStatistics);
                 if (!checkStatisticsMatch(oldRootChunkList->Statistics(), oldTypedStatistics)) {
-                    YT_LOG_ALERT("Invalid old root chunk list statistics "
-                        "(TableId: %v, OldRootChunkListStatistics: %v, Statistics: %v)",
-                        table->GetId(),
-                        oldRootChunkList->Statistics(),
-                        oldTypedStatistics);
+                    YT_TLOG_ALERT("Invalid old root chunk list statistics")
+                        .With("TableId", table->GetId())
+                        .With("OldRootChunkListStatistics", oldRootChunkList->Statistics())
+                        .With("Statistics", oldTypedStatistics);
                 }
             }
         }
@@ -284,6 +298,7 @@ public:
         const std::vector<TTabletId>& oldTabletIds,
         const std::vector<TOwningKeyBound>& oldPivotKeyBounds,
         const std::vector<TLegacyOwningKey>& newPivotKeys,
+        const std::vector<i64>& newTabletCumulativeDataWeights,
         const THashSet<TStoreId>& oldEdenStoreIds) override
     {
         const auto& chunkManager = Bootstrap_->GetChunkManager();
@@ -348,16 +363,13 @@ public:
                             comparator.CompareKeyBounds(upperPivot, readRange.UpperLimit().KeyBound()) < 0)
                         {
                             if (!chunkView->GetTransactionId()) {
-                                YT_LOG_ALERT("Chunk view without transaction id is not fully inside its tablet "
-                                    "(ChunkViewId: %v, UnderlyingTreeId: %v, "
-                                    "EffectiveLowerLimit: %v, EffectiveUpperLimit: %v, "
-                                    "PivotKey: %v, NextPivotKey: %v)",
-                                    chunkView->GetId(),
-                                    chunkView->GetUnderlyingTree()->GetId(),
-                                    readRange.LowerLimit().KeyBound(),
-                                    readRange.UpperLimit().KeyBound(),
-                                    lowerPivot,
-                                    upperPivot);
+                                YT_TLOG_ALERT("Chunk view without transaction id is not fully inside its tablet")
+                                    .With("ChunkViewId", chunkView->GetId())
+                                    .With("UnderlyingTreeId", chunkView->GetUnderlyingTree()->GetId())
+                                    .With("EffectiveLowerLimit", readRange.LowerLimit().KeyBound())
+                                    .With("EffectiveUpperLimit", readRange.UpperLimit().KeyBound())
+                                    .With("PivotKey", lowerPivot)
+                                    .With("NextPivotKey", upperPivot);
                             }
 
                             auto newReadRange = MakeReadRangeForChunkView(
@@ -377,12 +389,10 @@ public:
                     } else if (IsPhysicalChunkType(chunkTree->GetType())) {
                         chunk = chunkTree->AsChunk();
                     } else {
-                        YT_LOG_ALERT(
-                            "Unexpected chunk tree kind encountered during reshard "
-                            "(TableId: %v, TabletId: %v, ChunkTreeId: %v)",
-                            table->GetId(),
-                            oldTabletIds[index - firstTabletIndex],
-                            chunkTree->GetId());
+                        YT_TLOG_ALERT("Unexpected chunk tree kind encountered during reshard")
+                            .With("TableId", table->GetId())
+                            .With("TabletId", oldTabletIds[index - firstTabletIndex])
+                            .With("ChunkTreeId", chunkTree->GetId());
                     }
 
                     chunksOrViews.push_back(chunkTree);
@@ -460,13 +470,12 @@ public:
                         TRange(oldPivotKeyBounds.begin(), std::prev(oldPivotKeyBounds.end())),
                         truncatedReadRange,
                         comparator);
-                    YT_LOG_ALERT_IF(
+                    YT_TLOG_ALERT_IF(
                         beginRelativeOldTabletIndex == endRelativeOldTabletIndex,
-                        "Chunk didn't belong to any of the old tablets during reshard "
-                        "(TableId: %v, ChunkId: %v, ReadRange: %v)",
-                        table->GetId(),
-                        chunk->GetId(),
-                        readRange);
+                        "Chunk didn't belong to any of the old tablets during reshard")
+                        .With("TableId", table->GetId())
+                        .With("ChunkId", chunk->GetId())
+                        .With("ReadRange", readRange);
 
                     for (int relativeOldTabletIndex = beginRelativeOldTabletIndex;
                         relativeOldTabletIndex < endRelativeOldTabletIndex;
@@ -530,7 +539,8 @@ public:
                         upperPivot,
                         comparator);
                 } catch (const std::exception& ex) {
-                    YT_LOG_ALERT(ex, "Failed to merge chunk view ranges");
+                    YT_TLOG_ALERT("Failed to merge chunk view ranges")
+                        .With(ex);
                 }
 
                 auto* newTabletChunkList = newTabletChunkLists[EChunkListContentType::Main][relativeIndex]->AsChunkList();
@@ -581,8 +591,8 @@ public:
 
             for (auto* chunkView : temporarilyReferencedChunkViews) {
                 if (objectManager->UnrefObject(chunkView) == 0) {
-                    YT_LOG_DEBUG("Temporarily referenced chunk view dropped during reshard (ChunkViewId: %v)",
-                        chunkView->GetId());
+                    YT_TLOG_DEBUG("Temporarily referenced chunk view dropped during reshard")
+                        .With("ChunkViewId", chunkView->GetId());
                 }
             }
         } else {
@@ -640,12 +650,22 @@ public:
                 objectManager->UnrefObject(newTabletChunkLists[EChunkListContentType::Hunk].back());
                 newTabletChunkLists[EChunkListContentType::Hunk].back() = newLastHunkTabletChunkList;
             } else {
+                YT_VERIFY(
+                    newTabletCumulativeDataWeights.empty() ||
+                    ssize(newTabletCumulativeDataWeights) == newTabletCount - oldTabletCount);
+
                 for (int index = oldTabletCount; index < newTabletCount; ++index) {
                     auto* newMainChunkList = chunkManager->CreateChunkList(EChunkListKind::OrderedDynamicTablet);
                     auto* newHunkChunkList = chunkManager->CreateChunkList(EChunkListKind::Hunk);
 
                     auto* tablet = newTablets[index]->As<TTablet>();
-                    SetLogicalRowCount(newMainChunkList, tablet->GetTrimmedRowCount());
+                    auto cumulativeDataWeight = newTabletCumulativeDataWeights.empty()
+                        ? 0
+                        : newTabletCumulativeDataWeights[index - oldTabletCount];
+                    InitializeOrderedTabletChunkListStatistics(
+                        newMainChunkList,
+                        tablet->GetTrimmedRowCount(),
+                        cumulativeDataWeight);
 
                     newTabletChunkLists[EChunkListContentType::Main].push_back(newMainChunkList);
                     newTabletChunkLists[EChunkListContentType::Hunk].push_back(newHunkChunkList);
@@ -722,6 +742,22 @@ public:
         newRootChunkList->AddOwningNode(hunkStorage);
     }
 
+    int ThrottleTabletStoresUpdate(
+        const std::string& bundleName,
+        ETabletStoresUpdateReason updateReason,
+        const std::vector<int>& storeCounts) override
+    {
+        YT_ASSERT_INVOKER_AFFINITY(StoresUpdateThrottlerInvoker_);
+
+        for (auto [index, storeCount] : Enumerate(storeCounts)) {
+            if (!StoresUpdateThrottler_->TryAcquire(bundleName, updateReason, storeCount)) {
+                return index;
+            }
+        }
+
+        return ssize(storeCounts);
+    }
+
     void PrepareUpdateTabletStores(
         TTablet* tablet,
         NProto::TReqUpdateTabletStores* request) override
@@ -773,7 +809,7 @@ public:
         }
     }
 
-    std::string CommitUpdateTabletStores(
+    NLogging::TLoggingTagList CommitUpdateTabletStores(
         TTablet* tablet,
         NTransactionServer::TTransaction* transaction,
         NProto::TReqUpdateTabletStores* request,
@@ -799,12 +835,12 @@ public:
 
         auto validateChunkAttach = [&] (TChunk* chunk) {
             if (!IsObjectAlive(chunk)) {
-                YT_LOG_ALERT("Attempt to attach a zombie chunk (ChunkId: %v)",
-                    chunk->GetId());
+                YT_TLOG_ALERT("Attempt to attach a zombie chunk")
+                    .With("ChunkId", chunk->GetId());
             }
             if (!IsJournalChunkType(chunk->GetType()) && chunk->HasParents()) {
-                YT_LOG_ALERT("Attempt to attach a chunk that already has a parent (ChunkId: %v)",
-                    chunk->GetId());
+                YT_TLOG_ALERT("Attempt to attach a chunk that already has a parent")
+                    .With("ChunkId", chunk->GetId());
             }
         };
 
@@ -823,12 +859,11 @@ public:
                 chunksToAttach.push_back(chunk);
             } else if (IsDynamicTabletStoreType(type)) {
                 if (IsDynamicStoreReadEnabled(table, GetDynamicConfig())) {
-                    YT_LOG_ALERT("Attempt to attach dynamic store to a table "
-                        "with readable dynamic stores (TableId: %v, TabletId: %v, StoreId: %v, Reason: %v)",
-                        table->GetId(),
-                        tablet->GetId(),
-                        storeId,
-                        updateReason);
+                    YT_TLOG_ALERT("Attempt to attach dynamic store to a table with readable dynamic stores")
+                        .With("TableId", table->GetId())
+                        .With("TabletId", tablet->GetId())
+                        .With("StoreId", storeId)
+                        .With("Reason", updateReason);
                 }
             } else {
                 YT_ABORT();
@@ -858,11 +893,10 @@ public:
                         : EObjectType::OrderedDynamicTabletStore);
                 auto* dynamicStore = CreateDynamicStore(tablet, storeId);
                 chunksToAttach.push_back(dynamicStore);
-                YT_LOG_DEBUG("Dynamic store attached to tablet during flush "
-                    "(TableId: %v, TabletId: %v, StoreId: %v)",
-                    table->GetId(),
-                    tablet->GetId(),
-                    storeId);
+                YT_TLOG_DEBUG("Dynamic store attached to tablet during flush")
+                    .With("TableId", table->GetId())
+                    .With("TabletId", tablet->GetId())
+                    .With("StoreId", storeId);
             }
         }
 
@@ -936,14 +970,12 @@ public:
 
             // +2 is due to that the accounting is not very precise at the node part.
             if (allDynamicStores.size() > NTabletNode::DynamicStoreCountLimit + 2) {
-                YT_LOG_ALERT("Too many dynamic stores in ordered tablet chunk list "
-                    "(TableId: %v, TabletId: %v, ChunkListId: %v, DynamicStoreCount: %v, "
-                    "Limit: %v)",
-                    table->GetId(),
-                    tablet->GetId(),
-                    tabletChunkList->GetId(),
-                    allDynamicStores.size(),
-                    NTabletNode::DynamicStoreCountLimit + 2);
+                YT_TLOG_ALERT("Too many dynamic stores in ordered tablet chunk list")
+                    .With("TableId", table->GetId())
+                    .With("TabletId", tablet->GetId())
+                    .With("ChunkListId", tabletChunkList->GetId())
+                    .With("DynamicStoreCount", allDynamicStores.size())
+                    .With("Limit", NTabletNode::DynamicStoreCountLimit + 2);
             }
 
             chunkManager->DetachFromChunkList(
@@ -973,6 +1005,21 @@ public:
         }
 
         AttachChunksToTablet(tablet, hunkChunksToAttach);
+
+        // Hunk chunks may have been detached from the tablet concurrently (e.g. by bulk insert overwrite).
+        std::erase_if(hunkChunksToDetach, [&] (TChunkTreeRawPtr chunk) {
+            if (HasParent(chunk, GetTabletChildParent(tablet, chunk))) {
+                return false;
+            }
+            YT_LOG_ALERT("Hunk chunk to detach does not belong to tablet; skipped "
+                "(TableId: %v, TabletId: %v, ChunkId: %v, UpdateReason: %v)",
+                table->GetId(),
+                tablet->GetId(),
+                chunk->GetId(),
+                updateReason);
+            return true;
+        });
+
         DetachChunksFromTablet(
             tablet,
             hunkChunksToDetach,
@@ -1006,19 +1053,29 @@ public:
         }
 
         counters->UpdateTabletStoresStoreCount.Increment(chunksToAttach.size() + chunksOrViewsToDetach.size());
+        counters->UpdateTabletStoresHunkChunkCount.Increment(hunkChunksToAttach.size() + hunkChunksToDetach.size());
 
-        return Format("AttachedChunkIds: %v, DetachedChunkOrViewIds: %v, "
-            "AttachedHunkChunkIds: %v, DetachedHunkChunkIds: %v, "
-            "AttachedRowCount: %v, DetachedRowCount: %v",
-            MakeFormattableView(chunksToAttach, TObjectIdFormatter()),
-            MakeFormattableView(chunksOrViewsToDetach, TObjectIdFormatter()),
-            MakeFormattableView(hunkChunksToAttach, TObjectIdFormatter()),
-            MakeFormattableView(hunkChunksToDetach, TObjectIdFormatter()),
-            attachedRowCount,
-            detachedRowCount);
+        if (request->throttle_at_master() && IsLeader()) {
+            auto bundle = table->GetTabletCellBundle();
+            BIND(&IStoresUpdateThrottler::Acquire, StoresUpdateThrottler_)
+                .Via(StoresUpdateThrottlerInvoker_)
+                .Run(
+                    bundle ? bundle->GetName() : "",
+                    updateReason,
+                    ssize(chunksToAttach));
+        }
+
+        return NLogging::TLoggingTagList()
+            .With("AttachedChunkIds", MakeFormattableView(chunksToAttach, TObjectIdFormatter()))
+            .With("DetachedChunkOrViewIds", MakeFormattableView(chunksOrViewsToDetach, TObjectIdFormatter()))
+            .With("AttachedHunkChunkIds", MakeFormattableView(hunkChunksToAttach, TObjectIdFormatter()))
+            .With("DetachedHunkChunkIds", MakeFormattableView(hunkChunksToDetach, TObjectIdFormatter()))
+            .With("AttachedRowCount", attachedRowCount)
+            .With("DetachedRowCount", detachedRowCount)
+            .With("UpdateReason", updateReason);
     }
 
-    std::string CommitUpdateHunkTabletStores(
+    NLogging::TLoggingTagList CommitUpdateHunkTabletStores(
         THunkTablet* tablet,
         NProto::TReqUpdateHunkTabletStores* request) override
     {
@@ -1030,12 +1087,10 @@ public:
             auto chunkId = FromProto<NChunkClient::TSessionId>(storeToAdd.session_id()).ChunkId;
             auto* chunk = chunkManager->FindChunk(chunkId);
             if (!IsObjectAlive(chunk)) {
-                YT_LOG_ALERT(
-                    "Requested to attach dead chunk to hunk tablet; ignored "
-                    "(ChunkId: %v, HunkStorageId: %v, TableId: %v)",
-                    chunk->GetId(),
-                    tablet->GetId(),
-                    tablet->GetOwner()->GetId());
+                YT_TLOG_ALERT("Requested to attach dead chunk to hunk tablet; ignored")
+                    .With("ChunkId", chunk->GetId())
+                    .With("HunkStorageId", tablet->GetId())
+                    .With("TableId", tablet->GetOwner()->GetId());
                 continue;
             }
 
@@ -1050,12 +1105,10 @@ public:
             auto chunkId = FromProto<TChunkId>(storeToRemove.store_id());
             auto* chunk = chunkManager->FindChunk(chunkId);
             if (!IsObjectAlive(chunk)) {
-                YT_LOG_ALERT(
-                    "Requested to detach dead chunk from hunk tablet; ignored "
-                    "(ChunkId: %v, TabletId: %v, HunkStorageId: %v)",
-                    chunk->GetId(),
-                    tablet->GetId(),
-                    tablet->GetOwner()->GetId());
+                YT_TLOG_ALERT("Requested to detach dead chunk from hunk tablet; ignored")
+                    .With("ChunkId", chunk->GetId())
+                    .With("TabletId", tablet->GetId())
+                    .With("HunkStorageId", tablet->GetOwner()->GetId());
                 continue;
             }
 
@@ -1069,12 +1122,10 @@ public:
             auto chunkId = FromProto<TChunkId>(chunkToMarkSealable.store_id());
             auto* chunk = chunkManager->GetChunk(chunkId);
             if (!IsObjectAlive(chunk)) {
-                YT_LOG_ALERT(
-                    "Requested to mark dead chunk as sealable; ignored "
-                    "(ChunkId: %v, TabletId: %v, HunkStorageId: %v)",
-                    chunk->GetId(),
-                    tablet->GetId(),
-                    tablet->GetOwner()->GetId());
+                YT_TLOG_ALERT("Requested to mark dead chunk as sealable; ignored")
+                    .With("ChunkId", chunk->GetId())
+                    .With("TabletId", tablet->GetId())
+                    .With("HunkStorageId", tablet->GetOwner()->GetId());
                 continue;
             }
 
@@ -1093,13 +1144,13 @@ public:
             chunkManager->ScheduleChunkRequisitionUpdate(chunk);
         }
 
-        return Format("AddedChunkIds: %v, RemovedChunkIds: %v, MarkSealableChunkIds: %v)",
-            MakeFormattableView(chunksToAdd, TObjectIdFormatter()),
-            MakeFormattableView(chunksToRemove, TObjectIdFormatter()),
-            MakeFormattableView(chunksToMarkSealable, TObjectIdFormatter()));
+        return NLogging::TLoggingTagList()
+            .With("AddedChunkIds", MakeFormattableView(chunksToAdd, TObjectIdFormatter()))
+            .With("RemovedChunkIds", MakeFormattableView(chunksToRemove, TObjectIdFormatter()))
+            .With("MarkSealableChunkIds", MakeFormattableView(chunksToMarkSealable, TObjectIdFormatter()));
     }
 
-    void MakeTableDynamic(NTableServer::TTableNode* table) override
+    void MakeTableDynamic(NTableServer::TTableNode* table, i64 cumulativeDataWeight) override
     {
         auto* oldChunkList = table->GetChunkList();
         auto* oldHunkChunkList = table->GetHunkChunkList();
@@ -1136,7 +1187,10 @@ public:
             tabletChunkList->SetPivotKey(EmptyKey());
         } else {
             auto* tablet = table->Tablets()[0]->As<TTablet>();
-            SetLogicalRowCount(tabletChunkList, tablet->GetTrimmedRowCount());
+            InitializeOrderedTabletChunkListStatistics(
+                tabletChunkList,
+                tablet->GetTrimmedRowCount(),
+                cumulativeDataWeight);
         }
         chunkManager->AttachToChunkList(newChunkList, {tabletChunkList});
 
@@ -1253,11 +1307,10 @@ public:
         YT_VERIFY(tablet->GetState() == ETabletState::Unmounted);
 
         if (!maxClipTimestamp) {
-            YT_LOG_ALERT(
-                "Attempted to clip table by null timestamp (TableId: %v, TabletId: %v, IsBackup: %v)",
-                tablet->GetTable()->GetId(),
-                tablet->GetId(),
-                isBackup);
+            YT_TLOG_ALERT("Attempted to clip table by null timestamp")
+                .With("TableId", tablet->GetTable()->GetId())
+                .With("TabletId", tablet->GetId())
+                .With("IsBackup", isBackup);
         }
 
         bool needFlatten = false;
@@ -1290,10 +1343,10 @@ public:
                 auto miscExt = chunk->ChunkMeta()->FindExtension<TMiscExt>();
                 if (miscExt) {
                     if (miscExt->has_min_timestamp()) {
-                        minTimestamp = miscExt->min_timestamp();
+                        minTimestamp = FromProto<NTransactionClient::TTimestamp>(miscExt->min_timestamp());
                     }
                     if (miscExt->has_max_timestamp()) {
-                        maxTimestamp = miscExt->max_timestamp();
+                        maxTimestamp = FromProto<NTransactionClient::TTimestamp>(miscExt->max_timestamp());
                     }
                 }
             };
@@ -1395,20 +1448,20 @@ public:
             }
         }
 
-        std::vector<TChunkTreeRawPtr> hunkChunksToAttach;
-        auto attachHunkChunks = [&] (TChunk* chunk) {
+        std::vector<TChunkTreeRawPtr> referencedHunkChunks;
+        auto collectReferencedHunkChunks = [&] (TChunk* chunk) {
             auto hunkChunks = GetReferencedHunkChunks(chunk);
-            if (!hunkChunks.empty()) {
-                YT_VERIFY(std::ssize(hunkChunks) == 1);
-                hunkChunksToAttach.push_back(hunkChunks[0]);
-            }
+            referencedHunkChunks.insert(
+                referencedHunkChunks.end(),
+                hunkChunks.begin(),
+                hunkChunks.end());
         };
 
         for (auto store : storesToAttach) {
             switch (store->GetType()) {
                 case EObjectType::Chunk:
                 case EObjectType::ErasureChunk: {
-                    attachHunkChunks(store->AsChunk());
+                    collectReferencedHunkChunks(store->AsChunk());
                     break;
                 }
 
@@ -1418,12 +1471,23 @@ public:
                     YT_VERIFY(
                         underlyingTree->GetType() == EObjectType::Chunk ||
                         underlyingTree->GetType() == EObjectType::ErasureChunk);
-                    attachHunkChunks(underlyingTree->AsChunk());
+                    collectReferencedHunkChunks(underlyingTree->AsChunk());
                     break;
                 }
 
                 default:
                     YT_ABORT();
+            }
+        }
+
+        SortUnique(referencedHunkChunks, TObjectIdComparer());
+
+        auto* hunkChunkList = tablet->GetHunkChunkList();
+        std::vector<TChunkTreeRawPtr> hunkChunksToAttach;
+        hunkChunksToAttach.reserve(referencedHunkChunks.size());
+        for (auto hunkChunk : referencedHunkChunks) {
+            if (!hunkChunkList->HasChild(hunkChunk)) {
+                hunkChunksToAttach.push_back(hunkChunk);
             }
         }
 
@@ -1436,7 +1500,6 @@ public:
         chunkManager->AttachToChunkList(chunkList, storesToAttach);
 
         if (!hunkChunksToAttach.empty()) {
-            auto* hunkChunkList = tablet->GetHunkChunkList();
             chunkManager->AttachToChunkList(hunkChunkList, hunkChunksToAttach);
         }
 
@@ -1484,6 +1547,9 @@ public:
     }
 
 private:
+    const IStoresUpdateThrottlerPtr StoresUpdateThrottler_;
+    const IInvokerPtr StoresUpdateThrottlerInvoker_;
+
     using TProfilerKey = std::tuple<std::optional<ETabletStoresUpdateReason>, std::string, bool>;
     THashMap<TProfilerKey, TProfilingCounters> Counters_;
 
@@ -1500,7 +1566,7 @@ private:
         }
 
         auto* table = owner->As<TTableNode>();
-        const auto& cellBundle = table->TabletCellBundle();
+        auto cellBundle = table->GetTabletCellBundle();
         if (!cellBundle) {
             return &nullCounters;
         }
@@ -1535,6 +1601,13 @@ private:
         return Bootstrap_->GetConfigManager()->GetConfig()->TabletManager;
     }
 
+    void OnDynamicConfigChanged(const TDynamicClusterConfigPtr& /*oldConfig*/)
+    {
+        BIND(&IStoresUpdateThrottler::Reconfigure, StoresUpdateThrottler_)
+            .Via(StoresUpdateThrottlerInvoker_)
+            .Run(GetDynamicConfig()->StoresUpdateThrottler);
+    }
+
     TError CheckAllDynamicStoresFlushed(TTablet* tablet)
     {
         auto makeError = [&] (const TDynamicStore* dynamicStore) {
@@ -1546,8 +1619,8 @@ private:
                 "dynamic store %v in tablet %v is not flushed",
                 dynamicStore->GetId(),
                 tablet->GetId())
-                << TErrorAttribute("original_table_path", originalTablePath)
-                << TErrorAttribute("table_id", tablet->GetTable()->GetId());
+                .With("original_table_path", originalTablePath)
+                .With("table_id", tablet->GetTable()->GetId());
         };
 
         auto children = EnumerateStoresInChunkTree(tablet->GetChunkList());
@@ -1583,10 +1656,10 @@ private:
                 "Cannot backup ordered tablet %v since it is trimmed "
                 "beyond cutoff row index",
                 tablet->GetId())
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("table_id", tablet->GetTable()->GetId())
-                << TErrorAttribute("trimmed_row_count", tablet->GetTrimmedRowCount())
-                << TErrorAttribute("cutoff_row_index", descriptor.CutoffRowIndex);
+                .With("tablet_id", tablet->GetId())
+                .With("table_id", tablet->GetTable()->GetId())
+                .With("trimmed_row_count", tablet->GetTrimmedRowCount())
+                .With("cutoff_row_index", descriptor.CutoffRowIndex);
         }
 
         if (!descriptor.NextDynamicStoreId) {
@@ -1602,8 +1675,8 @@ private:
                             "Cannot backup ordered tablet %v since it is not fully flushed "
                             "and its origin was not mounted during the backup",
                             tablet->GetId())
-                            << TErrorAttribute("tablet_id", tablet->GetId())
-                            << TErrorAttribute("table_id", tablet->GetTable()->GetId());
+                            .With("tablet_id", tablet->GetId())
+                            .With("table_id", tablet->GetTable()->GetId());
                     }
                 }
             }
@@ -1620,14 +1693,15 @@ private:
 
         auto wrapInternalErrorAndLog = [&] (TError innerError) {
             innerError = innerError
-                << TErrorAttribute("table_id", tablet->GetTable()->GetId())
-                << TErrorAttribute("tablet_id", tablet->GetId())
-                << TErrorAttribute("cutoff_row_index", descriptor.CutoffRowIndex)
-                << TErrorAttribute("next_dynamic_store_id", descriptor.NextDynamicStoreId)
-                << TErrorAttribute("cutoff_child_index", cutoffChildIndex);
+                .With("table_id", tablet->GetTable()->GetId())
+                .With("tablet_id", tablet->GetId())
+                .With("cutoff_row_index", descriptor.CutoffRowIndex)
+                .With("next_dynamic_store_id", descriptor.NextDynamicStoreId)
+                .With("cutoff_child_index", cutoffChildIndex);
             auto error = TError("Cannot backup ordered tablet due to an internal error")
-                << innerError;
-            YT_LOG_ALERT(error, "Failed to perform backup cutoff");
+                .With(innerError);
+            YT_TLOG_ALERT("Failed to perform backup cutoff")
+                .With(error);
             return error;
         };
 
@@ -1641,7 +1715,7 @@ private:
                 if (cumulativeRowCount > descriptor.CutoffRowIndex) {
                     auto error = TError("Cumulative row count at the cutoff dynamic store "
                         "is greater than expected")
-                        << TErrorAttribute("cumulative_row_count", cumulativeRowCount);
+                        .With("cumulative_row_count", cumulativeRowCount);
                     return wrapInternalErrorAndLog(error);
                 }
 
@@ -1651,7 +1725,7 @@ private:
 
             if (cumulativeRowCount > descriptor.CutoffRowIndex) {
                 auto error = TError("Cumulative row count exceeded cutoff row index")
-                    << TErrorAttribute("cumulative_row_count", cumulativeRowCount);
+                    .With("cumulative_row_count", cumulativeRowCount);
                 return wrapInternalErrorAndLog(error);
             }
 
@@ -1666,7 +1740,7 @@ private:
             !hitDynamicStore)
         {
             auto error = TError("Row count at final cutoff child index does not match cutoff row index")
-                << TErrorAttribute("cumulative_row_count", statistics.GetPreviousSum(cutoffChildIndex).RowCount);
+                .With("cumulative_row_count", statistics.GetPreviousSum(cutoffChildIndex).RowCount);
             return wrapInternalErrorAndLog(error);
         }
 
@@ -1716,13 +1790,9 @@ private:
             return;
         }
 
-        YT_LOG_DEBUG(
-            "Detaching unneeded dynamic stores from tablet after backup "
-            "(TabletId: %v, DynamicStoreIds: %v)",
-            tablet->GetId(),
-            MakeFormattableView(
-                storesToDetach,
-                TObjectIdFormatter{}));
+        YT_TLOG_DEBUG("Detaching unneeded dynamic stores from tablet after backup")
+            .With("TabletId", tablet->GetId())
+            .With("DynamicStoreIds", MakeFormattableView(storesToDetach, TObjectIdFormatter{}));
 
         CopyChunkListsIfShared(tablet->GetTable(), tablet->GetIndex(), tablet->GetIndex());
         chunkList = tablet->GetChunkList();
@@ -1757,8 +1827,7 @@ private:
         } else {
             if (GetParentCount(child) == 1) {
                 auto* parent = GetUniqueParent(child);
-                YT_VERIFY(parent->GetType() == EObjectType::ChunkList);
-                return parent;
+                return parent->AsChunkList();
             }
             return tablet->GetChunkList();
         }
@@ -1767,7 +1836,7 @@ private:
     void PruneEmptySubtabletChunkList(TChunkList* chunkList)
     {
         while (chunkList->GetKind() == EChunkListKind::SortedDynamicSubtablet && chunkList->Children().empty()) {
-            auto* parent = GetUniqueParent(chunkList);
+            auto* parent = GetUniqueParent(chunkList)->AsChunkList();
             const auto& chunkManager = Bootstrap_->GetChunkManager();
             chunkManager->DetachFromChunkList(parent, {chunkList}, EChunkDetachPolicy::SortedTablet);
             chunkList = parent;
@@ -1788,9 +1857,9 @@ private:
             auto hunkChunkId = FromProto<TChunkId>(protoRef.chunk_id());
             auto* hunkChunk = chunkManager->FindChunk(hunkChunkId);
             if (!IsObjectAlive(hunkChunk)) {
-                YT_LOG_ALERT("Store references a non-existing hunk chunk (StoreId: %v, HunkChunkId: %v)",
-                    storeChunk->GetId(),
-                    hunkChunkId);
+                YT_TLOG_ALERT("Store references a non-existing hunk chunk")
+                    .With("StoreId", storeChunk->GetId())
+                    .With("HunkChunkId", hunkChunkId);
                 continue;
             }
             hunkChunks.push_back(hunkChunk);
@@ -2090,8 +2159,8 @@ private:
             auto firstDynamicStore = tabletChunkList->Children()[firstDynamicStoreIndex];
             if (firstDynamicStore->GetId() != storeId) {
                 THROW_ERROR_EXCEPTION("Attempted to flush ordered dynamic store out of order")
-                    << TErrorAttribute("first_dynamic_store_id", firstDynamicStore->GetId())
-                    << TErrorAttribute("flushed_store_id", storeId);
+                    .With("first_dynamic_store_id", firstDynamicStore->GetId())
+                    .With("flushed_store_id", storeId);
             }
         }
     }
@@ -2124,10 +2193,21 @@ private:
         chunkManager->AttachToChunkList(hunkChunkList, hunkChildren);
     }
 
-    void SetLogicalRowCount(TChunkList* chunkList, i64 trimmedRowCount)
+    //! Pretends that the freshly created chunk list of an ordered tablet already had
+    //! |trimmedRowCount| rows, all of which have been trimmed away, of total |cumulativeDataWeight| weight.
+    //! This way row indexes and the $cumulative_data_weight
+    //! column of the tablet start from the given offsets rather than from zero.
+    void InitializeOrderedTabletChunkListStatistics(
+        TChunkList* chunkList,
+        i64 trimmedRowCount,
+        i64 cumulativeDataWeight)
     {
         YT_VERIFY(chunkList->Children().empty());
-        YT_VERIFY(!IsHunkRelatedChunkList(chunkList));
+        YT_VERIFY(!chunkList->IsHunkRelated());
+
+        // NB: Cumulative statistics do not track data weight, so it is enough
+        // to adjust the aggregated statistics of the chunk list.
+        chunkList->Statistics().LogicalDataWeight = cumulativeDataWeight;
 
         if (trimmedRowCount == 0) {
             return;
@@ -2142,9 +2222,11 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-ITabletChunkManagerPtr CreateTabletChunkManager(TBootstrap* bootstrap)
+ITabletChunkManagerPtr CreateTabletChunkManager(
+    TBootstrap* bootstrap,
+    IInvokerPtr storesUpdateThrottlerInvoker)
 {
-    return New<TTabletChunkManager>(bootstrap);
+    return New<TTabletChunkManager>(bootstrap, std::move(storesUpdateThrottlerInvoker));
 }
 
 ////////////////////////////////////////////////////////////////////////////////

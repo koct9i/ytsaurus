@@ -25,6 +25,8 @@ namespace {
 using NCodegen::EExecutionBackend;
 using NCodegen::EOptimizationLevel;
 
+using namespace NTableClient;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 DEFINE_ENUM(ESubqueryProfileMode,
@@ -205,9 +207,9 @@ void TSchemaProfiler::Profile(const TTableSchemaPtr& tableSchema)
             NAst::TReferenceHarvester(&referencedColumns).Visit(
                 std::get<NAst::TExpressionPtr>(parsedExpression->AstHead.Ast));
 
-            for (int index = 0; index < std::ssize(columns); ++index) {
-                if (referencedColumns.contains(columns[index].Name())) {
-                    Fold(index);
+            for (int referencedIndex = 0; referencedIndex < std::ssize(columns); ++referencedIndex) {
+                if (referencedColumns.contains(columns[referencedIndex].Name())) {
+                    Fold(referencedIndex);
                 }
             }
         }
@@ -263,14 +265,22 @@ void TSchemaProfiler::AddLogicalType(const TLogicalType& logicalType, llvm::Fold
             addFields(logicalType.AsVariantStructTypeRef().GetFields());
             break;
 
-        case ELogicalMetatype::Decimal:
-            break;
         case ELogicalMetatype::Simple:
             id->AddInteger(ToUnderlying(logicalType.AsSimpleTypeRef().GetElement()));
             break;
+
         case ELogicalMetatype::Dict:
             AddLogicalType(*logicalType.AsDictTypeRef().GetKey(), id);
             AddLogicalType(*logicalType.AsDictTypeRef().GetValue(), id);
+            break;
+
+        // NB: Physical layout of the aggregate state depends on both the function and the argument type.
+        case ELogicalMetatype::AggregateState:
+            id->AddInteger(ToUnderlying(logicalType.AsAggregateStateTypeRef().GetFunction()));
+            AddLogicalType(*logicalType.AsAggregateStateTypeRef().GetArgumentType(), id);
+            break;
+
+        case ELogicalMetatype::Decimal:
             break;
     }
 }
@@ -1203,15 +1213,9 @@ size_t TExpressionProfiler::Profile(
     }
     fragments->DebugInfos.emplace_back(caseExpr, argIds, defaultExprId, optionalOperandId);
 
-    std::optional<EValueType> optionalOperandType;
-    if (caseExpr->OptionalOperand) {
-        optionalOperandType = caseExpr->OptionalOperand->GetWireType();
-    }
-
     fragments->Items.emplace_back(
         MakeCodegenCaseExpr(
             optionalOperandId,
-            optionalOperandType,
             std::move(whenThenExpressionIds),
             defaultExprId,
             caseExpr->GetWireType(),
@@ -1419,8 +1423,8 @@ size_t TExpressionProfiler::Profile(
 
         if (type->GetMetatype() != ELogicalMetatype::List) {
             THROW_ERROR_EXCEPTION("Unexpected type instead of list")
-                << TErrorAttribute("column_name", name)
-                << TErrorAttribute("actual_type", type->GetMetatype());
+                .With("column_name", name)
+                .With("actual_type", type->GetMetatype());
         }
 
         nestedColumns.emplace_back(name, type->GetElement());
@@ -1602,6 +1606,57 @@ size_t TExpressionProfiler::Profile(
         MakeCodegenFragmentBodies(&codegenSource, fragmentInfos);
     }
 
+    bool considerLimit = !subqueryExpr->OrderClause &&
+        (subqueryExpr->Offset != 0 || subqueryExpr->Limit < UnorderedReadHint);
+    Fold(considerLimit);
+
+    int offsetId = -1;
+    int limitId = -1;
+    if (considerLimit || subqueryExpr->OrderClause) {
+        offsetId = Variables_->AddOpaque<i64>(subqueryExpr->Offset);
+        limitId = Variables_->AddOpaque<i64>(subqueryExpr->Limit);
+    }
+
+    if (auto orderClause = subqueryExpr->OrderClause.Get()) {
+        Fold(EFoldingObjectType::OrderOp);
+
+        auto orderExprIds = std::vector<size_t>();
+        auto orderColumnTypes = std::vector<EValueType>();
+        auto isDesc = std::vector<bool>();
+        auto orderExprFragments = TExpressionFragments();
+        id.AddInteger(orderClause->OrderItems.size());
+        for (const auto& orderItem : orderClause->OrderItems) {
+            orderExprIds.push_back(Profile(orderItem.Expression, &nestedReferenceProvider, &orderExprFragments));
+            orderColumnTypes.push_back(orderItem.Expression->GetWireType());
+            isDesc.push_back(orderItem.Descending);
+            id.AddInteger(orderExprIds.back());
+            id.AddBoolean(orderItem.Descending);
+        }
+
+        auto orderFragmentInfos = orderExprFragments.ToFragmentInfos("nestedOrder");
+        orderExprFragments.DumpArgs(orderExprIds);
+
+        auto schemaTypes = GetTypesFromSchema(*nestedSchema);
+        for (auto type : schemaTypes) {
+            Fold(static_cast<ui8>(type));
+        }
+
+        currentSlot = MakeCodegenNestedOrderOp(
+            &codegenSource,
+            &slotCount,
+            currentSlot,
+            orderFragmentInfos,
+            std::move(orderExprIds),
+            std::move(orderColumnTypes),
+            std::move(schemaTypes),
+            std::move(isDesc),
+            ComparerManager_,
+            offsetId,
+            limitId);
+
+        MakeCodegenFragmentBodies(&codegenSource, orderFragmentInfos);
+    }
+
     if (auto projectClause = subqueryExpr->ProjectClause.Get()) {
         Fold(EFoldingObjectType::ProjectOp);
 
@@ -1626,6 +1681,10 @@ size_t TExpressionProfiler::Profile(
         MakeCodegenFragmentBodies(&codegenSource, projectExprInfos);
 
         nestedSchema = projectClause->GetTableSchema();
+    }
+
+    if (considerLimit) {
+        currentSlot = MakeCodegenOffsetLimiterOp(&codegenSource, &slotCount, currentSlot, offsetId, limitId);
     }
 
     auto boundExprIds = std::vector<size_t>();
@@ -1731,7 +1790,8 @@ public:
         size_t* slotCount,
         size_t inputSlot,
         TTableSchemaPtr schema,
-        bool mergeMode);
+        bool mergeMode,
+        const TJoinProfilerRegistry& joinProfilerRegistry);
 
     void Profile(
         TCodegenSource* codegenSource,
@@ -1742,14 +1802,15 @@ public:
     void Profile(
         TCodegenSource* codegenSource,
         const TConstFrontQueryPtr& query,
-        size_t* slotCount);
+        size_t* slotCount,
+        const TJoinProfilerRegistry& joinProfilerRegistry);
 
 private:
     void ProfileHierarchicalJoin(
         TCodegenSource* codegenSource,
         size_t* slotCount,
-        size_t& currentSlot,
-        TTableSchemaPtr& schema,
+        size_t* currentSlot,
+        TTableSchemaPtr* schema,
         const TConstHierarchicalJoinClausePtr& hierarchicalJoin,
         const TJoinProfilerRegistry& joinProfilerRegistry);
 
@@ -1762,6 +1823,19 @@ protected:
 };
 
 ////////////////////////////////////////////////////////////////////////////////
+
+// If the query uses `WITH TOTALS` together with `LIMIT`, but without `ORDER BY`,
+// we should account totals on the query coordinator side,
+// since the coordinator decides which rows will be included into the response.
+// When totals are calculated at the coordinator, the coordinator should also finalize aggregated.
+bool ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator(
+    const TConstBaseQueryPtr& query,
+    bool allowUnorderedGroupByWithLimit)
+{
+    return query->GroupClause &&
+        query->GroupClause->TotalsMode != ETotalsMode::None &&
+        query->GetScanOrder(allowUnorderedGroupByWithLimit) == EScanOrder::Ordered;
+}
 
 class TGroupByStreamManager
 {
@@ -1840,15 +1914,6 @@ private:
     // COMPAT(sabdenovch)
     const bool AllowUnorderedGroupByWithLimit_;
 
-    // If the query uses `WITH TOTALS` together with `LIMIT`, but without `ORDER BY`,
-    // we should account totals on the query coordinator side,
-    // since the coordinator decides which rows will be included into the response.
-    // When totals are calculated at the coordinator, the coordinator should also finalize aggregated.
-    bool ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator() const
-    {
-        return Query_->GroupClause->TotalsMode != ETotalsMode::None && Query_->GetScanOrder(AllowUnorderedGroupByWithLimit_) == EScanOrder::Ordered;
-    }
-
     // We should convert intermediates to deltas at the last stage of execution (query is final), since there will be no more groupings.
     // We can also convert intermediate to deltas if the query is disjoint (when the grouping key and the primary key are identical).
     void ConvertIntermediateToDelta(size_t* intermediate, size_t* delta) const
@@ -1915,7 +1980,7 @@ private:
             return;
         }
 
-        if (ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator()) {
+        if (ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator(Query_, AllowUnorderedGroupByWithLimit_)) {
             if (!FinalMode_) {
                 // Do nothing.
             } else {
@@ -1966,7 +2031,7 @@ private:
 
     void AddDeltaToAggregated(size_t* delta, size_t* aggregated) const
     {
-        if (!ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator()) {
+        if (!ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator(Query_, AllowUnorderedGroupByWithLimit_)) {
             *delta = MakeCodegenFinalizeOp(
                 CodegenSource_,
                 SlotCount_,
@@ -1989,7 +2054,7 @@ private:
             return;
         }
 
-        if (ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator()) {
+        if (ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator(Query_, AllowUnorderedGroupByWithLimit_)) {
             *aggregated = MakeCodegenFinalizeOp(
                 CodegenSource_,
                 SlotCount_,
@@ -2036,7 +2101,8 @@ void TQueryProfiler::Profile(
     size_t* slotCount,
     size_t inputSlot,
     TTableSchemaPtr schema,
-    bool mergeMode)
+    bool mergeMode,
+    const TJoinProfilerRegistry& joinProfilerRegistry)
 {
     Fold(ExecutionBackend_);
     Fold(OptimizationLevel_);
@@ -2048,6 +2114,7 @@ void TQueryProfiler::Profile(
 
     bool finalMode = query->IsFinal;
     bool exclusiveGroupKeyView = query->HasExclusiveGroupKeyView;
+    bool finalizeAggregatesAtCoordinator = ShouldFinalizeAggregatesAndAccountTotalsAtCoordinator(query, AllowUnorderedGroupByWithLimit_);
 
     Fold(EFoldingObjectType::FinalMode);
     Fold(finalMode);
@@ -2135,7 +2202,9 @@ void TQueryProfiler::Profile(
             }
 
             stateTypes.push_back(GetWireType(aggregateItem.StateType));
-            aggregatedTypes.push_back(GetWireType(aggregateItem.ResultType));
+            aggregatedTypes.push_back(GetWireType(finalizeAggregatesAtCoordinator
+                ? aggregateItem.StateType
+                : aggregateItem.ResultType));
         }
 
         auto fragmentInfos = expressionFragments.ToFragmentInfos("groupExpression");
@@ -2313,6 +2382,28 @@ void TQueryProfiler::Profile(
         MakeCodegenFragmentBodies(codegenSource, orderFragmentsInfos);
     }
 
+    if (auto derivedQuery = dynamic_cast<const TQuery*>(query.Get())) {
+        for (const auto& hierarchicalJoin : derivedQuery->HierarchicalJoinsAfterGroupBy) {
+            ProfileHierarchicalJoin(
+                codegenSource,
+                slotCount,
+                &aggregatedSlot,
+                &schema,
+                hierarchicalJoin,
+                joinProfilerRegistry);
+        }
+    } else if (auto derivedQuery = dynamic_cast<const TFrontQuery*>(query.Get())) {
+        for (const auto& hierarchicalJoin : derivedQuery->HierarchicalJoinsAfterGroupBy) {
+            ProfileHierarchicalJoin(
+                codegenSource,
+                slotCount,
+                &aggregatedSlot,
+                &schema,
+                hierarchicalJoin,
+                joinProfilerRegistry);
+        }
+    }
+
     if (auto projectClause = query->ProjectClause.Get()) {
         Fold(EFoldingObjectType::ProjectOp);
 
@@ -2389,7 +2480,9 @@ void TQueryProfiler::Profile(
                 }
 
                 for (const auto& item : query->GroupClause->AggregateItems) {
-                    aggregatedTypes.emplace_back(GetWireType(item.ResultType));
+                    aggregatedTypes.emplace_back(GetWireType(finalizeAggregatesAtCoordinator
+                        ? item.StateType
+                        : item.ResultType));
                 }
 
                 aggregatedSlot = MakeCodegenAddStreamOp(
@@ -2472,8 +2565,8 @@ i64 InferRowWeightWithNoStrings(const TTableSchemaPtr& schema)
 void TQueryProfiler::ProfileHierarchicalJoin(
     TCodegenSource* codegenSource,
     size_t* slotCount,
-    size_t& currentSlot,
-    TTableSchemaPtr& schema,
+    size_t* currentSlot,
+    TTableSchemaPtr* schema,
     const TConstHierarchicalJoinClausePtr& hierarchicalJoin,
     const TJoinProfilerRegistry& joinProfilerRegistry)
 {
@@ -2485,7 +2578,7 @@ void TQueryProfiler::ProfileHierarchicalJoin(
     int closurePtrIndex = Variables_->AddOpaque<THierarchicalJoinClosure*>(nullptr);
 
     auto buildDomainFragments = TExpressionFragments();
-    auto outerSchemaProvider = TReferenceProvider{schema, {}, nullptr};
+    auto outerSchemaProvider = TReferenceProvider{*schema, {}, nullptr};
     size_t buildDomainSubqueryExprId = TExpressionProfiler::Profile(
         buildDomainSubquery.Get(),
         &outerSchemaProvider,
@@ -2515,7 +2608,7 @@ void TQueryProfiler::ProfileHierarchicalJoin(
     });
 
     auto joiningSubqueryFragments = TExpressionFragments();
-    auto outerSchemaProviderForJoiningSubquery = TReferenceProvider{schema, {}, nullptr};
+    auto outerSchemaProviderForJoiningSubquery = TReferenceProvider{*schema, {}, nullptr};
     size_t joiningSubqueryExprId = TExpressionProfiler::Profile(
         hierarchicalJoin->JoiningSubquery.Get(),
         &outerSchemaProviderForJoiningSubquery,
@@ -2532,16 +2625,16 @@ void TQueryProfiler::ProfileHierarchicalJoin(
 
     auto primaryRowTypes = std::vector<EValueType>();
     {
-        for (const auto& column : schema->Columns()) {
+        for (const auto& column : (*schema)->Columns()) {
             primaryRowTypes.push_back(column.GetWireType());
         }
     }
 
     Fold(primaryRowTypes.size());
-    currentSlot = NHierarchicalJoin::MakeCodegenJoinOp(
+    *currentSlot = NHierarchicalJoin::MakeCodegenJoinOp(
         codegenSource,
         slotCount,
-        currentSlot,
+        *currentSlot,
         paramsIndex,
         buildDomainFragmentInfos,
         buildDomainSubqueryExprId,
@@ -2552,8 +2645,8 @@ void TQueryProfiler::ProfileHierarchicalJoin(
         joiningSubqueryExprId,
         joiningSubqueryFragmentInfos);
 
-    schema = hierarchicalJoin->GetTableSchema(*schema);
-    TSchemaProfiler::Profile(schema);
+    *schema = hierarchicalJoin->GetTableSchema(**schema);
+    TSchemaProfiler::Profile(*schema);
 }
 
 void TQueryProfiler::Profile(
@@ -2592,7 +2685,8 @@ void TQueryProfiler::Profile(
 
     auto joinGroups = GetJoinGroups(query->JoinClauses, schema);
     if (!joinGroups.empty()) {
-        YT_LOG_DEBUG("Join groups: [%v]", JoinToString(joinGroups));
+        YT_TLOG_DEBUG("Grouping joins")
+            .With("JoinGroups", JoinToString(joinGroups));
     }
 
     size_t joinIndex = 0;
@@ -2789,7 +2883,7 @@ void TQueryProfiler::Profile(
     auto savedSchemaBeforeWhereClause = schema;
 
     for (const auto& hierarchicalJoin : query->HierarchicalJoinsInWhereClause) {
-        ProfileHierarchicalJoin(codegenSource, slotCount, currentSlot, schema, hierarchicalJoin, joinProfilerRegistry);
+        ProfileHierarchicalJoin(codegenSource, slotCount, &currentSlot, &schema, hierarchicalJoin, joinProfilerRegistry);
     }
 
     if (whereClause && !IsTrue(whereClause)) {
@@ -2812,16 +2906,17 @@ void TQueryProfiler::Profile(
     schema = savedSchemaBeforeWhereClause;
 
     for (const auto& hierarchicalJoin : query->HierarchicalJoinsBeforeGroupBy) {
-        ProfileHierarchicalJoin(codegenSource, slotCount, currentSlot, schema, hierarchicalJoin, joinProfilerRegistry);
+        ProfileHierarchicalJoin(codegenSource, slotCount, &currentSlot, &schema, hierarchicalJoin, joinProfilerRegistry);
     }
 
-    Profile(codegenSource, query, slotCount, currentSlot, schema, /*mergeMode*/ false);
+    Profile(codegenSource, query, slotCount, currentSlot, schema, /*mergeMode*/ false, joinProfilerRegistry);
 }
 
 void TQueryProfiler::Profile(
     TCodegenSource* codegenSource,
     const TConstFrontQueryPtr& query,
-    size_t* slotCount)
+    size_t* slotCount,
+    const TJoinProfilerRegistry& joinProfilerRegistry)
 {
     Fold(ExecutionBackend_);
     Fold(OptimizationLevel_);
@@ -2848,7 +2943,7 @@ void TQueryProfiler::Profile(
         ExecutionBackend_);
 
     // Front query always perform merge.
-    Profile(codegenSource, query, slotCount, currentSlot, schema, /*mergeMode*/ true);
+    Profile(codegenSource, query, slotCount, currentSlot, schema, /*mergeMode*/ true, joinProfilerRegistry);
 }
 
 } // namespace
@@ -2904,7 +2999,7 @@ TCGQueryGenerator Profile(
     llvm::FoldingSetNodeID* id,
     TCGVariables* variables,
     const TJoinProfilerRegistry& joinProfilerRegistry,
-    TQueryFoldingProfilerOptions options,
+    const TQueryFoldingProfilerOptions& options,
     const TConstFunctionProfilerMapPtr& functionProfilers,
     const TConstAggregateProfilerMapPtr& aggregateProfilers,
     const NWebAssembly::TModuleBytecode& sdk)
@@ -2926,7 +3021,7 @@ TCGQueryGenerator Profile(
     if (auto derivedQuery = dynamic_cast<const TQuery*>(query.Get())) {
         profiler.Profile(&codegenSource, derivedQuery, &slotCount, joinProfilerRegistry);
     } else if (auto derivedQuery = dynamic_cast<const TFrontQuery*>(query.Get())) {
-        profiler.Profile(&codegenSource, derivedQuery, &slotCount);
+        profiler.Profile(&codegenSource, derivedQuery, &slotCount, joinProfilerRegistry);
     } else {
         YT_ABORT();
     }
