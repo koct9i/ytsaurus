@@ -733,3 +733,5 @@ items:
           href: draft/cluster-resource-management-memory-draft-24.md
         - name: Chunk management architecture (draft-25)
           href: draft/chunk-management-draft-25.md
+        - name: YT API reference (draft-26)
+          href: draft/yt-api-reference-draft-26.md
