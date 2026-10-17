@@ -735,3 +735,5 @@ items:
           href: draft/chunk-management-draft-25.md
         - name: YT API reference (draft-26)
           href: draft/yt-api-reference-draft-26.md
+        - name: Hunk chunks in dynamic tables (draft-27)
+          href: draft/hunk-chunks-draft-27.md
