@@ -19,6 +19,10 @@ The `yt` CLI does not read the `YT_USER` environment variable. When the CLI uses
 
 In addition to the access token, you need to specify the cluster to work with. To do this, you can specify the proxy server name in the `YT_PROXY` environment variable: `export YT_PROXY=<cluster-name>` or pass the proxy server name to each command individually via the `proxy` option, such as `--proxy <cluster-name>`.
 
+For persistent settings, use the shared Python SDK/CLI configuration file. By default it is `~/.yt/config` and you can override the path via `YT_CONFIG_PATH`.
+
+For more information about cluster connection settings see the [client library configuration](../../../api/python/userdoc.md#configuration).
+
 Below are some features of the CLI:
 
 - All underscores in command and option names were replaced by hyphens.
